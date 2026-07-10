@@ -15,6 +15,11 @@ walkdir = "2"
 flate2 = "1"
 filetime = "0.2"
 dirs = "6"
+age = "0.11"
+rusty-s3 = "0.7"
+ureq = "2"
+url = "2"
+gethostname = "1"
 
 [dev-dependencies]
 tempfile = "3"
