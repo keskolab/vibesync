@@ -1,3 +1,5 @@
+mod syncer;
+
 use tauri::{
     image::Image,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -24,6 +26,44 @@ fn detect_tools() -> Vec<codesync_engine::adapters::DetectedTool> {
 #[tauri::command]
 fn engine_version() -> &'static str {
     codesync_engine::VERSION
+}
+
+#[tauri::command]
+async fn get_status(app: tauri::AppHandle) -> Result<syncer::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = syncer::paths(&app)?;
+        syncer::status(&paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// Ensure a store exists (first run): writes the default local-folder config
+/// if none is present. Real backend selection wires into onboarding later.
+#[tauri::command]
+async fn configure_default_store(app: tauri::AppHandle) -> Result<syncer::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = syncer::paths(&app)?;
+        if syncer::load_config(&paths)?.is_none() {
+            syncer::save_config(&paths, &syncer::default_config()?)?;
+        }
+        syncer::status(&paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = syncer::paths(&app)?;
+        syncer::sync_now(&paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -130,7 +170,10 @@ pub fn run() {
             close_onboarding,
             show_popover,
             detect_tools,
-            engine_version
+            engine_version,
+            get_status,
+            configure_default_store,
+            sync_now
         ])
         .setup(|app| {
             // Menu bar app: no Dock icon.

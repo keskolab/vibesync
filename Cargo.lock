@@ -446,7 +446,9 @@ dependencies = [
 name = "codesync-app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "codesync-engine",
+ "dirs",
  "serde",
  "serde_json",
  "tauri",
