@@ -16,6 +16,10 @@ pub const EHOME_TOKEN: &str = "${EHOME}";
 pub struct Tokenizer {
     home: String,
     encoded_home: String,
+    /// Windows paths (and Claude's encodings of them) vary in drive-letter
+    /// case (`c--Github` vs `C--Users-...` observed on one machine), so
+    /// prefix matching is case-insensitive there.
+    case_insensitive: bool,
 }
 
 /// Claude Code's cwd encoding: every non-alphanumeric byte becomes '-'.
@@ -27,9 +31,27 @@ pub fn encode_cwd(s: &str) -> String {
 
 impl Tokenizer {
     pub fn new(home: &str) -> Self {
+        Self::with_case_sensitivity(home, cfg!(windows))
+    }
+
+    pub fn with_case_sensitivity(home: &str, case_insensitive: bool) -> Self {
         let home = home.trim_end_matches(['/', '\\']).to_string();
         let encoded_home = encode_cwd(&home);
-        Self { home, encoded_home }
+        Self { home, encoded_home, case_insensitive }
+    }
+
+    fn strip<'a>(&self, s: &'a str, prefix: &str) -> Option<&'a str> {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return Some(rest);
+        }
+        if self.case_insensitive {
+            if let Some(head) = s.get(..prefix.len()) {
+                if head.eq_ignore_ascii_case(prefix) {
+                    return Some(&s[prefix.len()..]);
+                }
+            }
+        }
+        None
     }
 
     pub fn from_env() -> anyhow::Result<Self> {
@@ -43,10 +65,10 @@ impl Tokenizer {
 
     /// `/Users/alice/x` → `${HOME}/x` (boundary-aware; non-matching input unchanged).
     pub fn tokenize_plain(&self, path: &str) -> String {
-        if path == self.home {
-            return HOME_TOKEN.to_string();
-        }
-        if let Some(rest) = path.strip_prefix(&self.home) {
+        if let Some(rest) = self.strip(path, &self.home) {
+            if rest.is_empty() {
+                return HOME_TOKEN.to_string();
+            }
             if rest.starts_with('/') || rest.starts_with('\\') {
                 return format!("{HOME_TOKEN}{rest}");
             }
@@ -64,10 +86,10 @@ impl Tokenizer {
 
     /// `-Users-alice-dev-proj` → `${EHOME}-dev-proj` (boundary-aware).
     pub fn tokenize_encoded(&self, s: &str) -> String {
-        if s == self.encoded_home {
-            return EHOME_TOKEN.to_string();
-        }
-        if let Some(rest) = s.strip_prefix(&self.encoded_home) {
+        if let Some(rest) = self.strip(s, &self.encoded_home) {
+            if rest.is_empty() {
+                return EHOME_TOKEN.to_string();
+            }
             if rest.starts_with('-') {
                 return format!("{EHOME_TOKEN}{rest}");
             }
@@ -133,6 +155,32 @@ mod tests {
             encode_cwd("/Users/björn/My Proj"),
             "-Users-bj-rn-My-Proj"
         );
+    }
+
+    #[test]
+    fn windows_drive_letter_case_is_ignored() {
+        // Observed on a real Windows machine: `c--Github` and `C--Users-...`
+        // in the same projects dir. Prefix matching must tolerate case.
+        let t = Tokenizer::with_case_sensitivity("C:\\Users\\you", true);
+        assert_eq!(
+            t.tokenize_encoded("c--Users-you-dev-proj"),
+            "${EHOME}-dev-proj"
+        );
+        assert_eq!(
+            t.tokenize_plain("c:\\Users\\you\\dev\\proj"),
+            "${HOME}\\dev\\proj"
+        );
+        // Expansion always emits this machine's canonical casing.
+        assert_eq!(
+            t.expand_encoded("${EHOME}-dev-proj"),
+            "C--Users-you-dev-proj"
+        );
+    }
+
+    #[test]
+    fn case_sensitive_by_default_on_unix() {
+        let t = Tokenizer::with_case_sensitivity("/Users/alice", false);
+        assert_eq!(t.tokenize_plain("/users/alice/x"), "/users/alice/x");
     }
 
     #[test]
