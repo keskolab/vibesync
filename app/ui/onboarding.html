@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="onboarding.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Welcome to Code Sync</title>
+    <script src="onboarding.js" defer></script>
+  </head>
+
+  <body class="onboarding">
+    <div id="wizard">
+      <div id="steps-viewport">
+        <div id="steps-track">
+          <!-- 0: Welcome -->
+          <section class="step" id="step-welcome">
+            <div class="hero">
+              <div class="app-badge">
+                <svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
+              </div>
+              <h1>Welcome to Code Sync</h1>
+              <p class="lede">
+                Your AI coding sessions &mdash; Claude&nbsp;Code, Codex, OpenCode and more &mdash;
+                available on every machine you use. Private, encrypted, yours.
+              </p>
+              <ul class="feature-list">
+                <li><b>Pick up where you left off</b><span>Resume any session on any of your Macs</span></li>
+                <li><b>Your storage, your data</b><span>iCloud, your own cloud folder, bucket, or disk</span></li>
+                <li><b>Set and forget</b><span>Syncs quietly from the menu bar</span></li>
+              </ul>
+            </div>
+          </section>
+
+          <!-- 1: Detected tools -->
+          <section class="step" id="step-tools">
+            <h2>Found on this Mac</h2>
+            <p class="step-sub">Code Sync detected these tools. Choose which ones to sync.</p>
+            <ul class="toggles" id="ob-tools"></ul>
+            <p class="fineprint">You can change this anytime from the menu bar.</p>
+          </section>
+
+          <!-- 2: Storage -->
+          <section class="step" id="step-storage">
+            <h2>Where should your sessions live?</h2>
+            <p class="step-sub">Everything is stored in a place <em>you</em> control.</p>
+            <div id="storage-options"></div>
+          </section>
+
+          <!-- 3: Configure storage (content depends on choice) -->
+          <section class="step" id="step-configure">
+            <h2 id="configure-title">Set up storage</h2>
+            <p class="step-sub" id="configure-sub"></p>
+            <div id="configure-body"></div>
+          </section>
+
+          <!-- 4: Encryption -->
+          <section class="step" id="step-encryption">
+            <h2 id="enc-title">Encryption</h2>
+            <p class="step-sub" id="enc-sub"></p>
+            <div id="enc-body"></div>
+          </section>
+
+          <!-- 5: Folder access -->
+          <section class="step" id="step-access">
+            <h2>Allow access</h2>
+            <p class="step-sub">macOS requires your permission for Code Sync to read each tool&rsquo;s data. One time only.</p>
+            <div class="grant-list">
+              <div class="grant-row" data-granted="false">
+                <div class="tlabel">Claude Code data<span class="tsub">~/.claude</span></div>
+                <button class="grant-btn">Grant&hellip;</button>
+              </div>
+              <div class="grant-row" data-granted="false">
+                <div class="tlabel">Claude app sessions<span class="tsub">~/Library/Application Support/Claude</span></div>
+                <button class="grant-btn">Grant&hellip;</button>
+              </div>
+              <div class="grant-row" data-granted="false">
+                <div class="tlabel">Codex data<span class="tsub">~/.codex</span></div>
+                <button class="grant-btn">Grant&hellip;</button>
+              </div>
+            </div>
+            <p class="fineprint">A folder picker opens pre-pointed at the right folder &mdash; just press &ldquo;Grant Access&rdquo;.</p>
+          </section>
+
+          <!-- 6: Done -->
+          <section class="step" id="step-done">
+            <div class="hero">
+              <div class="app-badge ok">
+                <svg viewBox="0 0 44 44"><path d="M17.8 30.1L9.7 22l-2.8 2.8 10.9 10.9L41 12.5l-2.8-2.8z"/></svg>
+              </div>
+              <h1>You&rsquo;re all set</h1>
+              <p class="lede">Ready for the first sync from this Mac.</p>
+              <div class="kv summary" id="done-summary"></div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <footer class="wizard-footer">
+        <button class="nav-btn ghost" id="ob-back">Back</button>
+        <div class="dots" id="dots"></div>
+        <button class="nav-btn primary" id="ob-next">Get Started</button>
+      </footer>
+    </div>
+  </body>
+</html>

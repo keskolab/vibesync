@@ -1,0 +1,463 @@
+/* Onboarding window — a regular titled window, solid background. */
+
+:root {
+  --win-bg: #f5f5f7;
+  --input-bg: #fff;
+  --input-border: rgba(0, 0, 0, 0.15);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --win-bg: #232323;
+    --input-bg: rgba(255, 255, 255, 0.06);
+    --input-border: rgba(255, 255, 255, 0.16);
+  }
+}
+
+body.onboarding {
+  background: var(--win-bg);
+}
+
+#wizard {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+#steps-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+#steps-track {
+  display: flex;
+  width: 700%;
+  height: 100%;
+  transition: transform 0.32s cubic-bezier(0.3, 0.9, 0.3, 1);
+}
+.step {
+  width: 14.2857%;
+  height: 100%;
+  padding: 34px 38px 16px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---------- hero (welcome / done) ---------- */
+
+.hero {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 14px;
+}
+.app-badge {
+  width: 76px;
+  height: 76px;
+  border-radius: 18px;
+  background: linear-gradient(145deg, #0a84ff, #0060df);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 22px rgba(10, 100, 255, 0.35);
+  margin-bottom: 6px;
+}
+.app-badge.ok {
+  background: linear-gradient(145deg, #32d74b, #1ea63a);
+  box-shadow: 0 8px 22px rgba(40, 180, 70, 0.35);
+}
+.app-badge svg {
+  width: 40px;
+  height: 40px;
+  fill: #fff;
+}
+h1 {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+}
+.lede {
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.5;
+  max-width: 360px;
+}
+.feature-list {
+  list-style: none;
+  margin-top: 10px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.feature-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.feature-list b {
+  font-size: 13px;
+  font-weight: 600;
+}
+.feature-list span {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+/* ---------- generic step chrome ---------- */
+
+h2 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  margin-bottom: 4px;
+}
+.step-sub {
+  font-size: 12.5px;
+  color: var(--text-2);
+  margin-bottom: 16px;
+  line-height: 1.45;
+}
+.fineprint {
+  margin-top: auto;
+  padding-top: 10px;
+  font-size: 11px;
+  color: var(--text-3);
+  text-align: center;
+}
+
+/* onboarding reuses .toggles rows on solid bg */
+body.onboarding .toggles {
+  background: var(--input-bg);
+  border: 0.5px solid var(--sep);
+}
+
+/* ---------- storage picker ---------- */
+
+#storage-options {
+  overflow-y: auto;
+  min-height: 0;
+  margin: 0 -6px;
+  padding: 0 6px;
+}
+.group-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-3);
+  margin: 10px 2px 6px;
+}
+.group-label:first-child {
+  margin-top: 0;
+}
+.storage-card {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  text-align: left;
+  background: var(--input-bg);
+  border: 1.5px solid var(--sep);
+  border-radius: 10px;
+  padding: 10px 12px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.storage-card + .storage-card {
+  margin-top: 7px;
+}
+.storage-card:hover {
+  background: var(--card-hover);
+}
+.storage-card.selected {
+  border-color: var(--accent);
+}
+.storage-card .s-icon {
+  width: 20px;
+  height: 20px;
+  fill: var(--text-2);
+  flex-shrink: 0;
+}
+.storage-card.selected .s-icon {
+  fill: var(--accent);
+}
+.storage-card .s-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+}
+.storage-card .s-name {
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.storage-card .s-desc {
+  font-size: 11px;
+  color: var(--text-2);
+}
+.badge {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 8px;
+  padding: 2px 7px;
+}
+.radio {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--input-border);
+  flex-shrink: 0;
+  position: relative;
+}
+.storage-card.selected .radio {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.storage-card.selected .radio::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: 50%;
+  background: #fff;
+}
+
+/* ---------- configure step ---------- */
+
+.big-check {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 40px 0;
+  text-align: center;
+}
+.big-check .ok-circle {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: var(--ok);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.big-check .ok-circle svg {
+  width: 22px;
+  height: 22px;
+  fill: #fff;
+}
+.big-check b {
+  font-size: 14px;
+}
+.big-check span {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.field label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+.field input {
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 7px;
+  padding: 7px 10px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.field input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.22);
+}
+.inline-note {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.test-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+}
+.test-result {
+  font-size: 12px;
+  color: var(--ok);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.test-result.show {
+  opacity: 1;
+}
+.mini-btn {
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 7px;
+  background: var(--card);
+  border: 0.5px solid var(--sep);
+}
+.mini-btn:hover {
+  background: var(--card-hover);
+}
+.path-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--input-bg);
+  border: 0.5px solid var(--sep);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 12px;
+}
+.path-row .path {
+  flex: 1;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* passphrase strength */
+.strength {
+  height: 4px;
+  border-radius: 4px;
+  background: var(--sep);
+  overflow: hidden;
+}
+.strength .fill {
+  height: 100%;
+  width: 0;
+  border-radius: 4px;
+  background: var(--destructive);
+  transition: width 0.25s, background 0.25s;
+}
+
+/* ---------- access step ---------- */
+
+.grant-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.grant-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--input-bg);
+  border: 0.5px solid var(--sep);
+  border-radius: 10px;
+  padding: 11px 13px;
+}
+.grant-row .tlabel {
+  flex: 1;
+}
+.grant-btn {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 14px;
+  border-radius: 7px;
+  background: var(--accent);
+  color: #fff;
+}
+.grant-btn:hover {
+  filter: brightness(1.08);
+}
+.grant-row[data-granted="true"] .grant-btn {
+  background: none;
+  color: var(--ok);
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.radio-mini {
+  color: var(--accent);
+  font-size: 13px;
+}
+
+/* ---------- done summary ---------- */
+
+.summary {
+  width: 100%;
+  max-width: 330px;
+  text-align: left;
+  margin-top: 6px;
+}
+
+/* ---------- footer ---------- */
+
+.wizard-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px 18px;
+  border-top: none;
+}
+.nav-btn {
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 18px;
+  border-radius: 8px;
+  min-width: 96px;
+}
+.nav-btn.primary {
+  background: var(--accent);
+  color: #fff;
+}
+.nav-btn.primary:hover {
+  filter: brightness(1.08);
+}
+.nav-btn.primary:disabled {
+  opacity: 0.4;
+  filter: none;
+}
+.nav-btn.ghost {
+  background: var(--card);
+  color: var(--text);
+}
+.nav-btn.ghost:hover {
+  background: var(--card-hover);
+}
+.nav-btn.ghost.hidden-btn {
+  visibility: hidden;
+}
+
+.dots {
+  display: flex;
+  gap: 6px;
+}
+.dots span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-3);
+  opacity: 0.45;
+  transition: opacity 0.2s, background 0.2s;
+}
+.dots span.on {
+  background: var(--accent);
+  opacity: 1;
+}

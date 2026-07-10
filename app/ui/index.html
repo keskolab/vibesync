@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Code Sync</title>
+    <script src="main.js" defer></script>
+  </head>
+
+  <body>
+    <div id="popover">
+      <div id="pages">
+        <!-- Page 0: main / tools -->
+        <section class="page" id="page-main">
+          <header>
+            <div class="title-row">
+              <span class="app-name">Code Sync</span>
+              <span class="status-pill" id="status-pill">
+                <span class="dot ok" id="status-dot"></span>
+                <span id="status-text">Synced</span>
+              </span>
+            </div>
+            <div class="substatus" id="substatus">Last synced 2 min ago &middot; 31 MB in iCloud</div>
+          </header>
+
+          <div class="setup-pending" id="setup-pending" style="display:none">
+            <svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
+            <b>Almost there</b>
+            <span>Finish the setup assistant to start syncing this Mac.</span>
+            <button id="open-setup">Open Setup Assistant</button>
+          </div>
+
+          <div class="counts" id="counts">
+            <div class="count"><b id="c-sessions">123</b><span>sessions</span></div>
+            <div class="vsep"></div>
+            <div class="count"><b id="c-tools">3</b><span>tools syncing</span></div>
+            <div class="vsep"></div>
+            <div class="count"><b id="c-macs">3</b><span>Macs</span></div>
+          </div>
+
+          <div class="hint" id="hint">
+            <svg class="hint-icon" viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM8 4.6a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8zM9 11.5H7v-1h.4V8.6H7v-1h1.6v2.9H9v1z"/></svg>
+            <span>New sessions synced &mdash; restart the Claude app to see them.</span>
+            <button class="hint-close" id="hint-close" aria-label="Dismiss">&#10005;</button>
+          </div>
+
+          <div class="section-label" id="tools-label">Tools</div>
+          <ul class="toggles" id="tool-list"></ul>
+
+          <button id="sync-now"><span id="sync-label">Sync Now</span><span class="spinner" id="spinner"></span></button>
+          <div class="progress" id="progress"><div class="bar" id="progress-bar"></div></div>
+        </section>
+
+        <!-- Page 1: tool detail (populated by JS) -->
+        <section class="page" id="page-tool">
+          <header>
+            <div class="title-row">
+              <button class="back" id="back-tool">&#8249; Back</button>
+              <span class="app-name" id="tool-title">Tool</span>
+              <span class="header-spacer"></span>
+            </div>
+            <div class="substatus" id="tool-substatus"></div>
+          </header>
+          <div class="section-label">Sync scopes</div>
+          <ul class="toggles" id="tool-scopes"></ul>
+          <div class="section-label">Storage</div>
+          <div class="kv" id="tool-storage"></div>
+        </section>
+
+        <!-- Page 2: settings -->
+        <section class="page" id="page-settings">
+          <header>
+            <div class="title-row">
+              <button class="back" id="back-settings">&#8249; Back</button>
+              <span class="app-name">Settings</span>
+              <span class="header-spacer"></span>
+            </div>
+          </header>
+          <ul class="toggles">
+            <li>
+              <div class="tlabel">Launch at login<span class="tsub">Open in menu bar at startup</span></div>
+              <label class="switch"><input type="checkbox" /><span class="knob"></span></label>
+            </li>
+            <li>
+              <div class="tlabel">Auto-sync<span class="tsub">Push &amp; pull continuously</span></div>
+              <label class="switch"><input type="checkbox" /><span class="knob"></span></label>
+            </li>
+          </ul>
+          <div class="section-label">Access</div>
+          <button class="secondary" id="grant">Grant folder access&hellip;</button>
+          <button class="secondary" id="onboarding">Setup assistant&hellip;</button>
+          <button class="secondary" id="reset-firstrun">Replay first launch&hellip;</button>
+          <div class="settings-spacer"></div>
+          <button class="secondary destructive" id="quit">Quit Code Sync</button>
+        </section>
+      </div>
+
+      <footer>
+        <button class="icon-btn" id="cog" aria-label="Settings">
+          <svg viewBox="0 0 16 16"><path d="M6.9 1.4c.1-.5.5-.9 1.1-.9s1 .4 1.1.9l.2.9c.4.1.8.3 1.2.5l.8-.5c.4-.3 1-.2 1.4.2s.5 1 .2 1.4l-.5.8c.2.4.4.8.5 1.2l.9.2c.5.1.9.5.9 1.1s-.4 1-.9 1.1l-.9.2c-.1.4-.3.8-.5 1.2l.5.8c.3.4.2 1-.2 1.4s-1 .5-1.4.2l-.8-.5c-.4.2-.8.4-1.2.5l-.2.9c-.1.5-.5.9-1.1.9s-1-.4-1.1-.9l-.2-.9c-.4-.1-.8-.3-1.2-.5l-.8.5c-.4.3-1 .2-1.4-.2s-.5-1-.2-1.4l.5-.8c-.2-.4-.4-.8-.5-1.2l-.9-.2C1 9 .6 8.6.6 8s.4-1 .9-1.1l.9-.2c.1-.4.3-.8.5-1.2l-.5-.8c-.3-.4-.2-1 .2-1.4s1-.5 1.4-.2l.8.5c.4-.2.8-.4 1.2-.5l.2-.9zM8 5.8A2.2 2.2 0 1 0 8 10.2 2.2 2.2 0 0 0 8 5.8z"/></svg>
+        </button>
+        <span class="version">v0.1 &middot; UX prototype</span>
+        <span style="width:28px"></span>
+      </footer>
+    </div>
+  </body>
+</html>

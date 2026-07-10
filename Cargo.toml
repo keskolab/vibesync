@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["engine", "app/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+authors = ["JohnKesko"]
+repository = "https://github.com/you/codesync"

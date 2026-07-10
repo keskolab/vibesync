@@ -1,0 +1,527 @@
+/* Code Sync — UX prototype. Vibrancy blur is provided by the NSVisualEffectView
+   behind the webview; everything here layers translucent tints on top. */
+
+:root {
+  --text: rgba(0, 0, 0, 0.85);
+  --text-2: rgba(0, 0, 0, 0.5);
+  --text-3: rgba(0, 0, 0, 0.3);
+  --sep: rgba(0, 0, 0, 0.08);
+  --card: rgba(255, 255, 255, 0.5);
+  --card-hover: rgba(255, 255, 255, 0.72);
+  --accent: #007aff;
+  --accent-text: #fff;
+  --ok: #28a745;
+  --hint-bg: rgba(0, 122, 255, 0.1);
+  --destructive: #d70015;
+  --knob: #fff;
+  --switch-off: rgba(0, 0, 0, 0.14);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: rgba(255, 255, 255, 0.88);
+    --text-2: rgba(255, 255, 255, 0.55);
+    --text-3: rgba(255, 255, 255, 0.32);
+    --sep: rgba(255, 255, 255, 0.1);
+    --card: rgba(255, 255, 255, 0.07);
+    --card-hover: rgba(255, 255, 255, 0.13);
+    --accent: #0a84ff;
+    --ok: #32d74b;
+    --hint-bg: rgba(10, 132, 255, 0.18);
+    --destructive: #ff453a;
+    --switch-off: rgba(255, 255, 255, 0.2);
+  }
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+html,
+body {
+  background: transparent;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#popover {
+  width: 100%;
+  height: 100%;
+  border-radius: 13px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border: 0.5px solid var(--sep);
+}
+
+/* ---------- pages ---------- */
+
+#pages {
+  flex: 1;
+  min-height: 0; /* never push the footer out of the window */
+  display: flex;
+  align-items: flex-start; /* pages take natural height so JS can fit the window */
+  width: 300%;
+  transition: transform 0.28s cubic-bezier(0.3, 0.9, 0.3, 1);
+}
+.page {
+  width: 33.3333%;
+  padding: 14px 14px 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.header-spacer {
+  min-width: 44px;
+}
+
+/* ---------- header ---------- */
+
+header {
+  margin-bottom: 12px;
+}
+.title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.app-name {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+}
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--card);
+  padding: 3px 9px;
+  border-radius: 20px;
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.dot.ok {
+  background: var(--ok);
+}
+.dot.busy {
+  background: var(--accent);
+  animation: pulse 1s ease-in-out infinite;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+.substatus {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+/* ---------- counts ---------- */
+
+.counts {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  background: var(--card);
+  border-radius: 9px;
+  padding: 9px 4px;
+  margin-bottom: 10px;
+}
+.count {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  min-width: 72px;
+}
+.count b {
+  font-size: 15px;
+  font-weight: 600;
+}
+.count span {
+  font-size: 10px;
+  color: var(--text-2);
+}
+.vsep {
+  width: 1px;
+  height: 22px;
+  background: var(--sep);
+}
+
+/* ---------- first-run pending state ---------- */
+
+.setup-pending {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 7px;
+  background: var(--card);
+  border-radius: 9px;
+  padding: 26px 18px;
+  margin-bottom: 12px;
+}
+.setup-pending svg {
+  width: 26px;
+  height: 26px;
+  fill: var(--text-3);
+  margin-bottom: 3px;
+}
+.setup-pending b {
+  font-size: 13px;
+  font-weight: 600;
+}
+.setup-pending span {
+  font-size: 11.5px;
+  color: var(--text-2);
+  line-height: 1.4;
+}
+.setup-pending button {
+  margin-top: 9px;
+  padding: 7px 16px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 500;
+  font-size: 12.5px;
+}
+.setup-pending button:hover {
+  filter: brightness(1.08);
+}
+
+/* ---------- hint banner ---------- */
+
+.hint {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--hint-bg);
+  border-radius: 8px;
+  padding: 8px 9px;
+  font-size: 11px;
+  line-height: 1.35;
+  margin-bottom: 10px;
+  transition: opacity 0.2s, margin 0.25s, padding 0.25s, max-height 0.25s;
+  max-height: 60px;
+}
+.hint.hidden {
+  opacity: 0;
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  margin-bottom: 0;
+  pointer-events: none;
+}
+.hint-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  fill: var(--accent);
+}
+.hint-close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--text-3);
+  font-size: 10px;
+  padding: 2px 4px;
+}
+.hint-close:hover {
+  color: var(--text-2);
+}
+
+/* ---------- toggle rows ---------- */
+
+.section-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-3);
+  margin: 2px 2px 6px;
+}
+.toggles {
+  list-style: none;
+  background: var(--card);
+  border-radius: 9px;
+  margin-bottom: 12px;
+}
+.toggles li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px;
+}
+.toggles li + li {
+  border-top: 0.5px solid var(--sep);
+}
+.row-icon {
+  width: 15px;
+  height: 15px;
+  fill: var(--text-2);
+  flex-shrink: 0;
+}
+.tlabel {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+}
+.tsub {
+  font-size: 10.5px;
+  color: var(--text-2);
+}
+
+/* tool rows */
+.toggles li.nav:hover {
+  background: var(--card-hover);
+}
+.toggles li.nav:first-child:hover {
+  border-radius: 9px 9px 0 0;
+}
+.toggles li.nav:last-child:hover {
+  border-radius: 0 0 9px 9px;
+}
+.chevron {
+  width: 11px;
+  height: 11px;
+  fill: var(--text-3);
+  flex-shrink: 0;
+  margin-left: -2px;
+}
+.toggles li.muted .row-icon,
+.toggles li.muted .tlabel {
+  opacity: 0.45;
+}
+.na {
+  color: var(--text-3);
+  font-size: 12px;
+  padding-right: 4px;
+}
+
+/* key-value block (tool detail storage) */
+.kv {
+  background: var(--card);
+  border-radius: 9px;
+  padding: 4px 11px;
+  font-size: 12px;
+}
+.kv div {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+}
+.kv div + div {
+  border-top: 0.5px solid var(--sep);
+}
+.kv span {
+  color: var(--text-2);
+}
+.kv b {
+  font-weight: 500;
+}
+
+/* macOS-style switch */
+.switch {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.switch .knob {
+  position: absolute;
+  inset: 0;
+  border-radius: 20px;
+  background: var(--switch-off);
+  transition: background 0.2s;
+}
+.switch .knob::after {
+  content: "";
+  position: absolute;
+  top: 1.5px;
+  left: 1.5px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--knob);
+  box-shadow: 0 1px 2.5px rgba(0, 0, 0, 0.3);
+  transition: transform 0.2s cubic-bezier(0.3, 0.9, 0.4, 1.2);
+}
+.switch input:checked + .knob {
+  background: var(--accent);
+}
+.switch input:checked + .knob::after {
+  transform: translateX(14px);
+}
+
+/* ---------- buttons ---------- */
+
+button {
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+  border: none;
+}
+
+#sync-now {
+  position: relative;
+  width: 100%;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  transition: filter 0.15s, opacity 0.2s;
+}
+#sync-now:hover {
+  filter: brightness(1.08);
+}
+#sync-now:active {
+  filter: brightness(0.92);
+}
+#sync-now:disabled {
+  opacity: 0.75;
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  display: none;
+}
+#sync-now.busy .spinner {
+  display: block;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.progress {
+  height: 3px;
+  border-radius: 3px;
+  background: var(--sep);
+  margin-top: 8px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.progress.active {
+  opacity: 1;
+}
+.progress .bar {
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.15s linear;
+}
+
+.secondary {
+  width: 100%;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--card);
+  font-weight: 450;
+  transition: background 0.15s;
+}
+.secondary:hover {
+  background: var(--card-hover);
+}
+.secondary.destructive {
+  color: var(--destructive);
+}
+.secondary + .secondary {
+  margin-top: 8px;
+}
+.secondary.shake {
+  animation: shake 0.35s;
+}
+@keyframes shake {
+  20%, 60% {
+    transform: translateX(-4px);
+  }
+  40%, 80% {
+    transform: translateX(4px);
+  }
+}
+
+.back {
+  background: none;
+  color: var(--accent);
+  font-size: 13px;
+  padding: 2px 6px 2px 0;
+  min-width: 44px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  text-align: left;
+}
+
+.settings-spacer {
+  height: 14px;
+}
+
+/* ---------- footer ---------- */
+
+footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  border-top: 0.5px solid var(--sep);
+}
+.icon-btn {
+  background: none;
+  padding: 4px;
+  border-radius: 6px;
+  display: flex;
+}
+.icon-btn:hover {
+  background: var(--card);
+}
+.icon-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: var(--text-2);
+}
+.version {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
