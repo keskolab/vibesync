@@ -154,13 +154,20 @@ function openTool(t) {
   $("tool-substatus").textContent = `${t.sessions} sessions · ${t.plans} plans on this ${DEVICE}`;
   const ul = $("tool-scopes");
   ul.innerHTML = "";
-  for (const s of [
-    { name: "Sessions & memory", sub: "Transcripts, subagents, auto-memory", on: true, locked: true },
-    { name: "Plans, tasks & history", sub: "Plans, tasks, command history", on: true, locked: true },
-    { name: "Agents, skills & settings", sub: "Custom agents, skills, rules, CLAUDE.md", on: true, locked: true },
-    { name: "Plugins", sub: "Can be large — off by default", on: status.syncPlugins, locked: false, id: "scope-plugins" },
-    { name: "App sidebar", sub: "Claude desktop session list", on: true, locked: true },
-  ]) {
+  const SCOPES = {
+    "claude-code": [
+      { name: "Sessions & memory", sub: "Transcripts, subagents, auto-memory", on: true, locked: true },
+      { name: "Plans, tasks & history", sub: "Plans, tasks, command history", on: true, locked: true },
+      { name: "Agents, skills & settings", sub: "Custom agents, skills, rules, CLAUDE.md", on: true, locked: true },
+      { name: "Plugins", sub: "Can be large — off by default", on: status.syncPlugins, locked: false, id: "scope-plugins" },
+      { name: "App sidebar", sub: "Claude desktop session list", on: true, locked: true },
+    ],
+    vscode: [
+      { name: "Copilot chats", sub: "Chat history per project folder", on: true, locked: true },
+      { name: "Chat history panel", sub: "Synced chats appear in matching folders", on: true, locked: true },
+    ],
+  };
+  for (const s of SCOPES[t.id] || []) {
     const li = document.createElement("li");
     li.innerHTML = `
       <div class="tlabel">${s.name}<span class="tsub">${s.sub}</span></div>
