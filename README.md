@@ -31,16 +31,20 @@ AI coding tools keep their sessions on the machine where they happened. Vendors 
 
 ## How syncing works with any number of computers
 
-Think of your storage location as a shared archive that every computer reads from and writes to:
+**The big picture:** you pick one place to keep your data — a folder you already sync, or a cloud bucket you own. Every computer running Code Sync talks to that same place: each one sends in whatever is new on its side, and takes out whatever it's missing. The computers never talk to each other directly, and there is no account or server from us — that one shared place is the whole system.
 
-1. **Computer A** scans its local sessions, compresses (and for cloud storage, encrypts) them, and uploads anything the archive doesn't have yet.
-2. **Computer B** (and C, and D…) does the same — and also downloads anything in the archive that it doesn't have locally.
-3. Every session has a globally unique ID, so files from different machines never collide — the archive is simply the union of everything, and every machine converges on the full set.
-4. Machine-specific paths are translated automatically: a session recorded under `/Users/anna/dev/app` on a Mac lands in the right place for `C:\Users\anna\dev\app` on a PC.
-5. If the same session was changed on two machines, the newer version wins — and the older one is kept next to it as a backup file, so nothing is ever overwritten silently.
-6. If a tool deletes old sessions locally (Claude Code cleans up after ~30 days), the archive keeps them forever — and sync won't push deleted sessions back onto a machine that already cleaned them up. The archive doubles as a permanent, searchable history.
+**About the passphrase (cloud storage only):** when your data lives in a cloud bucket, it is locked (encrypted) on your computer *before* it is uploaded, and the passphrase you choose during setup is the key. All your computers must use the same passphrase — that's how each one can unlock what the others uploaded. The cloud provider only ever holds locked files it cannot read. The passphrase never leaves your computers and we never see it — which also means nobody can recover your data if you lose it, so write it down somewhere safe. (Data in a folder you own — USB disk, iCloud Drive — is compressed but not locked.)
 
-Adding a new computer is just: install Code Sync, point it at the same storage (same folder, or same bucket + passphrase), and press Sync. Everything arrives.
+**Step by step:**
+
+1. Computer A looks through your sessions and sends anything new to your storage.
+2. Computer B (and C, and D…) does the same — and also downloads anything it doesn't have yet.
+3. Every session has its own unique ID, so files from different computers can never overwrite each other. The storage simply ends up holding everything, and every computer catches up to that full set.
+4. File paths are fixed up for each computer: a session saved under `/Users/anna/dev/app` on a Mac shows up in the right place for `C:\Users\anna\dev\app` on a PC.
+5. If the same session changed on two computers, the newer version wins — and the older one is kept right next to it as a backup file. Nothing is ever thrown away silently.
+6. When a tool cleans up old sessions (Claude Code deletes them after about 30 days), your storage still keeps them forever — and sync is smart enough not to push them back onto a computer that already cleaned them up. Your storage becomes a permanent history.
+
+Adding another computer is just: install Code Sync, point it at the same place (and enter the same passphrase if you use cloud storage), press Sync. Everything arrives.
 
 ## Getting started (development builds)
 
