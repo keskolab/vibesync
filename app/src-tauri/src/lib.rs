@@ -250,8 +250,22 @@ async fn set_store(
         let mut cfg = syncer::load_config(&paths)?.unwrap_or(syncer::default_config()?);
         // A different store means the sync state (what's already uploaded,
         // what was seen) belongs to the OLD store — reset it so the next
-        // sync pushes everything to the new one.
-        if serde_json::to_string(&cfg.store).ok() != serde_json::to_string(&store).ok() {
+        // sync pushes everything to the new one. Compare non-secret identity
+        // only: the saved config holds "@keychain" markers where the incoming
+        // store has plaintext, so full JSON always differs and re-running
+        // setup against the SAME store would wrongly reset state.
+        fn identity(s: &vibesync_engine::StoreConfig) -> String {
+            match s {
+                vibesync_engine::StoreConfig::Folder { path, .. } => format!("folder:{path}"),
+                vibesync_engine::StoreConfig::S3 { endpoint, region, bucket, access_key_id, .. } => {
+                    format!("s3:{endpoint}:{region}:{bucket}:{access_key_id}")
+                }
+                vibesync_engine::StoreConfig::AzureSas { container_sas_url } => {
+                    format!("azure:{}", container_sas_url.split('?').next().unwrap_or(""))
+                }
+            }
+        }
+        if identity(&cfg.store) != identity(&store) {
             let _ = std::fs::remove_file(&paths.state);
         }
         cfg.store = store;
