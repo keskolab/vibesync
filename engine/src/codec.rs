@@ -57,16 +57,22 @@ impl Codec for GzipCodec {
 /// mode still decrypt via a fallback path.
 pub struct AgeCodec {
     passphrase: String,
-    identity: age::x25519::Identity,
-    recipient: age::x25519::Recipient,
+    /// Derived lazily on first encrypt/decrypt — deriving eagerly made
+    /// opening a store (and "Test connection") pay the full KDF cost.
+    keys: std::sync::OnceLock<(age::x25519::Identity, age::x25519::Recipient)>,
 }
 
 impl AgeCodec {
     pub fn new(passphrase: impl Into<String>) -> Self {
-        let passphrase = passphrase.into();
-        let identity = derive_identity(&passphrase);
-        let recipient = identity.to_public();
-        Self { passphrase, identity, recipient }
+        Self { passphrase: passphrase.into(), keys: std::sync::OnceLock::new() }
+    }
+
+    fn keys(&self) -> &(age::x25519::Identity, age::x25519::Recipient) {
+        self.keys.get_or_init(|| {
+            let identity = derive_identity(&self.passphrase);
+            let recipient = identity.to_public();
+            (identity, recipient)
+        })
     }
 
     #[doc(hidden)]
@@ -91,11 +97,11 @@ fn derive_identity(passphrase: &str) -> age::x25519::Identity {
 impl Codec for AgeCodec {
     fn encode(&self, plain: &[u8]) -> Result<Vec<u8>> {
         let compressed = GzipCodec::compress(plain)?;
-        age::encrypt(&self.recipient, &compressed).context("age encrypt")
+        age::encrypt(&self.keys().1, &compressed).context("age encrypt")
     }
 
     fn decode(&self, stored: &[u8]) -> Result<Vec<u8>> {
-        let compressed = match age::decrypt(&self.identity, stored) {
+        let compressed = match age::decrypt(&self.keys().0, stored) {
             Ok(c) => c,
             Err(_) => {
                 // Legacy objects: age passphrase (scrypt) mode.

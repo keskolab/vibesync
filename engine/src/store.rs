@@ -175,6 +175,7 @@ impl S3Store {
             codec,
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(120))
+                .max_idle_connections_per_host(32)
                 .build(),
         })
     }
@@ -251,7 +252,11 @@ impl SyncStore for S3Store {
             let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&text)
                 .context("parse LIST response")?;
             for obj in parsed.contents {
-                if let Some(base) = obj.key.strip_suffix(META_SUFFIX) {
+                // Keys arrive URL-encoded (encoding-type=url): v1%2Ffiles%2F...
+                let key = percent_encoding::percent_decode_str(&obj.key)
+                    .decode_utf8_lossy()
+                    .into_owned();
+                if let Some(base) = key.strip_suffix(META_SUFFIX) {
                     if let Some(logical) = base.strip_prefix(prefix) {
                         out.push(logical.to_string());
                     }
@@ -355,7 +360,10 @@ impl AzureSasStore {
         Ok(Self {
             base,
             codec,
-            agent: ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).build(),
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(120))
+                .max_idle_connections_per_host(32)
+                .build(),
         })
     }
 

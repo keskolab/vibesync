@@ -627,6 +627,7 @@ dependencies = [
  "filetime",
  "flate2",
  "gethostname",
+ "percent-encoding",
  "rayon",
  "rusty-s3",
  "scrypt",
