@@ -214,6 +214,25 @@ impl S3Store {
         Ok(())
     }
 
+    /// get_bytes with retry/backoff — list() fetches thousands of meta
+    /// sidecars; a transient failure must not silently shrink the listing
+    /// (that made first pulls incomplete: 666 of 831 skills).
+    fn get_bytes_retry(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let mut delay = std::time::Duration::from_millis(200);
+        let mut last = None;
+        for _ in 0..3 {
+            match self.get_bytes(key) {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    last = Some(e);
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+            }
+        }
+        Err(last.unwrap())
+    }
+
     fn get_bytes(&self, key: &str) -> Result<Option<Vec<u8>>> {
         use rusty_s3::S3Action;
         let action = self.bucket.get_object(Some(&self.credentials), key);
@@ -325,11 +344,19 @@ impl SyncStore for S3Store {
         use rayon::prelude::*;
         let mut result: Vec<(String, RemoteMeta)> = out
             .par_iter()
-            .filter_map(|logical| {
-                let meta_bytes = self.get_bytes(&self.key(logical, META_SUFFIX)).ok()??;
-                let meta: RemoteMeta = serde_json::from_slice(&meta_bytes).ok()?;
-                Some((logical.clone(), meta))
+            .map(|logical| -> Result<Option<(String, RemoteMeta)>> {
+                let Some(meta_bytes) = self.get_bytes_retry(&self.key(logical, META_SUFFIX))?
+                else {
+                    return Ok(None); // sidecar genuinely missing: interrupted upload
+                };
+                // Corrupt sidecar: skip rather than brick sync; source re-push heals.
+                Ok(serde_json::from_slice::<RemoteMeta>(&meta_bytes)
+                    .ok()
+                    .map(|m| (logical.clone(), m)))
             })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
             .collect();
         result.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(result)
@@ -441,6 +468,24 @@ impl AzureSasStore {
         Ok(())
     }
 
+    /// Same retry rationale as the S3 store: transient meta-fetch failures
+    /// must not silently shrink the listing.
+    fn get_bytes_retry(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let mut delay = std::time::Duration::from_millis(200);
+        let mut last = None;
+        for _ in 0..3 {
+            match self.get_bytes(key) {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    last = Some(e);
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+            }
+        }
+        Err(last.unwrap())
+    }
+
     fn get_bytes(&self, key: &str) -> Result<Option<Vec<u8>>> {
         match self.agent.get(self.blob_url(key).as_str()).call() {
             Ok(resp) => {
@@ -522,12 +567,19 @@ impl SyncStore for AzureSasStore {
         use rayon::prelude::*;
         let mut out: Vec<(String, RemoteMeta)> = names
             .par_iter()
-            .filter_map(|logical| {
-                let meta_bytes = self
-                    .get_bytes(&format!("v1/files/{logical}{META_SUFFIX}"))
-                    .ok()??;
-                Some((logical.clone(), serde_json::from_slice(&meta_bytes).ok()?))
+            .map(|logical| -> Result<Option<(String, RemoteMeta)>> {
+                let Some(meta_bytes) =
+                    self.get_bytes_retry(&format!("v1/files/{logical}{META_SUFFIX}"))?
+                else {
+                    return Ok(None);
+                };
+                Ok(serde_json::from_slice::<RemoteMeta>(&meta_bytes)
+                    .ok()
+                    .map(|m| (logical.clone(), m)))
             })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
