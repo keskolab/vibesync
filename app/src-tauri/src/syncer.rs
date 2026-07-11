@@ -180,13 +180,13 @@ pub fn status(paths: &Paths) -> Result<Status> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.clone());
-            format!("folder \u{201c}{name}\u{201d}{}", if *encrypted { " \u{1f512}" } else { "" })
+            format!("folder \u{201c}{name}\u{201d}{}", if *encrypted { " (encrypted)" } else { "" })
         }
         engine::StoreConfig::S3 { bucket, endpoint, .. } => {
             let kind = if endpoint.contains("r2.cloudflarestorage") { "R2" } else { "S3" };
-            format!("{kind} bucket \u{201c}{bucket}\u{201d} \u{1f512}")
+            format!("{kind} bucket \u{201c}{bucket}\u{201d} (encrypted)")
         }
-        engine::StoreConfig::AzureSas { .. } => "Azure container \u{1f512}".to_string(),
+        engine::StoreConfig::AzureSas { .. } => "Azure container (encrypted)".to_string(),
     });
     let store_detail = config.as_ref().map(|c| match &c.store {
         engine::StoreConfig::Folder { path, .. } => path.clone(),
