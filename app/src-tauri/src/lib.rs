@@ -97,9 +97,9 @@ fn detect_onboarding_tools() -> Vec<OnboardTool> {
     vec![
         OnboardTool { id: "claude-code", name: "Claude Code", installed: exists(".claude/projects"), supported: true, sessions: count_jsonl(".claude/projects") },
         OnboardTool { id: "codex", name: "Codex", installed: vibesync_engine::codex::detect(&home), supported: true, sessions: count_jsonl(".codex/sessions") },
-        OnboardTool { id: "opencode", name: "OpenCode", installed: vibesync_engine::opencode::detect(&home), supported: true, sessions: 0 },
-        OnboardTool { id: "zed", name: "Zed", installed: vibesync_engine::zed::detect(), supported: true, sessions: 0 },
-        OnboardTool { id: "copilot", name: "Copilot CLI", installed: vibesync_engine::copilot::detect(&home), supported: true, sessions: 0 },
+        OnboardTool { id: "opencode", name: "OpenCode", installed: vibesync_engine::opencode::detect(&home), supported: true, sessions: vibesync_engine::opencode::light_counts(&home).0 },
+        OnboardTool { id: "zed", name: "Zed", installed: vibesync_engine::zed::detect(), supported: true, sessions: vibesync_engine::zed::light_counts().0 },
+        OnboardTool { id: "copilot", name: "Copilot CLI", installed: vibesync_engine::copilot::detect(&home), supported: true, sessions: vibesync_engine::copilot::light_counts(&home).0 },
         OnboardTool { id: "vscode", name: "VS Code", installed: vibesync_engine::vscode::detect(), supported: true, sessions: vibesync_engine::vscode::light_counts().0 },
     ]
 }
