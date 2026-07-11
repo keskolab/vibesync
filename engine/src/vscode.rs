@@ -173,6 +173,8 @@ pub struct ApplyReport {
     pub parked: usize,
     pub unchanged: usize,
     pub skipped_newer_local: usize,
+    /// Sessions registered in a workspace's chat index (visible in the panel).
+    pub indexed: usize,
 }
 
 /// Apply `vscode/ws/...` store entries into matching local workspaces;
@@ -195,6 +197,8 @@ pub fn apply_roots(
     let home = home_norm(home);
     let map = local_workspace_map(roots, &home);
     let prefix = format!("{LOGICAL_PREFIX}/");
+    // Workspace dir -> chat sessions newly applied there (uuid, mtime).
+    let mut to_index: HashMap<PathBuf, Vec<(String, i64)>> = HashMap::new();
 
     for (logical, meta) in store.list()? {
         let Some(rest) = logical.strip_prefix(&prefix) else { continue };
@@ -255,8 +259,103 @@ pub fn apply_roots(
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
         );
         report.applied += 1;
+        // Chat session files (not editing sidecars) must also be registered
+        // in the workspace's index or the panel never lists them.
+        if comps[marker] == "chatSessions" {
+            if let Some(uuid) = abs.file_stem().and_then(|s| s.to_str()) {
+                to_index
+                    .entry(ws_dir.clone())
+                    .or_default()
+                    .push((uuid.to_string(), meta.mtime_ms));
+            }
+        }
+    }
+    for (ws_dir, sessions) in to_index {
+        match merge_chat_index(&ws_dir, &sessions) {
+            Ok(n) => report.indexed += n,
+            Err(_) => {} // db locked or absent: files are placed; index next sync
+        }
     }
     Ok(report)
+}
+
+/// Best-effort title from the first chunk of a chat session file.
+fn extract_title(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut f = std::fs::File::open(path).ok()?;
+    let n = f.read(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf[..n]);
+    for key in ["\"customTitle\":\"", "\"title\":\""] {
+        if let Some(i) = text.find(key) {
+            let rest = &text[i + key.len()..];
+            if let Some(j) = rest.find('"') {
+                let t = &rest[..j];
+                if !t.is_empty() && t.len() < 120 {
+                    return Some(t.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Register synced sessions in `chat.ChatSessionStore.index` inside the
+/// workspace's state.vscdb (the key VS Code's history panel reads — found by
+/// dumping a live db). Existing entries are never modified. Returns how many
+/// new entries were added.
+fn merge_chat_index(ws_dir: &Path, sessions: &[(String, i64)]) -> Result<usize> {
+    const KEY: &str = "chat.ChatSessionStore.index";
+    let db_path = ws_dir.join("state.vscdb");
+    if !db_path.exists() {
+        anyhow::bail!("no state.vscdb");
+    }
+    let conn = rusqlite::Connection::open(&db_path)?;
+    conn.busy_timeout(std::time::Duration::from_millis(1500))?;
+    let existing: Option<String> = conn
+        .query_row("SELECT value FROM ItemTable WHERE key = ?1", [KEY], |r| r.get(0))
+        .ok();
+    let mut index: serde_json::Value = existing
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_else(|| serde_json::json!({ "version": 1, "entries": {} }));
+    if !index.get("entries").map(|e| e.is_object()).unwrap_or(false) {
+        index["entries"] = serde_json::json!({});
+    }
+    let entries = index["entries"].as_object_mut().unwrap();
+    let mut added = 0usize;
+    for (uuid, mtime) in sessions {
+        if entries.contains_key(uuid) {
+            continue;
+        }
+        let title = extract_title(&ws_dir.join("chatSessions").join(format!("{uuid}.jsonl")))
+            .or_else(|| extract_title(&ws_dir.join("chatSessions").join(format!("{uuid}.json"))))
+            .unwrap_or_else(|| "Synced chat".to_string());
+        entries.insert(
+            uuid.clone(),
+            serde_json::json!({
+                "sessionId": uuid,
+                "title": title,
+                "lastMessageDate": mtime,
+                "timing": { "created": mtime },
+                "initialLocation": "panel",
+                "hasPendingEdits": false,
+                "isEmpty": false,
+                "isExternal": false,
+                "lastResponseState": 1,
+                "permissionLevel": "default"
+            }),
+        );
+        added += 1;
+    }
+    if added > 0 {
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![KEY, serde_json::to_string(&index)?],
+        )?;
+    }
+    Ok(added)
 }
 
 /// Cheap counts for the UI: (chat files, bytes).
@@ -333,12 +432,31 @@ mod tests {
         );
         make_ws(&b_root, "cccc3333", "file:///somewhere/else");
 
+        // B has a state.vscdb with an existing index entry that must survive.
+        {
+            let conn = rusqlite::Connection::open(ws_b.join("state.vscdb")).unwrap();
+            conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)", []).unwrap();
+            conn.execute(
+                "INSERT INTO ItemTable VALUES ('chat.ChatSessionStore.index',
+                 '{\"version\":1,\"entries\":{\"native-1\":{\"sessionId\":\"native-1\",\"title\":\"Mine\"}}}')",
+                [],
+            ).unwrap();
+        }
         let mut state_b = SyncState::default();
         let report = apply_roots(&[b_root.clone()], &store, &mut state_b, &b_home).unwrap();
         assert_eq!(report.applied, 1);
+        assert_eq!(report.indexed, 1);
         let landed = ws_b.join("chatSessions/s1.jsonl");
         assert!(landed.exists());
         assert_eq!(std::fs::read_to_string(&landed).unwrap(), "{\"chat\":1}\n");
+        // Index now holds both the native entry and the synced one.
+        let conn = rusqlite::Connection::open(ws_b.join("state.vscdb")).unwrap();
+        let v: String = conn
+            .query_row("SELECT value FROM ItemTable WHERE key='chat.ChatSessionStore.index'", [], |r| r.get(0))
+            .unwrap();
+        let idx: serde_json::Value = serde_json::from_str(&v).unwrap();
+        assert!(idx["entries"]["native-1"]["title"] == "Mine");
+        assert!(idx["entries"]["s1"]["sessionId"] == "s1");
 
         // Machine C: workspace absent -> parked, nothing written.
         let c_root = tmp.path().join("c_ws");
