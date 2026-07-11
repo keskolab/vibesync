@@ -41,6 +41,49 @@ pub struct Paths {
     pub state: PathBuf,
 }
 
+/// Per-tool "new items arrived" ledger: accumulates across syncs and clears
+/// when the user views the tool, so an autosync can't silently wipe a badge
+/// nobody has seen yet.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct NewLedger(pub std::collections::BTreeMap<String, NewEntry>);
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct NewEntry {
+    pub count: usize,
+    pub ts_ms: i64,
+}
+
+fn ledger_path(paths: &Paths) -> PathBuf {
+    paths.state.with_file_name("new_items.json")
+}
+
+pub fn load_ledger(paths: &Paths) -> NewLedger {
+    std::fs::read(ledger_path(paths))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_ledger(paths: &Paths, ledger: &NewLedger) -> Result<()> {
+    Ok(std::fs::write(ledger_path(paths), serde_json::to_vec(ledger)?)?)
+}
+
+/// Clear a tool's badge (user has seen it).
+pub fn ack_new(paths: &Paths, id: &str) -> Result<()> {
+    let mut ledger = load_ledger(paths);
+    if ledger.0.remove(id).is_some() {
+        save_ledger(paths, &ledger)?;
+    }
+    Ok(())
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 pub fn paths(app: &tauri::AppHandle) -> Result<Paths> {
     use tauri::Manager;
     let dir = app.path().app_data_dir().context("resolve app data dir")?;
@@ -103,6 +146,9 @@ pub struct ToolStatus {
     pub agents: usize,
     pub skills: usize,
     pub last_activity_ms: Option<i64>,
+    /// Items pulled by syncs since the user last viewed this tool.
+    pub new_items: usize,
+    pub new_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,6 +167,8 @@ pub struct Status {
     pub shared_enabled: bool,
     pub shared_skills: usize,
     pub shared_bytes: u64,
+    pub shared_new: usize,
+    pub shared_new_ms: Option<i64>,
     pub tools: Vec<ToolStatus>,
 }
 
@@ -273,7 +321,8 @@ pub fn status(paths: &Paths) -> Result<Status> {
     };
     let claude_last = newest(".claude/projects", Some("jsonl"));
 
-    Ok(Status {
+    let ledger = load_ledger(paths);
+    let mut st = Status {
         configured: config.is_some(),
         store_desc,
         store_detail,
@@ -293,6 +342,8 @@ pub fn status(paths: &Paths) -> Result<Status> {
             .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .sum(),
+        shared_new: 0,
+        shared_new_ms: None,
         tools: {
             let (vs_sessions, vs_bytes, vs_projects, vs_last) = engine::vscode::light_counts();
             vec![
@@ -308,6 +359,8 @@ pub fn status(paths: &Paths) -> Result<Status> {
                     agents: claude_agents,
                     skills: claude_skills,
                     last_activity_ms: claude_last,
+                    new_items: 0,
+                    new_ms: None,
                 },
                 ToolStatus {
                     id: "vscode",
@@ -321,28 +374,44 @@ pub fn status(paths: &Paths) -> Result<Status> {
                     agents: 0,
                     skills: 0,
                     last_activity_ms: vs_last,
+                    new_items: 0,
+                    new_ms: None,
                 },
                 {
                     let (n, b, p, last) = engine::codex::light_counts(&home);
                     ToolStatus { id: "codex", name: "Codex", installed: engine::codex::detect(&home),
                         enabled: enabled_for("codex"), sessions: n, plans: 0, projects: p,
-                        bytes: b, agents: 0, skills: 0, last_activity_ms: last }
+                        bytes: b, agents: 0, skills: 0, last_activity_ms: last,
+                        new_items: 0, new_ms: None }
                 },
                 {
                     let (n, b, p, last) = engine::opencode::light_counts(&home);
                     ToolStatus { id: "opencode", name: "OpenCode", installed: engine::opencode::detect(&home),
                         enabled: enabled_for("opencode"), sessions: n, plans: 0, projects: p,
-                        bytes: b, agents: 0, skills: 0, last_activity_ms: last }
+                        bytes: b, agents: 0, skills: 0, last_activity_ms: last,
+                        new_items: 0, new_ms: None }
                 },
                 {
                     let (n, b, p) = engine::zed::light_counts();
                     ToolStatus { id: "zed", name: "Zed", installed: engine::zed::detect(),
                         enabled: enabled_for("zed"), sessions: n, plans: 0, projects: p,
-                        bytes: b, agents: 0, skills: 0, last_activity_ms: None }
+                        bytes: b, agents: 0, skills: 0, last_activity_ms: None,
+                        new_items: 0, new_ms: None }
                 },
             ]
         },
-    })
+    };
+    for t in &mut st.tools {
+        if let Some(e) = ledger.0.get(t.id) {
+            t.new_items = e.count;
+            t.new_ms = Some(e.ts_ms);
+        }
+    }
+    if let Some(e) = ledger.0.get("shared") {
+        st.shared_new = e.count;
+        st.shared_new_ms = Some(e.ts_ms);
+    }
+    Ok(st)
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -434,10 +503,12 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     }
 
     let mut pull = engine::Report::default();
+    let mut new_by_tool: std::collections::BTreeMap<&'static str, usize> = Default::default();
     if codex_on {
         let r = engine::codex::push_index(&home, &engine::machine_name(), &mut state, store.as_ref());
         let _ = r;
         if let Ok(r) = engine::codex::apply(&home, &mut state, store.as_ref()) {
+            *new_by_tool.entry("codex").or_default() += r.pulled;
             pull.pulled += r.pulled;
             pull.unchanged += r.unchanged;
             pull.skipped_newer_local += r.skipped_newer_local;
@@ -445,6 +516,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     }
     if opencode_on {
         if let Ok(r) = engine::opencode::apply(&home, &mut state, store.as_ref()) {
+            *new_by_tool.entry("opencode").or_default() += r.pulled;
             pull.pulled += r.pulled;
             pull.unchanged += r.unchanged;
             pull.skipped_newer_local += r.skipped_newer_local;
@@ -452,6 +524,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     }
     if zed_on {
         if let Ok(r) = engine::zed::apply(&home, &mut state, store.as_ref()) {
+            *new_by_tool.entry("zed").or_default() += r.applied;
             pull.pulled += r.applied;
             pull.unchanged += r.unchanged;
             pull.skipped_newer_local += r.skipped_newer_local;
@@ -464,6 +537,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
             &home,
             !config.disabled_scopes.iter().any(|s| s == "vscode-index"),
         )?;
+        *new_by_tool.entry("vscode").or_default() += r.applied;
         pull.pulled += r.applied;
         pull.unchanged += r.unchanged;
         pull.skipped_newer_local += r.skipped_newer_local;
@@ -473,6 +547,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
             &engine::adapters::SHARED_SKILLS, &home, ".claude", &tok, &mut state,
             store.as_ref(), false, &|_| false,
         )?;
+        *new_by_tool.entry("shared").or_default() += r.pulled;
         pull.pulled += r.pulled;
         pull.unchanged += r.unchanged;
         pull.skipped_newer_local += r.skipped_newer_local;
@@ -482,6 +557,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
             &CLAUDE_CODE, &home, dir, &tok, &mut state, store.as_ref(), include_plugins,
             &|logical| scope_of(logical).map(|s| off.iter().any(|o| o == s)).unwrap_or(false),
         )?;
+        *new_by_tool.entry("claude-code").or_default() += r.pulled;
         pull.pulled += r.pulled;
         pull.skipped_newer_local += r.skipped_newer_local;
         pull.skipped_deleted += r.skipped_deleted;
@@ -497,6 +573,23 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
             (0, 0, 0, 0)
         };
     state.save(&paths.state)?;
+
+    if registry_applied > 0 {
+        let e = new_by_tool.entry("claude-code").or_default();
+        *e = (*e).max(registry_applied);
+    }
+    let arrived: Vec<(&str, usize)> =
+        new_by_tool.into_iter().filter(|(_, n)| *n > 0).collect();
+    if !arrived.is_empty() {
+        let mut ledger = load_ledger(paths);
+        let now = now_ms();
+        for (id, n) in arrived {
+            let e = ledger.0.entry(id.to_string()).or_insert(NewEntry { count: 0, ts_ms: now });
+            e.count += n;
+            e.ts_ms = now;
+        }
+        let _ = save_ledger(paths, &ledger);
+    }
 
     Ok(SyncOutcome {
         pushed: push.pushed,

@@ -82,7 +82,9 @@ function fitWindow() {
   requestAnimationFrame(() => {
     const page = $("pages").children[currentPage];
     const footer = document.querySelector("footer");
-    const h = Math.min(640, page.offsetHeight + footer.offsetHeight + 2);
+    // scrollHeight, not offsetHeight: pages scroll internally now, so
+    // offsetHeight is clamped to the current window and could never grow it.
+    const h = Math.min(640, page.scrollHeight + footer.offsetHeight + 2);
     invoke("fit_popover", { width: 320, height: h }).catch(() => {});
   });
 }
@@ -107,6 +109,16 @@ function setPending(pending) {
 }
 
 let autosyncOn = null; // mirrored from settings
+
+function fmtClock(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+// "+N new · 16:04" chip for a tool/shared card with unseen synced items.
+function newBadge(count, ms) {
+  if (!count) return "";
+  return ` <span class="badge-new">+${count} new${ms ? ` · ${fmtClock(ms)}` : ""}</span>`;
+}
 
 function renderStatusLine() {
   if (!status) return;
@@ -148,7 +160,7 @@ function renderAll() {
     li.innerHTML = `
       ${ICONS[t.id] || ""}
       <div class="tlabel">${t.name}<span class="tsub">${
-        t.installed ? `${t.sessions} sessions · ${t.plans} plans · ${fmtMB(t.bytes)} MB` : "Not installed"
+        t.installed ? `${t.sessions} sessions · ${t.plans} plans · ${fmtMB(t.bytes)} MB${newBadge(t.newItems, t.newMs)}` : "Not installed"
       }</span></div>
       ${t.installed ? `<label class="switch"><input type="checkbox" ${t.enabled ? "checked" : ""} /><span class="knob"></span></label>
        <svg class="chevron" viewBox="0 0 16 16"><path d="M5.5 3l5 5-5 5-1-1 4-4-4-4z"/></svg>` : `<span class="na">—</span>`}`;
@@ -174,13 +186,18 @@ function renderAll() {
   if (status.sharedInstalled) {
     sl.innerHTML = `<li>
       ${ICONS.shared}
-      <div class="tlabel">Global skills<span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"} · ${fmtMB(status.sharedBytes)} MB<br>${SKILLS_PATH} — shared by all AI tools</span></div>
+      <div class="tlabel">Global skills<span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"} · ${fmtMB(status.sharedBytes)} MB${newBadge(status.sharedNew, status.sharedNewMs)}<br>${SKILLS_PATH} — shared by all AI tools</span></div>
       <label class="switch"><input type="checkbox" ${status.sharedEnabled ? "checked" : ""} /><span class="knob"></span></label>`;
     sl.querySelector("label.switch").addEventListener("click", (e) => e.stopPropagation());
     sl.querySelector("input").addEventListener("change", async (e) => {
       status = await invoke("set_scope_enabled", { scope: "shared", enabled: e.target.checked });
       renderAll();
     });
+    if (status.sharedNew > 0) {
+      sl.querySelector("li").addEventListener("click", () => {
+        invoke("ack_new", { id: "shared" }).then((s) => { status = s; renderAll(); }).catch(() => {});
+      });
+    }
   } else {
     sl.innerHTML = `<li class="muted">
       ${ICONS.shared}
@@ -208,6 +225,9 @@ async function refreshStatus() {
 }
 
 function openTool(t) {
+  if (t.newItems > 0) {
+    invoke("ack_new", { id: t.id }).then((s) => { status = s; renderAll(); }).catch(() => {});
+  }
   $("tool-title").textContent = t.name;
   statCards($("tool-counts"), [
     { value: t.sessions, label: t.sessions === 1 ? "session" : "sessions" },
@@ -235,7 +255,7 @@ function openTool(t) {
       { scope: "plans", name: "Plans, tasks & history", sub: "Plans, tasks, command history", on: on("plans") },
       { scope: "config", name: "Agents, skills & settings", sub: "Custom agents, skills, rules, CLAUDE.md", on: on("config") },
       { scope: "plugins", name: "Plugins", sub: "Can be large — off by default", on: status.syncPlugins },
-      { scope: "registry", name: "App sidebar", sub: "Claude desktop session list", on: status.syncRegistry },
+      { scope: "registry", name: "App sidebar", sub: "New sessions appear after restarting Claude", on: status.syncRegistry },
     ],
     vscode: [
       { tool: "vscode", name: "Copilot chats", sub: "Chat history per project folder", on: t.enabled },
@@ -293,9 +313,6 @@ async function runSync(firstRun) {
     const outcome = await invoke("sync_now");
     await refreshStatus();
     const notes = [];
-    if (outcome.registryApplied > 0) {
-      notes.push(`${outcome.registryApplied} session${outcome.registryApplied === 1 ? "" : "s"} added to your Claude sidebar — restart the Claude app to see them.`);
-    }
     if (outcome.registryHealed > 0) {
       notes.push(`${outcome.registryHealed} expired session${outcome.registryHealed === 1 ? "" : "s"} removed — Claude auto-deletes conversations after ~30 days; your storage still keeps them.`);
     } else if (outcome.registryGhosts > 0 && outcome.registryApplied > 0) {
@@ -303,10 +320,6 @@ async function runSync(firstRun) {
     }
     if (notes.length > 0) {
       $("hint").querySelector("span").textContent = notes.join(" ");
-      $("hint").classList.remove("hidden");
-    } else if (outcome.pulled > 0) {
-      $("hint").querySelector("span").textContent =
-        `${outcome.pulled} session${outcome.pulled === 1 ? "" : "s"} pulled — available via claude --resume.`;
       $("hint").classList.remove("hidden");
     }
   } catch (e) {

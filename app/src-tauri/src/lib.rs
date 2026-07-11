@@ -114,6 +114,19 @@ async fn get_status(app: tauri::AppHandle) -> Result<syncer::Status, String> {
     .map_err(|e| format!("{e:#}"))
 }
 
+/// Clear a tool's "new items" badge — the user has viewed the tool.
+#[tauri::command]
+async fn ack_new(app: tauri::AppHandle, id: String) -> Result<syncer::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = syncer::paths(&app)?;
+        syncer::ack_new(&paths, &id)?;
+        syncer::status(&paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
 /// Create the global skills folder (agentskills.io spec) so shared skills can
 /// live on this machine; returns refreshed status.
 #[tauri::command]
@@ -553,6 +566,7 @@ pub fn run() {
             set_sync_plugins,
             set_scope_enabled,
             create_skills_dir,
+            ack_new,
             set_tool_enabled,
             is_dev,
             get_settings,

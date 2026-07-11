@@ -90,10 +90,19 @@ html.win #popover {
 }
 .page {
   width: 33.3333%;
-  padding: 14px 14px 8px;
+  padding: 12px 14px 8px;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  max-height: 100%;
+}
+.page::-webkit-scrollbar {
+  width: 3px;
+}
+.page::-webkit-scrollbar-thumb {
+  background: var(--sep);
+  border-radius: 2px;
 }
 .header-spacer {
   min-width: 44px;
@@ -102,7 +111,7 @@ html.win #popover {
 /* ---------- header ---------- */
 
 header {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 .title-row {
   display: flex;
@@ -177,8 +186,8 @@ header {
   justify-content: space-around;
   background: var(--card);
   border-radius: 9px;
-  padding: 9px 4px;
-  margin-bottom: 10px;
+  padding: 7px 4px;
+  margin-bottom: 9px;
 }
 .count {
   display: flex;
@@ -291,7 +300,7 @@ header {
   text-transform: uppercase;
   letter-spacing: 0.4px;
   color: var(--text-3);
-  margin: 14px 2px 6px;
+  margin: 10px 2px 5px;
 }
 .section-label:first-child {
   margin-top: 2px;
@@ -300,13 +309,13 @@ header {
   list-style: none;
   background: var(--card);
   border-radius: 9px;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 .toggles li {
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 8px 11px;
+  padding: 7px 11px;
 }
 .toggles li + li {
   border-top: 0.5px solid var(--sep);
@@ -353,6 +362,13 @@ header {
   color: var(--text-3);
   font-size: 12px;
   padding-right: 4px;
+}
+
+/* "+N new" chip on a card whose tool received synced items */
+.badge-new {
+  color: var(--accent);
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 /* small inline action inside a toggle row (e.g. create skills folder) */
