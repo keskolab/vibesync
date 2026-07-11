@@ -8,3 +8,9 @@ edition = "2021"
 license = "GPL-3.0-only"
 authors = ["JohnKesko"]
 repository = "https://github.com/JohnKesko/vibesync"
+
+# Dev builds: keep file:line in backtraces but skip full debugger info.
+# Full debug info is the other big cost of incremental rebuilds on Windows
+# (PDB generation at link time); this cuts it while panics stay readable.
+[profile.dev]
+debug = "line-tables-only"

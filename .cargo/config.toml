@@ -1,0 +1,9 @@
+# Windows: link with the rustup-bundled LLVM linker instead of MSVC link.exe.
+# Linking dominates incremental `tauri dev` rebuilds, and lld is several times
+# faster. No effect on macOS/Linux builds. If a Windows build ever fails at
+# the link step, delete this file to fall back to link.exe.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+
+[target.aarch64-pc-windows-msvc]
+linker = "rust-lld.exe"
