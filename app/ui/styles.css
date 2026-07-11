@@ -151,6 +151,10 @@ header {
   grid-template-columns: 1fr 1fr;
   column-gap: 10px;
 }
+/* Second column (Auto-sync) right-aligns under the status pill. */
+.substatus > span:nth-child(2):not(.span-2) {
+  text-align: right;
+}
 .substatus .span-2 {
   grid-column: 1 / -1;
   overflow: hidden;
