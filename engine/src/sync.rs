@@ -3,7 +3,7 @@
 //! Rules (v1):
 //! - Additive only: nothing is ever deleted from the store.
 //! - Never clobber newer local content; the loser of a conflict is kept as a
-//!   `.codesync-bak` sibling, so no bytes are ever lost.
+//!   `.vibesync-bak` sibling, so no bytes are ever lost.
 //! - Files marked `deleted_locally` are never re-applied (retention rule).
 
 use std::path::Path;
@@ -146,8 +146,8 @@ pub fn pull_dir(
             }
             // Local loses: keep its content as a backup sibling before replacing.
             let bak = abs.with_extension(match abs.extension().and_then(|e| e.to_str()) {
-                Some(ext) => format!("{ext}.codesync-bak"),
-                None => "codesync-bak".to_string(),
+                Some(ext) => format!("{ext}.vibesync-bak"),
+                None => "vibesync-bak".to_string(),
             });
             std::fs::copy(&abs, &bak)?;
         }
@@ -157,7 +157,7 @@ pub fn pull_dir(
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = abs.with_extension("codesync-tmp");
+        let tmp = abs.with_extension("vibesync-tmp");
         std::fs::write(&tmp, &data)?;
         std::fs::rename(&tmp, &abs)?;
         filetime::set_file_mtime(

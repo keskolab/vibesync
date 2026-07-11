@@ -1,4 +1,4 @@
-// Code Sync onboarding — pure UX mock. The flow adapts to the chosen storage:
+// VibeSync onboarding — pure UX mock. The flow adapts to the chosen storage:
 // iCloud skips credentials and passphrase; everything else routes through them.
 
 const tauri = window.__TAURI__;
@@ -130,15 +130,15 @@ function renderConfigure() {
   }
 
   const forms = {
-    r2: field("cfg-bucket", "Bucket", "codesync") + field("cfg-account", "Account ID", "d8efee78803a1e14\u2026")
+    r2: field("cfg-bucket", "Bucket", "vibesync") + field("cfg-account", "Account ID", "d8efee78803a1e14\u2026")
       + field("cfg-key", "Access key ID", "") + field("cfg-secret", "Secret access key", "", "password"),
-    s3: field("cfg-bucket", "Bucket", "codesync") + field("cfg-region", "Region", "eu-north-1")
+    s3: field("cfg-bucket", "Bucket", "vibesync") + field("cfg-region", "Region", "eu-north-1")
       + field("cfg-key", "Access key ID", "") + field("cfg-secret", "Secret access key", "", "password"),
     azure: field("cfg-sas", "Container SAS URL", "https://acct.blob.core.windows.net/container?sv=\u2026"),
   };
   $("configure-sub").textContent = b.id === "azure"
     ? "In the Azure portal: container \u2192 Shared access tokens \u2192 create with read/write/list \u2192 copy the URL."
-    : `Point Code Sync at your own ${b.name} bucket.`;
+    : `Point VibeSync at your own ${b.name} bucket.`;
   body.innerHTML = `<div class="form">${forms[b.id]}
     <div class="test-row"><button class="mini-btn" id="cfg-test">Test connection</button>
     <span class="test-result" id="cfg-test-result"></span></div></div>`;

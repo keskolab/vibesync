@@ -1,4 +1,4 @@
-// Code Sync popover — M2: real engine data for Claude Code; other tools are
+// VibeSync popover — M2: real engine data for Claude Code; other tools are
 // shown as "adapter coming" placeholders until their adapters land.
 
 const tauri = window.__TAURI__;

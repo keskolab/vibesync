@@ -87,7 +87,7 @@ fn derive_identity(passphrase: &str) -> age::x25519::Identity {
     use bech32::{ToBase32, Variant};
     let mut key = [0u8; 32];
     let params = scrypt::Params::new(17, 8, 1, 32).expect("scrypt params");
-    scrypt::scrypt(passphrase.as_bytes(), b"codesync-age-v1", &params, &mut key)
+    scrypt::scrypt(passphrase.as_bytes(), b"vibesync-age-v1", &params, &mut key)
         .expect("scrypt");
     let encoded = bech32::encode("age-secret-key-", key.to_base32(), Variant::Bech32)
         .expect("bech32");

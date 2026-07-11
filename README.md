@@ -1,6 +1,6 @@
-# Code Sync
+# VibeSync
 
-Code Sync is a small menu bar app that keeps your AI coding sessions in sync across all your computers. Start a Claude Code session on your desktop, open your laptop, and continue where you left off — including your session history, plans, custom agents, and settings.
+VibeSync is a small menu bar app that keeps your AI coding sessions in sync across all your computers. Start a Claude Code session on your desktop, open your laptop, and continue where you left off — including your session history, plans, custom agents, and settings.
 
 Your data is stored in a place **you** control: a folder you already sync (iCloud Drive, OneDrive, Dropbox, Google Drive), your own cloud bucket (Cloudflare R2, Amazon S3, Azure), or just a USB disk. Nothing goes through anyone else's servers, and anything sent to cloud storage is encrypted on your machine first.
 
@@ -34,7 +34,7 @@ AI coding tools keep their sessions on the machine where they happened. Vendors 
 **The Big Picture:** 
 - Works with any amount of computers
 - You pick one place to keep your data — a folder you already sync (icloud, dropbox, google drive etc) or a cloud bucket you own (S3, R2, Azore Blob Storage etc).  
-- Every computer running Code Sync talks to that same place: each one sends whatever is new on its side and sync back whatever it's missing. 
+- Every computer running VibeSync talks to that same place: each one sends whatever is new on its side and sync back whatever it's missing. 
 - The computers never talk to each other directly and there is no account or server in the middle by this app.
 
 **Passphrase (R2, S3, Azure only):** 
@@ -60,18 +60,18 @@ AI coding tools keep their sessions on the machine where they happened. Vendors 
 
 - If the same session changed on two computers, the newer version wins — and the older one is kept right next to it as a backup file. Nothing is ever thrown away silently.
 
-- When a tool cleans up old sessions (Claude Code deletes them after about 30 days), your storage still keeps them forever — and code sync is smart enough not to push them back onto a computer that already cleaned them up. Your storage becomes a permanent history.
+- When a tool cleans up old sessions (Claude Code deletes them after about 30 days), your storage still keeps them forever — and VibeSync is smart enough not to push them back onto a computer that already cleaned them up. Your storage becomes a permanent history.
 
-- Adding another computer is just: install Code Sync, point it at the same place (and enter the same passphrase if you use cloud storage) and press Sync.
+- Adding another computer is just: install VibeSync, point it at the same place (and enter the same passphrase if you use cloud storage) and press Sync.
 
 ## Getting started (development builds)
 
 ```sh
-git clone https://github.com/JohnKesko/codesync
-cd codesync
+git clone https://github.com/JohnKesko/vibesync
+cd vibesync
 
 # run the engine tests
-cargo test -p codesync-engine
+cargo test -p vibesync-engine
 
 # run the app
 cd app && npm install && npm run tauri dev
@@ -81,7 +81,7 @@ The app appears in your menu bar. Click it, open the Setup Assistant, choose whe
 
 ## License & contributions
 
-Code Sync is **GPL-3.0** — free to use, modify, and share; derivative distributions must remain open under the GPL.
+VibeSync is **GPL-3.0** — free to use, modify, and share; derivative distributions must remain open under the GPL.
 
 This project is **open source, but not open contribution**: pull requests are not accepted, so the codebase remains single-author (this keeps dual-licensing possible). Bug reports, feature requests, and *adapter intel* (where tool X stores its sessions on platform Y) are very welcome as issues.
 

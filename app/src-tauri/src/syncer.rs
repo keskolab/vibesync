@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use codesync_engine as engine;
-use codesync_engine::adapters::CLAUDE_CODE;
+use vibesync_engine as engine;
+use vibesync_engine::adapters::CLAUDE_CODE;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +38,16 @@ pub struct Paths {
 pub fn paths(app: &tauri::AppHandle) -> Result<Paths> {
     use tauri::Manager;
     let dir = app.path().app_data_dir().context("resolve app data dir")?;
+    // One-time migration from the pre-rename identifier so existing
+    // machines keep their config, state and applied-registry tracking.
+    if !dir.exists() {
+        if let Some(parent) = dir.parent() {
+            let old = parent.join("com.keskolabs.codesync");
+            if old.join("config.json").exists() {
+                let _ = std::fs::rename(&old, &dir);
+            }
+        }
+    }
     std::fs::create_dir_all(&dir)?;
     Ok(Paths { config: dir.join("config.json"), state: dir.join("state.json") })
 }
@@ -61,7 +71,7 @@ pub fn default_config() -> Result<AppConfig> {
     let home = dirs::home_dir().context("no home dir")?;
     Ok(AppConfig {
         store: engine::StoreConfig::Folder {
-            path: home.join("CodeSyncStore").to_string_lossy().into_owned(),
+            path: home.join("VibeSyncStore").to_string_lossy().into_owned(),
             encrypted: false,
         },
         passphrase: None,
@@ -247,7 +257,7 @@ pub struct SyncOutcome {
 /// `progress(done, total)` fires as push chunks complete; `total + 1` marks
 /// the pull phase, and the final call is `(total + 1, total + 1)`.
 pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result<SyncOutcome> {
-    let config = load_config(paths)?.context("Code Sync is not configured yet")?;
+    let config = load_config(paths)?.context("VibeSync is not configured yet")?;
     let store = engine::open_store(&config.store, config.passphrase.as_deref())?;
     let tok = engine::Tokenizer::from_env()?;
     let home = dirs::home_dir().context("no home dir")?;
@@ -352,7 +362,7 @@ fn transcript_exists(entry: &serde_json::Value, home: &std::path::Path) -> bool 
 fn write_registry_entry(path: &PathBuf, entry: &serde_json::Value) -> Result<()> {
     engine::registry::validate(entry)?;
     let bytes = serde_json::to_vec(entry)?; // compact, single line
-    let tmp = path.with_extension("codesync-tmp");
+    let tmp = path.with_extension("vibesync-tmp");
     std::fs::write(&tmp, &bytes)?;
     #[cfg(unix)]
     {

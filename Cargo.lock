@@ -598,49 +598,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codesync-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "codesync-engine",
- "dirs 6.0.0",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tauri-plugin-positioner",
- "url",
- "window-vibrancy",
-]
-
-[[package]]
-name = "codesync-engine"
-version = "0.1.0"
-dependencies = [
- "age",
- "anyhow",
- "bech32",
- "dirs 6.0.0",
- "filetime",
- "flate2",
- "gethostname",
- "percent-encoding",
- "rayon",
- "rusty-s3",
- "scrypt",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "ureq",
- "url",
- "walkdir",
-]
-
-[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5088,6 +5045,49 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vibesync-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 6.0.0",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-positioner",
+ "url",
+ "vibesync-engine",
+ "window-vibrancy",
+]
+
+[[package]]
+name = "vibesync-engine"
+version = "0.1.0"
+dependencies = [
+ "age",
+ "anyhow",
+ "bech32",
+ "dirs 6.0.0",
+ "filetime",
+ "flate2",
+ "gethostname",
+ "percent-encoding",
+ "rayon",
+ "rusty-s3",
+ "scrypt",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "ureq",
+ "url",
+ "walkdir",
+]
 
 [[package]]
 name = "vswhom"

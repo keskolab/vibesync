@@ -1,13 +1,13 @@
 [package]
-name = "codesync-app"
-description = "Code Sync — tray app syncing AI coding sessions between your machines"
+name = "vibesync-app"
+description = "VibeSync — tray app syncing AI coding sessions between your machines"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
 [lib]
-name = "codesync_app_lib"
+name = "vibesync_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -25,4 +25,4 @@ serde_json = "1"
 dirs = "6"
 anyhow = "1"
 url = "2"
-codesync-engine = { path = "../../engine" }
+vibesync-engine = { path = "../../engine" }

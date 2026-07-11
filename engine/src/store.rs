@@ -314,11 +314,11 @@ mod tests {
     }
 
     /// Integration test against a real bucket; opt-in via env vars:
-    /// CODESYNC_TEST_S3_ENDPOINT / _REGION / _BUCKET / _ACCESS_KEY / _SECRET
+    /// VIBESYNC_TEST_S3_ENDPOINT / _REGION / _BUCKET / _ACCESS_KEY / _SECRET
     #[test]
     #[ignore]
     fn s3_store_roundtrip_live() {
-        let var = |k: &str| std::env::var(format!("CODESYNC_TEST_S3_{k}")).unwrap();
+        let var = |k: &str| std::env::var(format!("VIBESYNC_TEST_S3_{k}")).unwrap();
         let store = S3Store::new(
             &var("ENDPOINT"),
             &var("REGION"),
@@ -329,14 +329,14 @@ mod tests {
         )
         .unwrap();
         let meta = RemoteMeta { hash: "h".into(), mtime_ms: 1, size: 9, source: "ci".into() };
-        store.put("codesync-selftest/a.jsonl", b"live data", &meta).unwrap();
-        let (plain, _) = store.get("codesync-selftest/a.jsonl").unwrap().unwrap();
+        store.put("vibesync-selftest/a.jsonl", b"live data", &meta).unwrap();
+        let (plain, _) = store.get("vibesync-selftest/a.jsonl").unwrap().unwrap();
         assert_eq!(plain, b"live data");
         assert!(store
             .list()
             .unwrap()
             .iter()
-            .any(|(l, _)| l == "codesync-selftest/a.jsonl"));
+            .any(|(l, _)| l == "vibesync-selftest/a.jsonl"));
     }
 }
 

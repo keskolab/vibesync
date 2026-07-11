@@ -1,4 +1,4 @@
-//! Code Sync engine: scans AI-tool session storage, tokenizes machine-specific
+//! VibeSync engine: scans AI-tool session storage, tokenizes machine-specific
 //! paths, tracks sync state, and pushes/pulls through pluggable stores.
 
 pub mod adapters;

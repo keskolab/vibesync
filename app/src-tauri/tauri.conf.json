@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "CodeSync",
+  "productName": "VibeSync",
   "version": "0.1.0",
-  "identifier": "com.keskolabs.codesync",
+  "identifier": "com.keskolabs.vibesync",
   "build": {
     "frontendDist": "../ui"
   },
@@ -12,7 +12,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Code Sync",
+        "title": "VibeSync",
         "width": 320,
         "height": 548,
         "decorations": false,
@@ -27,7 +27,7 @@
       {
         "label": "onboarding",
         "url": "onboarding.html",
-        "title": "Welcome to Code Sync",
+        "title": "Welcome to VibeSync",
         "width": 520,
         "height": 664,
         "visible": false,

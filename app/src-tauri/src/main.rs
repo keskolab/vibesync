@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    codesync_app_lib::run()
+    vibesync_app_lib::run()
 }

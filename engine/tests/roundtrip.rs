@@ -3,9 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use codesync_engine::adapters::CLAUDE_CODE;
-use codesync_engine::tokenizer::encode_cwd;
-use codesync_engine::{sync, FolderStore, SyncState, Tokenizer};
+use vibesync_engine::adapters::CLAUDE_CODE;
+use vibesync_engine::tokenizer::encode_cwd;
+use vibesync_engine::{sync, FolderStore, SyncState, Tokenizer};
 
 struct Machine {
     home: PathBuf,
@@ -40,7 +40,7 @@ impl Machine {
             .join(format!("{uuid}.jsonl"))
     }
 
-    fn scan(&self) -> Vec<codesync_engine::FileEntry> {
+    fn scan(&self) -> Vec<vibesync_engine::FileEntry> {
         CLAUDE_CODE.scan(&self.home, &self.tok, false).unwrap()
     }
 }
@@ -133,7 +133,7 @@ fn newer_local_content_is_never_clobbered() {
     let report = sync::pull(&CLAUDE_CODE, &b.home, &b.tok, &mut b.state, &store, false).unwrap();
     assert_eq!(report.pulled, 1);
     assert_eq!(std::fs::read_to_string(&path_b).unwrap(), "old remote\n");
-    let bak = path_b.with_extension("jsonl.codesync-bak");
+    let bak = path_b.with_extension("jsonl.vibesync-bak");
     assert_eq!(std::fs::read_to_string(&bak).unwrap(), "newer local\n");
 }
 

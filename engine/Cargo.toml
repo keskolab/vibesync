@@ -1,6 +1,6 @@
 [package]
-name = "codesync-engine"
-description = "Code Sync engine: scanning, path tokenization, state tracking, and sync backends"
+name = "vibesync-engine"
+description = "VibeSync engine: scanning, path tokenization, state tracking, and sync backends"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

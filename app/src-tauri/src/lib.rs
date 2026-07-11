@@ -40,7 +40,7 @@ fn notify_outcome(app: &tauri::AppHandle, outcome: &syncer::SyncOutcome) {
         (0, q) => format!("Sync complete — {q} file{} arrived", if q == 1 { "" } else { "s" }),
         (p, q) => format!("Sync complete — {p} up, {q} down"),
     };
-    let _ = app.notification().builder().title("Code Sync").body(body).show();
+    let _ = app.notification().builder().title("VibeSync").body(body).show();
 }
 
 #[tauri::command]
@@ -50,13 +50,13 @@ fn quit_app(app: tauri::AppHandle) {
 
 /// First real engine call from the UI: which tools exist on this machine.
 #[tauri::command]
-fn detect_tools() -> Vec<codesync_engine::adapters::DetectedTool> {
-    codesync_engine::adapters::detect_all()
+fn detect_tools() -> Vec<vibesync_engine::adapters::DetectedTool> {
+    vibesync_engine::adapters::detect_all()
 }
 
 #[tauri::command]
 fn engine_version() -> &'static str {
-    codesync_engine::VERSION
+    vibesync_engine::VERSION
 }
 
 #[tauri::command]
@@ -108,12 +108,12 @@ async fn set_sync_plugins(app: tauri::AppHandle, enabled: bool) -> Result<syncer
 #[tauri::command]
 async fn set_store(
     app: tauri::AppHandle,
-    store: codesync_engine::StoreConfig,
+    store: vibesync_engine::StoreConfig,
     passphrase: Option<String>,
 ) -> Result<syncer::Status, String> {
     tauri::async_runtime::spawn_blocking(move || {
         // Validate before saving: refuse configs the engine can't open.
-        codesync_engine::open_store(&store, passphrase.as_deref())?;
+        vibesync_engine::open_store(&store, passphrase.as_deref())?;
         let paths = syncer::paths(&app)?;
         let mut cfg = syncer::load_config(&paths)?.unwrap_or(syncer::default_config()?);
         // A different store means the sync state (what's already uploaded,
@@ -146,11 +146,11 @@ async fn pick_folder(app: tauri::AppHandle) -> Option<String> {
 /// Open the store and LIST it — a real end-to-end connectivity check.
 #[tauri::command]
 async fn test_store(
-    store: codesync_engine::StoreConfig,
+    store: vibesync_engine::StoreConfig,
     passphrase: Option<String>,
 ) -> Result<usize, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let s = codesync_engine::open_store(&store, passphrase.as_deref())?;
+        let s = vibesync_engine::open_store(&store, passphrase.as_deref())?;
         Ok::<usize, anyhow::Error>(s.list()?.len())
     })
     .await
@@ -248,7 +248,7 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
                         let _ = app
                             .notification()
                             .builder()
-                            .title("Code Sync")
+                            .title("VibeSync")
                             .body(format!("Sync failed: {e:#}"))
                             .show();
                         let _ = app.emit("autosync-error", format!("{e:#}"));
@@ -418,7 +418,7 @@ pub fn run() {
             TrayIconBuilder::with_id("main-tray")
                 .icon(tray_icon())
                 .icon_as_template(true)
-                .tooltip("Code Sync")
+                .tooltip("VibeSync")
                 .on_tray_icon_event(|tray, event| {
                     tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
                     TRAY_SEEN.store(true, Ordering::Relaxed);
