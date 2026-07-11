@@ -441,11 +441,31 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     let include_plugins = config.sync_plugins;
     let mut state = engine::SyncState::load(&paths.state)?;
     let on = |id: &str| !config.disabled_tools.iter().any(|t| t == id);
-    let claude_on = on("claude-code");
-    let vscode_on = on("vscode");
-    let codex_on = on("codex");
-    let opencode_on = on("opencode");
-    let zed_on = on("zed");
+    // Never sync a tool onto a machine where it isn't installed — pulling
+    // would create its data dirs and make the machine "become" an OpenCode/
+    // Codex/... host it never was. Purge undetected tools from sync state so
+    // installing the tool later re-pulls everything fresh.
+    let claude_inst = home.join(".claude").is_dir();
+    let vscode_inst = engine::vscode::detect();
+    let codex_inst = engine::codex::detect(&home);
+    let opencode_inst = engine::opencode::detect(&home);
+    let zed_inst = engine::zed::detect();
+    for (inst, prefix) in [
+        (claude_inst, "claude/"),
+        (vscode_inst, "vscode/"),
+        (codex_inst, "codex/"),
+        (opencode_inst, "opencode/"),
+        (zed_inst, "zed/"),
+    ] {
+        if !inst {
+            state.files.retain(|k, _| !k.starts_with(prefix));
+        }
+    }
+    let claude_on = on("claude-code") && claude_inst;
+    let vscode_on = on("vscode") && vscode_inst;
+    let codex_on = on("codex") && codex_inst;
+    let opencode_on = on("opencode") && opencode_inst;
+    let zed_on = on("zed") && zed_inst;
     // All config dirs: ~/.claude plus auto-detected ~/.claude-* profiles.
     let dirs = engine::adapters::Adapter::detect_config_dirs(&home);
     let mut entries = Vec::new();
