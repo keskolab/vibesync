@@ -89,8 +89,8 @@ function renderStatusLine() {
   if (!status) return;
   const when = status.lastSyncMs ? syncStamp(status.lastSyncMs) : "never";
   const loc = status.storeDesc || "not set";
-  const auto = autosyncOn === null ? "" : `<br><span class="kv-label">Auto-sync:</span> ${autosyncOn ? "on" : "off"}`;
-  const html = `<span class="kv-label">Last sync:</span> ${when}<br><span class="kv-label">Location:</span> ${loc}${auto}`;
+  const auto = autosyncOn === null ? "" : `<span><span class="kv-label">Auto-sync:</span> ${autosyncOn ? "on" : "off"}</span>`;
+  const html = `<span><span class="kv-label">Last sync:</span> ${when}</span>${auto}<span class="span-2"><span class="kv-label">Location:</span> ${loc}</span>`;
   if ($("substatus").dataset.line !== html) {
     $("substatus").dataset.line = html;
     $("substatus").innerHTML = html;
