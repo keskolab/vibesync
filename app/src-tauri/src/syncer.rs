@@ -904,6 +904,25 @@ fn registry_dir() -> Option<PathBuf> {
     bases.iter().find_map(|b| first_org_user_dir(b))
 }
 
+/// Whether a Claude desktop installation exists on this machine at all
+/// (config dir on macOS/unpackaged Windows, or an MSIX package dir).
+fn claude_desktop_present() -> bool {
+    if dirs::config_dir().map(|c| c.join("Claude").is_dir()).unwrap_or(false) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        if let Some(local) = dirs::data_local_dir() {
+            if let Ok(pkgs) = std::fs::read_dir(local.join("Packages")) {
+                return pkgs
+                    .flatten()
+                    .any(|p| p.file_name().to_string_lossy().starts_with("Claude_"));
+            }
+        }
+    }
+    false
+}
+
 /// First <org>/<user> directory two levels below `base`, if any.
 fn first_org_user_dir(base: &std::path::Path) -> Option<PathBuf> {
     for org in std::fs::read_dir(base).ok()?.flatten() {
@@ -961,8 +980,13 @@ fn sync_registry(
 ) -> Result<(usize, usize, usize, usize)> {
     use engine::registry;
     let Some(dir) = registry_dir() else {
-        // Surface the miss instead of silently no-opping: on a machine where
-        // the desktop app IS installed, "dir not found" is a real bug.
+        // CLI-only machine (no Claude desktop): nothing to sync, not an error
+        // — bailing here would stamp registry_last_error.txt on every sync.
+        if !claude_desktop_present() {
+            return Ok((0, 0, 0, 0));
+        }
+        // Desktop IS installed but its sessions dir wasn't found: a real bug,
+        // surface it instead of silently no-opping.
         let base = dirs::config_dir().map(|c| c.join("Claude").join("claude-code-sessions"));
         anyhow::bail!(
             "claude-code-sessions registry dir not found (base={:?}, exists={})",
