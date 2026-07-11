@@ -232,11 +232,19 @@ window.addEventListener("DOMContentLoaded", async () => {
   }
 
   // Onboarding finished → default store + real first sync.
-  tauri?.event.listen("setup-complete", async () => {
+  tauri?.event.listen("setup-complete", async (e) => {
     localStorage.setItem("setupDone", "1");
     setPending(false);
     invoke("show_popover");
-    status = await invoke("configure_default_store");
+    const choice = e.payload || {};
+    try {
+      status = choice.store
+        ? await invoke("set_store", { store: choice.store, passphrase: choice.passphrase ?? null })
+        : await invoke("configure_default_store");
+    } catch (err) {
+      $("substatus").textContent = String(err);
+      return;
+    }
     renderAll();
     await runSync(true);
   });

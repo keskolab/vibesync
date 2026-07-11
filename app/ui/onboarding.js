@@ -13,36 +13,36 @@ const S_ICONS = {
   disk: '<svg class="s-icon" viewBox="0 0 20 20"><path d="M4 3h12c1.1 0 2 .9 2 2v10c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V5c0-1.1.9-2 2-2zm11 10.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM4 5v4h12V5H4z"/></svg>',
 };
 
-// Real app: detected at runtime. The recommended default flips per platform —
-// iCloud on macOS, OneDrive on Windows (built in, already signed in).
-const PLATFORM = "macos";
+const BACKENDS = [
+  { id: "folder", group: "Recommended", icon: "folder", name: "Choose folder\u2026", badge: "Simple", desc: "iCloud Drive, OneDrive, Dropbox, Google Drive, an external disk \u2014 any folder you control." },
+  { id: "r2", group: "Cloud storage", icon: "bucket", name: "Cloudflare R2", desc: "Your own bucket. Account ID, bucket + API token." },
+  { id: "s3", group: "Cloud storage", icon: "bucket", name: "Amazon S3", desc: "Your own bucket. Region, bucket + access keys." },
+  { id: "azure", group: "Cloud storage", icon: "cloud", name: "Azure Blob", desc: "Paste a container SAS URL \u2014 no account keys." },
+];
 
-const ALL_BACKENDS = {
-  icloud: { icon: "cloud", name: "iCloud", desc: { macos: "Private database in your iCloud. Works instantly on all your Macs.", windows: "Via your iCloud for Windows folder." } },
-  onedrive: { icon: "folder", name: "OneDrive", desc: { macos: "Encrypted archive inside your existing OneDrive folder.", windows: "Built into Windows — encrypted archive in your OneDrive folder." } },
-  dropbox: { icon: "folder", name: "Dropbox", desc: { macos: "Encrypted archive inside your existing Dropbox folder.", windows: "Encrypted archive inside your existing Dropbox folder." } },
-  gdrive: { icon: "folder", name: "Google Drive", desc: { macos: "Encrypted archive inside your existing Drive folder.", windows: "Encrypted archive inside your existing Drive folder." } },
-  r2: { icon: "bucket", name: "Cloudflare R2", desc: { macos: "Your own bucket. Bucket name + API token required.", windows: "Your own bucket. Bucket name + API token required." } },
-  s3: { icon: "bucket", name: "Amazon S3", desc: { macos: "Your own bucket. Access keys required.", windows: "Your own bucket. Access keys required." } },
-  usb: { icon: "disk", name: "External disk / USB", desc: { macos: "Syncs whenever the disk is connected.", windows: "Syncs whenever the disk is connected." } },
-};
+// Collected inputs for the chosen backend.
+const chosen = { path: null, fields: {}, passphrase: "" };
 
-const LAYOUT = {
-  macos: { recommended: "icloud", folders: ["onedrive", "dropbox", "gdrive"], advanced: ["r2", "s3", "usb"] },
-  windows: { recommended: "onedrive", folders: ["gdrive", "dropbox", "icloud"], advanced: ["r2", "s3", "usb"] },
-};
-
-function buildBackends(platform) {
-  const l = LAYOUT[platform];
-  const mk = (id, group, badge) => ({ id, group, badge, icon: ALL_BACKENDS[id].icon, name: ALL_BACKENDS[id].name, desc: ALL_BACKENDS[id].desc[platform] });
-  return [
-    mk(l.recommended, "Recommended", "No setup"),
-    ...l.folders.map((id) => mk(id, "Your cloud folder")),
-    ...l.advanced.map((id) => mk(id, "Advanced")),
-  ];
+function buildStore() {
+  const f = chosen.fields;
+  switch (storage) {
+    case "folder":
+      return chosen.path ? { type: "folder", path: chosen.path, encrypted: false } : null;
+    case "r2":
+      return f.account && f.bucket && f.key && f.secret
+        ? { type: "s3", endpoint: `https://${f.account}.r2.cloudflarestorage.com`, region: "auto",
+            bucket: f.bucket, access_key_id: f.key, secret_access_key: f.secret } : null;
+    case "s3":
+      return f.region && f.bucket && f.key && f.secret
+        ? { type: "s3", endpoint: `https://s3.${f.region}.amazonaws.com`, region: f.region,
+            bucket: f.bucket, access_key_id: f.key, secret_access_key: f.secret } : null;
+    case "azure":
+      return f.sas ? { type: "azure_sas", container_sas_url: f.sas } : null;
+  }
+  return null;
 }
 
-const BACKENDS = buildBackends(PLATFORM);
+const needsPassphrase = () => storage !== "folder";
 
 const OB_TOOLS = [
   { name: "Claude Code", sub: "86 sessions", found: true, on: true },
@@ -54,7 +54,7 @@ const OB_TOOLS = [
 
 const STEPS = 7;
 let step = 0;
-let storage = LAYOUT[PLATFORM].recommended; // pre-selected per platform
+let storage = "folder";
 
 // ---------- rendering ----------
 
@@ -107,62 +107,71 @@ function renderStorage() {
 function renderConfigure() {
   const b = backend();
   const body = $("configure-body");
-  $("configure-title").textContent = `Set up ${b.name}`;
+  $("configure-title").textContent = `Set up ${b.name.replace("\u2026", "")}`;
+  const field = (id, label, ph, type = "text") =>
+    `<div class="field"><label>${label}</label><input id="${id}" type="${type}" placeholder="${ph}" /></div>`;
 
-  if (b.id === "icloud") {
-    $("configure-sub").textContent = "Code Sync uses the iCloud account this Mac is signed into.";
+  if (b.id === "folder") {
+    $("configure-sub").textContent =
+      "Pick any folder \u2014 an iCloud Drive / OneDrive / Dropbox / Google Drive folder syncs it between machines automatically; a local or USB folder stays where it is.";
     body.innerHTML = `
-      <div class="big-check">
-        <div class="ok-circle"><svg viewBox="0 0 20 20"><path d="M8 13.6L4.4 10 3 11.4l5 5 9-9L15.6 6z"/></svg></div>
-        <b>Signed in as JohnKesko@users.noreply.github.com</b>
-        <span>Nothing else to set up.</span>
-      </div>`;
-  } else if (["onedrive", "dropbox", "gdrive"].includes(b.id)) {
-    const path = { onedrive: "~/OneDrive/Apps/Code Sync", dropbox: "~/Dropbox/Apps/Code Sync", gdrive: "~/Google Drive/Code Sync" }[b.id];
-    $("configure-sub").textContent = `Code Sync keeps an encrypted archive inside your ${b.name} folder. ${b.name}'s own app syncs it between machines.`;
-    body.innerHTML = `
-      <div class="path-row"><span class="path" id="cfg-path">${path}</span><button class="mini-btn" id="cfg-choose">Choose&hellip;</button></div>
-      <p class="inline-note" style="margin-top:10px">Detected your ${b.name} folder automatically. On your other machines, pick the same folder.</p>`;
-    body.querySelector("#cfg-choose").addEventListener("click", () => {
-      body.querySelector("#cfg-path").textContent = path;
+      <div class="path-row"><span class="path" id="cfg-path">${chosen.path || "No folder selected"}</span>
+      <button class="mini-btn" id="cfg-choose">Choose\u2026</button></div>
+      <p class="inline-note" style="margin-top:10px">On your other machines, pick the same folder.</p>`;
+    body.querySelector("#cfg-choose").addEventListener("click", async () => {
+      const p = await tauri?.core.invoke("pick_folder");
+      if (p) { chosen.path = p; body.querySelector("#cfg-path").textContent = p; }
+      update();
     });
-  } else if (b.id === "usb") {
-    $("configure-sub").textContent = "Choose a connected disk. Sessions sync whenever it's plugged in.";
-    body.innerHTML = `
-      <div class="grant-list">
-        <div class="grant-row"><div class="tlabel">Samsung T7<span class="tsub">1.4 TB free of 2 TB</span></div><span class="radio-mini">●</span></div>
-        <div class="grant-row" style="opacity:.6"><div class="tlabel">SanDisk Extreme<span class="tsub">210 GB free of 1 TB</span></div><span class="radio-mini">○</span></div>
-      </div>
-      <p class="inline-note" style="margin-top:10px">Great for air-gapped setups &mdash; carry your sessions with you.</p>`;
-  } else {
-    // r2 / s3
-    $("configure-sub").textContent = `Point Code Sync at your own ${b.name} bucket.`;
-    body.innerHTML = `
-      <div class="form">
-        ${b.id === "r2" ? `<div class="field"><label>Account ID</label><input placeholder="d8efee78803a1e14&hellip;" /></div>` : `<div class="field"><label>Region</label><input placeholder="eu-north-1" /></div>`}
-        <div class="field"><label>Bucket</label><input placeholder="code-sync" /></div>
-        <div class="field"><label>Access key ID</label><input placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" /></div>
-        <div class="field"><label>Secret access key</label><input type="password" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" /></div>
-        <div class="test-row"><button class="mini-btn" id="cfg-test">Test connection</button><span class="test-result" id="cfg-test-result">&#10003; Connected &mdash; bucket reachable</span></div>
-      </div>`;
-    body.querySelector("#cfg-test").addEventListener("click", () => {
-      const r = body.querySelector("#cfg-test-result");
-      r.classList.remove("show");
-      setTimeout(() => r.classList.add("show"), 700);
-    });
+    return;
   }
+
+  const forms = {
+    r2: field("cfg-account", "Account ID", "d8efee78803a1e14\u2026") + field("cfg-bucket", "Bucket", "codesync")
+      + field("cfg-key", "Access key ID", "") + field("cfg-secret", "Secret access key", "", "password"),
+    s3: field("cfg-region", "Region", "eu-north-1") + field("cfg-bucket", "Bucket", "codesync")
+      + field("cfg-key", "Access key ID", "") + field("cfg-secret", "Secret access key", "", "password"),
+    azure: field("cfg-sas", "Container SAS URL", "https://acct.blob.core.windows.net/container?sv=\u2026"),
+  };
+  $("configure-sub").textContent = b.id === "azure"
+    ? "In the Azure portal: container \u2192 Shared access tokens \u2192 create with read/write/list \u2192 copy the URL."
+    : `Point Code Sync at your own ${b.name} bucket.`;
+  body.innerHTML = `<div class="form">${forms[b.id]}
+    <div class="test-row"><button class="mini-btn" id="cfg-test">Test connection</button>
+    <span class="test-result" id="cfg-test-result"></span></div></div>`;
+
+  const map = { "cfg-account": "account", "cfg-region": "region", "cfg-bucket": "bucket",
+                "cfg-key": "key", "cfg-secret": "secret", "cfg-sas": "sas" };
+  for (const [id, k] of Object.entries(map)) {
+    const el = body.querySelector(`#${id}`);
+    if (!el) continue;
+    el.value = chosen.fields[k] || "";
+    el.addEventListener("input", (e) => { chosen.fields[k] = e.target.value.trim(); update(); });
+  }
+  body.querySelector("#cfg-test").addEventListener("click", async () => {
+    const r = body.querySelector("#cfg-test-result");
+    const store = buildStore();
+    if (!store) { r.textContent = "Fill in all fields first"; r.style.color = "var(--destructive)"; r.classList.add("show"); return; }
+    r.textContent = "Testing\u2026"; r.style.color = "var(--text-2)"; r.classList.add("show");
+    try {
+      const n = await tauri?.core.invoke("test_store", { store, passphrase: chosen.passphrase || "test" });
+      r.textContent = `\u2713 Connected \u2014 ${n} objects in store`; r.style.color = "var(--ok)";
+    } catch (e) {
+      r.textContent = `\u2717 ${String(e).slice(0, 120)}`; r.style.color = "var(--destructive)";
+    }
+  });
 }
 
 function renderEncryption() {
   const b = backend();
   const body = $("enc-body");
-  if (b.id === "icloud") {
-    $("enc-title").textContent = "Protected by iCloud";
-    $("enc-sub").textContent = "Your data is encrypted by Apple, tied to your Apple ID. With Advanced Data Protection it's end-to-end encrypted.";
+  if (b.id === "folder") {
+    $("enc-title").textContent = "No passphrase needed";
+    $("enc-sub").textContent = "This folder is under your control; content is compressed but not encrypted. Pick a cloud backend if you want client-side encryption.";
     body.innerHTML = `
       <div class="big-check">
         <div class="ok-circle"><svg viewBox="0 0 20 20"><path d="M10 1l7 3v5c0 4.4-3 8.4-7 9.5C6 17.4 3 13.4 3 9V4l7-3zm-1.6 12.1l5.3-5.3-1.4-1.4-3.9 3.9-1.7-1.7-1.4 1.4 3.1 3.1z"/></svg></div>
-        <b>No passphrase needed</b>
+        <b>Your folder, your rules</b>
         <span>Nothing to remember, nothing to lose.</span>
       </div>`;
   } else {
@@ -176,6 +185,7 @@ function renderEncryption() {
         <p class="inline-note">You'll enter the same passphrase on each machine. It never leaves your Macs &mdash; if you lose it, the data can't be recovered.</p>
       </div>`;
     body.querySelector("#pp1").addEventListener("input", (e) => {
+      chosen.passphrase = e.target.value;
       const n = e.target.value.length;
       const f = body.querySelector("#pp-strength");
       f.style.width = Math.min(100, n * 7) + "%";
@@ -188,7 +198,7 @@ function renderDone() {
   const b = backend();
   $("done-summary").innerHTML = `
     <div><span>Storage</span><b>${b.name}</b></div>
-    <div><span>Encryption</span><b>${b.id === "icloud" ? "iCloud keys" : "Passphrase (age)"}</b></div>
+    <div><span>Encryption</span><b>${needsPassphrase() ? "Passphrase (age)" : "None (your folder)"}</b></div>
     <div><span>Tools</span><b>Claude Code, Codex</b></div>
     <div><span>This machine</span><b>MacBook&nbsp;Pro</b></div>`;
 }
@@ -215,7 +225,7 @@ function update() {
   $("ob-back").classList.toggle("hidden-btn", step === 0 || step === STEPS - 1);
   const next = $("ob-next");
   next.textContent = step === 0 ? "Get Started" : step === STEPS - 1 ? "Start First Sync" : "Continue";
-  next.disabled = step === 5 && !accessComplete();
+  next.disabled = (step === 3 && !buildStore()) || (step === 5 && !accessComplete());
 
   if (step === 3) renderConfigure();
   if (step === 4) renderEncryption();
@@ -232,7 +242,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   $("ob-next").addEventListener("click", () => {
     if (step === STEPS - 1) {
-      tauri?.event.emit("setup-complete");
+      tauri?.event.emit("setup-complete", { store: buildStore(), passphrase: needsPassphrase() ? chosen.passphrase || null : null });
       tauri?.core.invoke("close_onboarding");
       // reset so reopening from Settings starts fresh
       setTimeout(() => {

@@ -101,6 +101,32 @@ async fn set_store(
     .map_err(|e| format!("{e:#}"))
 }
 
+/// Native folder picker for the storage step.
+#[tauri::command]
+async fn pick_folder(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    app.dialog()
+        .file()
+        .blocking_pick_folder()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Open the store and LIST it — a real end-to-end connectivity check.
+#[tauri::command]
+async fn test_store(
+    store: codesync_engine::StoreConfig,
+    passphrase: Option<String>,
+) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = codesync_engine::open_store(&store, passphrase.as_deref())?;
+        Ok::<usize, anyhow::Error>(s.list()?.len())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
 /// Dev-only UI affordances (e.g. "Replay first launch") key off this.
 #[tauri::command]
 fn is_dev() -> bool {
@@ -283,6 +309,7 @@ fn tray_icon() -> Image<'static> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -302,7 +329,9 @@ pub fn run() {
             get_settings,
             set_autostart,
             set_autosync,
-            set_store
+            set_store,
+            pick_folder,
+            test_store
         ])
         .setup(|app| {
             // Menu bar app: no Dock icon.
