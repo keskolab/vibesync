@@ -351,6 +351,17 @@ header {
 .kv b {
   font-weight: 500;
 }
+/* Left-aligned variant: label + value flow together instead of the value
+   being pushed to the card's far edge (awkward with long values). */
+.kv-left div {
+  justify-content: flex-start;
+  gap: 10px;
+}
+.kv-left b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* macOS-style switch */
 .switch {
