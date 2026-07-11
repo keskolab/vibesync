@@ -349,42 +349,72 @@ fn set_autosync(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
 fn spawn_autosync_worker(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         use tauri::Emitter;
-        let mut last = std::time::Instant::now();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
             if !AUTOSYNC.load(Ordering::Relaxed) {
                 continue;
             }
-            if last.elapsed().as_secs() < AUTOSYNC_INTERVAL_SECS {
+            // Don't stack onto a manual sync in flight.
+            if SYNCING.load(Ordering::SeqCst) {
                 continue;
             }
-            last = std::time::Instant::now();
-            if let Ok(paths) = syncer::paths(&app) {
-                set_tray_busy(&app, true);
-                // Tell an open popover the background sync started — the tray
-                // icon alone isn't visible from inside the window.
-                let _ = app.emit("autosync-start", ());
-                let emitter = app.clone();
-                let result = syncer::sync_now(&paths, move |done, total| {
+            let Ok(paths) = syncer::paths(&app) else { continue };
+            // Due-check on the WALL clock against the last real sync (the
+            // state file's mtime — the same value "Last sync" displays, so
+            // schedule and UI can't disagree). Instant is useless here: it
+            // freezes during macOS sleep, silently stretching the 15-minute
+            // interval into hours on laptops.
+            let last_ms = std::fs::metadata(&paths.state)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            if now_ms - last_ms < (AUTOSYNC_INTERVAL_SECS as i64) * 1000 {
+                continue;
+            }
+            set_tray_busy(&app, true);
+            // Tell an open popover the background sync started — the tray
+            // icon alone isn't visible from inside the window.
+            let _ = app.emit("autosync-start", ());
+            let emitter = app.clone();
+            // A panic inside a sync must not kill this thread — that would
+            // silently disable autosync until the next app launch.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                syncer::sync_now(&paths, move |done, total| {
                     let _ = emitter
                         .emit("sync-progress", serde_json::json!({ "done": done, "total": total }));
-                });
-                set_tray_busy(&app, false);
-                match result {
-                    Ok(outcome) => {
-                        notify_outcome(&app, &outcome);
-                        let _ = app.emit("autosync-done", serde_json::json!(outcome));
-                    }
-                    Err(e) => {
-                        use tauri_plugin_notification::NotificationExt;
-                        let _ = app
-                            .notification()
-                            .builder()
-                            .title("VibeSync")
-                            .body(format!("Sync failed: {e:#}"))
-                            .show();
-                        let _ = app.emit("autosync-error", format!("{e:#}"));
-                    }
+                })
+            }));
+            set_tray_busy(&app, false);
+            match result {
+                Ok(Ok(outcome)) => {
+                    notify_outcome(&app, &outcome);
+                    let _ = app.emit("autosync-done", serde_json::json!(outcome));
+                }
+                Ok(Err(e)) => {
+                    use tauri_plugin_notification::NotificationExt;
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("VibeSync")
+                        .body(format!("Sync failed: {e:#}"))
+                        .show();
+                    let _ = app.emit("autosync-error", format!("{e:#}"));
+                }
+                Err(_) => {
+                    use tauri_plugin_notification::NotificationExt;
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("VibeSync")
+                        .body("Sync crashed — will retry in 15 minutes")
+                        .show();
+                    let _ = app.emit("autosync-error", "sync crashed".to_string());
                 }
             }
         }
