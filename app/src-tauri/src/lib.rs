@@ -431,10 +431,18 @@ fn fit_popover(app: tauri::AppHandle, width: f64, height: f64) {
 #[tauri::command]
 fn show_popover(app: tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
-        place_popover(&win);
-        let _ = win.show();
-        let _ = win.set_focus();
+        present_popover(&win);
     }
+}
+
+/// Place, show, and float the popover. Windows drops the topmost flag across
+/// hide/show cycles (and can deny focus), which let other apps draw over the
+/// open popover — so re-assert always-on-top on every show.
+fn present_popover(win: &tauri::WebviewWindow) {
+    place_popover(win);
+    let _ = win.show();
+    let _ = win.set_always_on_top(true);
+    let _ = win.set_focus();
 }
 
 /// Procedurally drawn template icon (black + alpha) matching the Material
@@ -594,9 +602,7 @@ pub fn run() {
                             if win.is_visible().unwrap_or(false) {
                                 let _ = win.hide();
                             } else {
-                                place_popover(&win);
-                                let _ = win.show();
-                                let _ = win.set_focus();
+                                present_popover(&win);
                             }
                         }
                     }
