@@ -21,26 +21,14 @@ const AUTOSYNC_INTERVAL_SECS: u64 = 15 * 60;
 /// True while a sync runs — drives the tray spinner.
 static SYNCING: AtomicBool = AtomicBool::new(false);
 
-/// Spin the tray icon until SYNCING clears, then restore the resting glyph.
-fn start_tray_spinner(app: tauri::AppHandle) {
-    if SYNCING.swap(true, Ordering::SeqCst) {
-        return; // already spinning
+/// One icon swap per state change — animating the tray flickers on macOS,
+/// so "syncing" is a static center-dot variant of the glyph instead.
+fn set_tray_busy(app: &tauri::AppHandle, busy: bool) {
+    SYNCING.store(busy, Ordering::SeqCst);
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_icon(Some(tray_icon_ex(busy)));
+        let _ = tray.set_icon_as_template(true);
     }
-    std::thread::spawn(move || {
-        let mut angle = 0.0f32;
-        while SYNCING.load(Ordering::SeqCst) {
-            if let Some(tray) = app.tray_by_id("main-tray") {
-                let _ = tray.set_icon(Some(tray_icon_at(angle)));
-                let _ = tray.set_icon_as_template(true);
-            }
-            angle += std::f32::consts::TAU / 12.0;
-            std::thread::sleep(std::time::Duration::from_millis(90));
-        }
-        if let Some(tray) = app.tray_by_id("main-tray") {
-            let _ = tray.set_icon(Some(tray_icon()));
-            let _ = tray.set_icon_as_template(true);
-        }
-    });
 }
 
 /// Notify only when the sync actually moved something — silence is health.
@@ -181,12 +169,12 @@ async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> 
     tauri::async_runtime::spawn_blocking(move || {
         use tauri::Emitter;
         let paths = syncer::paths(&app)?;
-        start_tray_spinner(app.clone());
+        set_tray_busy(&app, true);
         let emitter = app.clone();
         let result = syncer::sync_now(&paths, move |done, total| {
             let _ = emitter.emit("sync-progress", serde_json::json!({ "done": done, "total": total }));
         });
-        SYNCING.store(false, Ordering::SeqCst);
+        set_tray_busy(&app, false);
         if let Ok(outcome) = &result {
             notify_outcome(&app, outcome);
         }
@@ -247,9 +235,9 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
             }
             last = std::time::Instant::now();
             if let Ok(paths) = syncer::paths(&app) {
-                start_tray_spinner(app.clone());
+                set_tray_busy(&app, true);
                 let result = syncer::sync_now(&paths, |_, _| {});
-                SYNCING.store(false, Ordering::SeqCst);
+                set_tray_busy(&app, false);
                 match result {
                     Ok(outcome) => {
                         notify_outcome(&app, &outcome);
@@ -304,11 +292,11 @@ fn show_popover(app: tauri::AppHandle) {
 /// "sync" glyph used in the onboarding logo, so the prototype needs no asset
 /// pipeline. Geometry in the icon's 24pt space, scaled up. 3x3 supersampled.
 fn tray_icon() -> Image<'static> {
-    tray_icon_at(0.0)
+    tray_icon_ex(false)
 }
 
-/// The same glyph rotated by `angle` radians — frames for the sync spinner.
-fn tray_icon_at(angle: f32) -> Image<'static> {
+/// `busy` adds a solid dot in the ring's center — the "syncing" state.
+fn tray_icon_ex(busy: bool) -> Image<'static> {
     const S: usize = 44;
     let scale = S as f32 / 24.0;
     let c = 12.0 * scale;
@@ -345,12 +333,13 @@ fn tray_icon_at(angle: f32) -> Image<'static> {
         in_tri((x, y))
     };
     // Second arrow is the first rotated 180 degrees around the center.
-    let (sin_a, cos_a) = (-angle).sin_cos();
     let inside = |x: f32, y: f32| -> bool {
-        // Rotate the sample point back by `angle` around the center.
-        let (dx, dy) = (x - c, y - c);
-        let x = c + dx * cos_a - dy * sin_a;
-        let y = c + dx * sin_a + dy * cos_a;
+        if busy {
+            let (dx, dy) = (x - c, y - c);
+            if dx * dx + dy * dy <= 28.0 {
+                return true; // center activity dot
+            }
+        }
         inside_one(x, y) || inside_one(2.0 * c - x, 2.0 * c - y)
     };
 
