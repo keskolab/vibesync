@@ -740,6 +740,14 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             pull.unchanged += r.unchanged;
             pull.skipped_newer_local += r.skipped_newer_local;
         }
+        // db layer: modern OpenCode keeps sessions ONLY in opencode.db.
+        let _ = engine::opencode::db_push(&home, &tok, &mut state, store.as_ref(), &engine::machine_name());
+        if let Ok(r) = engine::opencode::db_apply(&home, &tok, &mut state, store.as_ref(), &listing, &tick) {
+            *new_by_tool.entry("opencode").or_default() += r.applied;
+            pull.pulled += r.applied;
+            pull.unchanged += r.unchanged;
+            pull.skipped_newer_local += r.skipped_newer_local;
+        }
     }
     if copilot_on {
         if let Ok(r) = engine::copilot::apply(&home, &mut state, store.as_ref(), &listing, &tick) {
