@@ -161,6 +161,7 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
         if !logical.starts_with(&prefix) {
             continue;
         }
+        on_file();
         if let Some(st) = state.files.get(logical) {
             if st.deleted_locally || st.hash == meta.hash {
                 report.unchanged += 1;
