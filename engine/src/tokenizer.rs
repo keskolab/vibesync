@@ -12,6 +12,8 @@
 pub const HOME_TOKEN: &str = "${HOME}";
 pub const EHOME_TOKEN: &str = "${EHOME}";
 
+use crate::gitmap::{git_token, parse_git_token, GitMap};
+
 #[derive(Debug, Clone)]
 pub struct Tokenizer {
     home: String,
@@ -20,6 +22,11 @@ pub struct Tokenizer {
     /// case (`c--Github` vs `C--Users-...` observed on one machine), so
     /// prefix matching is case-insensitive there.
     case_insensitive: bool,
+    /// Known git repos: (identity, plain root, encoded root), longest root
+    /// first so nested clones match innermost. Git roots outrank `${HOME}` —
+    /// a repo identity is portable across machines whose homes differ AND
+    /// whose repo locations differ, which `${HOME}` alone can't express.
+    git_roots: Vec<(String, String, String)>,
 }
 
 /// Claude Code's cwd encoding: every non-alphanumeric byte becomes '-'.
@@ -37,7 +44,25 @@ impl Tokenizer {
     pub fn with_case_sensitivity(home: &str, case_insensitive: bool) -> Self {
         let home = home.trim_end_matches(['/', '\\']).to_string();
         let encoded_home = encode_cwd(&home);
-        Self { home, encoded_home, case_insensitive }
+        Self { home, encoded_home, case_insensitive, git_roots: Vec::new() }
+    }
+
+    /// Attach known git repo roots; their identities then take priority over
+    /// `${HOME}` in both tokenize directions.
+    pub fn with_gitmap(mut self, map: &GitMap) -> Self {
+        self.git_roots = map
+            .roots
+            .iter()
+            .map(|(id, root)| {
+                let root = root.trim_end_matches(['/', '\\']).to_string();
+                let encoded = encode_cwd(&root);
+                (id.clone(), root, encoded)
+            })
+            .collect();
+        // Longest plain root first (encode_cwd is length-preserving, so this
+        // orders the encoded forms identically).
+        self.git_roots.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+        self
     }
 
     fn strip<'a>(&self, s: &'a str, prefix: &str) -> Option<&'a str> {
@@ -63,8 +88,20 @@ impl Tokenizer {
         &self.home
     }
 
-    /// `/Users/alice/x` → `${HOME}/x` (boundary-aware; non-matching input unchanged).
+    /// `C:\Temp\vibesync\app` → `${GIT:github.com:owner:repo}/app` when inside
+    /// a known repo (tail separators canonicalized to `/`), else
+    /// `/Users/alice/x` → `${HOME}/x` (boundary-aware; non-matching unchanged).
     pub fn tokenize_plain(&self, path: &str) -> String {
+        for (id, root, _) in &self.git_roots {
+            if let Some(rest) = self.strip(path, root) {
+                if rest.is_empty() {
+                    return git_token(id);
+                }
+                if rest.starts_with('/') || rest.starts_with('\\') {
+                    return format!("{}{}", git_token(id), rest.replace('\\', "/"));
+                }
+            }
+        }
         if let Some(rest) = self.strip(path, &self.home) {
             if rest.is_empty() {
                 return HOME_TOKEN.to_string();
@@ -76,16 +113,36 @@ impl Tokenizer {
         path.to_string()
     }
 
+    /// `${GIT:...}/x` → this machine's clone + `/x` (token left untouched when
+    /// the repo is unknown here — callers park/skip such paths);
     /// `${HOME}/x` → `/Users/alice/x`.
     pub fn expand_plain(&self, path: &str) -> String {
+        if let Some((id, rest)) = parse_git_token(path) {
+            if let Some((_, root, _)) = self.git_roots.iter().find(|(i, _, _)| *i == id) {
+                return format!("{root}{rest}");
+            }
+            return path.to_string();
+        }
         match path.strip_prefix(HOME_TOKEN) {
             Some(rest) => format!("{}{}", self.home, rest),
             None => path.to_string(),
         }
     }
 
+    /// `C--Temp-vibesync-app` → `${GIT:...}-app` when the component starts
+    /// with a known repo root's encoding, else
     /// `-Users-alice-dev-proj` → `${EHOME}-dev-proj` (boundary-aware).
     pub fn tokenize_encoded(&self, s: &str) -> String {
+        for (id, _, eroot) in &self.git_roots {
+            if let Some(rest) = self.strip(s, eroot) {
+                if rest.is_empty() {
+                    return git_token(id);
+                }
+                if rest.starts_with('-') {
+                    return format!("{}{}", git_token(id), rest);
+                }
+            }
+        }
         if let Some(rest) = self.strip(s, &self.encoded_home) {
             if rest.is_empty() {
                 return EHOME_TOKEN.to_string();
@@ -97,8 +154,16 @@ impl Tokenizer {
         s.to_string()
     }
 
+    /// `${GIT:...}-app` → this machine's encoded clone root + `-app` (token
+    /// left untouched when the repo is unknown here);
     /// `${EHOME}-dev-proj` → `-Users-alice-dev-proj`.
     pub fn expand_encoded(&self, s: &str) -> String {
+        if let Some((id, rest)) = parse_git_token(s) {
+            if let Some((_, _, eroot)) = self.git_roots.iter().find(|(i, _, _)| *i == id) {
+                return format!("{eroot}{rest}");
+            }
+            return s.to_string();
+        }
         match s.strip_prefix(EHOME_TOKEN) {
             Some(rest) => format!("{}{}", self.encoded_home, rest),
             None => s.to_string(),
@@ -189,5 +254,73 @@ mod tests {
         let b = Tokenizer::new("/home/bob");
         let logical = a.tokenize_encoded("-Users-alice-dev-proj");
         assert_eq!(b.expand_encoded(&logical), "-home-bob-dev-proj");
+    }
+
+    /// The real fleet shape: Windows clone outside home, Mac clone inside it.
+    fn fleet() -> (Tokenizer, Tokenizer) {
+        const ID: &str = "github.com/johnkesko/vibesync";
+        let mut w_map = crate::gitmap::GitMap::default();
+        w_map.roots.insert(ID.into(), "C:\\Temp\\vibesync".into());
+        let mut m_map = crate::gitmap::GitMap::default();
+        m_map.roots.insert(ID.into(), "/Users/you/Development/7_rust/vibesync".into());
+        let w = Tokenizer::with_case_sensitivity("C:\\Users\\you", true).with_gitmap(&w_map);
+        let m = Tokenizer::with_case_sensitivity("/Users/you", false).with_gitmap(&m_map);
+        (w, m)
+    }
+
+    #[test]
+    fn git_plain_cross_machine_and_canonical() {
+        let (w, m) = fleet();
+        // Windows session cwd -> canonical token -> Mac local path.
+        let tok = w.tokenize_plain("C:\\Temp\\vibesync");
+        assert_eq!(tok, "${GIT:github.com:johnkesko:vibesync}");
+        assert_eq!(m.expand_plain(&tok), "/Users/you/Development/7_rust/vibesync");
+        // Subdirectory tails survive with canonical separators.
+        let tok = w.tokenize_plain("C:\\Temp\\vibesync\\app\\src-tauri");
+        assert_eq!(tok, "${GIT:github.com:johnkesko:vibesync}/app/src-tauri");
+        // tokenize(expand(x)) == x on both machines — the no-duplication law.
+        assert_eq!(w.tokenize_plain(&w.expand_plain(&tok)), tok);
+        assert_eq!(m.tokenize_plain(&m.expand_plain(&tok)), tok);
+        // Mac side tokenizes to the SAME key even though its clone is under home.
+        assert_eq!(
+            m.tokenize_plain("/Users/you/Development/7_rust/vibesync/app/src-tauri"),
+            tok
+        );
+    }
+
+    #[test]
+    fn git_encoded_cross_machine() {
+        let (w, m) = fleet();
+        let tok = w.tokenize_encoded("C--Temp-vibesync");
+        assert_eq!(tok, "${GIT:github.com:johnkesko:vibesync}");
+        assert_eq!(
+            m.expand_encoded(&tok),
+            "-Users-you-Development-7-rust-vibesync"
+        );
+        // Boundary: a sibling dir sharing the prefix must not match.
+        assert_eq!(w.tokenize_encoded("C--Temp-vibesyncX"), "C--Temp-vibesyncX");
+        // Encoded subdir tail.
+        let tok = m.tokenize_encoded("-Users-you-Development-7-rust-vibesync-app");
+        assert_eq!(tok, "${GIT:github.com:johnkesko:vibesync}-app");
+        assert_eq!(w.expand_encoded(&tok), "C--Temp-vibesync-app");
+    }
+
+    #[test]
+    fn git_token_unresolvable_passes_through() {
+        let (w, _) = fleet();
+        let foreign = "${GIT:github.com:someone:other-repo}/x";
+        assert_eq!(w.expand_plain(foreign), foreign);
+        let foreign_enc = "${GIT:github.com:someone:other-repo}-x";
+        assert_eq!(w.expand_encoded(foreign_enc), foreign_enc);
+    }
+
+    #[test]
+    fn git_outranks_home_for_in_home_clones() {
+        let (_, m) = fleet();
+        // A repo under home must produce the GIT token, not ${HOME}.
+        let tok = m.tokenize_plain("/Users/you/Development/7_rust/vibesync");
+        assert!(tok.starts_with("${GIT:"), "{tok}");
+        // Non-repo home paths still tokenize to ${HOME}.
+        assert_eq!(m.tokenize_plain("/Users/you/other"), "${HOME}/other");
     }
 }
