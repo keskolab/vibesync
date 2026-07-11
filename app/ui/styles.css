@@ -533,3 +533,7 @@ footer {
   font-size: 10.5px;
   color: var(--text-3);
 }
+/* Keeps the version centered despite the cog on the right. */
+.footer-spacer {
+  width: 23px;
+}
