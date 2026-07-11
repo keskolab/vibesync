@@ -30,6 +30,7 @@ window-vibrancy = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
 anyhow = "1"
 url = "2"
 vibesync-engine = { path = "../../engine" }

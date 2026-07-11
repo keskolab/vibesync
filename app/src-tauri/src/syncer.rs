@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub store: engine::StoreConfig,
-    /// Stored in the config file with owner-only (0600) permissions — the
-    /// ~/.aws/credentials posture. Moves to the OS keychain with signed
-    /// release builds (unsigned dev builds re-prompt on every rebuild).
+    /// Secret values live in the OS keychain (one entry holding all of
+    /// them); this field then holds the "@keychain" marker. Plaintext is
+    /// only a fallback when the keychain is unavailable — the file stays
+    /// 0600 either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<String>,
     /// Plugins can be large — never synced unless the user opts in.
@@ -110,6 +111,111 @@ fn default_interval_mins() -> u64 {
     15
 }
 
+const KEYCHAIN_MARKER: &str = "@keychain";
+const KEYRING_SERVICE: &str = "VibeSync";
+const KEYRING_USER: &str = "store-secrets";
+
+/// Every secret in one keychain entry: one unlock prompt per (dev) binary,
+/// and the config file never holds live credentials.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct Secrets {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    passphrase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    s3_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    azure_sas: Option<String>,
+}
+
+static SECRETS_CACHE: std::sync::Mutex<Option<Secrets>> = std::sync::Mutex::new(None);
+
+fn keyring_entry() -> Result<keyring::Entry> {
+    Ok(keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)?)
+}
+
+fn read_secrets() -> Result<Secrets> {
+    if let Some(s) = SECRETS_CACHE.lock().unwrap().clone() {
+        return Ok(s);
+    }
+    let raw = keyring_entry()?.get_password()?;
+    let secrets: Secrets = serde_json::from_str(&raw)?;
+    *SECRETS_CACHE.lock().unwrap() = Some(secrets.clone());
+    Ok(secrets)
+}
+
+fn write_secrets(secrets: &Secrets) -> Result<()> {
+    keyring_entry()?.set_password(&serde_json::to_string(secrets)?)?;
+    *SECRETS_CACHE.lock().unwrap() = Some(secrets.clone());
+    Ok(())
+}
+
+/// Replace "@keychain" markers with the real values. Errors only when the
+/// config references the keychain and it can't be read (locked/denied).
+pub fn resolve_secrets(cfg: &mut AppConfig) -> Result<()> {
+    let needs = cfg.passphrase.as_deref() == Some(KEYCHAIN_MARKER)
+        || matches!(&cfg.store, engine::StoreConfig::S3 { secret_access_key, .. } if secret_access_key == KEYCHAIN_MARKER)
+        || matches!(&cfg.store, engine::StoreConfig::AzureSas { container_sas_url } if container_sas_url == KEYCHAIN_MARKER);
+    if !needs {
+        return Ok(());
+    }
+    let secrets = read_secrets().context(
+        "credentials are in the OS keychain but it could not be read — unlock the keychain and allow VibeSync",
+    )?;
+    if cfg.passphrase.as_deref() == Some(KEYCHAIN_MARKER) {
+        cfg.passphrase = secrets.passphrase.clone();
+    }
+    match &mut cfg.store {
+        engine::StoreConfig::S3 { secret_access_key, .. } if secret_access_key == KEYCHAIN_MARKER => {
+            *secret_access_key = secrets.s3_secret.clone().unwrap_or_default();
+        }
+        engine::StoreConfig::AzureSas { container_sas_url } if container_sas_url == KEYCHAIN_MARKER => {
+            *container_sas_url = secrets.azure_sas.clone().unwrap_or_default();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Move secret values out of `cfg` into the keychain, leaving markers.
+/// Returns the scrubbed config; on keychain failure returns None (caller
+/// falls back to plaintext-on-disk so nothing is ever lost).
+fn scrub_secrets(cfg: &AppConfig) -> Option<AppConfig> {
+    let mut secrets = Secrets::default();
+    let mut scrubbed = cfg.clone();
+    if let Some(p) = &cfg.passphrase {
+        if p != KEYCHAIN_MARKER {
+            secrets.passphrase = Some(p.clone());
+            scrubbed.passphrase = Some(KEYCHAIN_MARKER.to_string());
+        }
+    }
+    match &mut scrubbed.store {
+        engine::StoreConfig::S3 { secret_access_key, .. } if secret_access_key != KEYCHAIN_MARKER => {
+            secrets.s3_secret = Some(std::mem::replace(secret_access_key, KEYCHAIN_MARKER.to_string()));
+        }
+        engine::StoreConfig::AzureSas { container_sas_url } if container_sas_url != KEYCHAIN_MARKER => {
+            secrets.azure_sas = Some(std::mem::replace(container_sas_url, KEYCHAIN_MARKER.to_string()));
+        }
+        _ => {}
+    }
+    if secrets.passphrase.is_none() && secrets.s3_secret.is_none() && secrets.azure_sas.is_none() {
+        return Some(scrubbed); // nothing new to store (already markers / folder store)
+    }
+    // Merge with whatever is already in the keychain so a partial update
+    // (e.g. only passphrase) keeps the other values.
+    let mut merged = read_secrets().unwrap_or_default();
+    if secrets.passphrase.is_some() {
+        merged.passphrase = secrets.passphrase;
+    }
+    if secrets.s3_secret.is_some() {
+        merged.s3_secret = secrets.s3_secret;
+    }
+    if secrets.azure_sas.is_some() {
+        merged.azure_sas = secrets.azure_sas;
+    }
+    write_secrets(&merged).ok()?;
+    Some(scrubbed)
+}
+
 /// The config holds credentials — owner-only, like ~/.aws/credentials.
 fn restrict_perms(path: &std::path::Path) {
     #[cfg(unix)]
@@ -126,12 +232,23 @@ pub fn load_config(paths: &Paths) -> Result<Option<AppConfig>> {
         return Ok(None);
     }
     restrict_perms(&paths.config); // heal configs written by older builds
-    let cfg = serde_json::from_slice(&std::fs::read(&paths.config)?)?;
-    Ok(Some(cfg))
+    let cfg: AppConfig = serde_json::from_slice(&std::fs::read(&paths.config)?)?;
+    // One-time migration: plaintext secrets from older builds move to the
+    // keychain (save_config scrubs). Skipped when already markers.
+    let has_plain = cfg.passphrase.as_deref().map(|p| p != KEYCHAIN_MARKER).unwrap_or(false)
+        || matches!(&cfg.store, engine::StoreConfig::S3 { secret_access_key, .. } if secret_access_key != KEYCHAIN_MARKER)
+        || matches!(&cfg.store, engine::StoreConfig::AzureSas { container_sas_url } if container_sas_url != KEYCHAIN_MARKER);
+    if has_plain {
+        let _ = save_config(paths, &cfg);
+    }
+    Ok(Some(cfg)) // markers intact; resolve_secrets() when credentials needed
 }
 
 pub fn save_config(paths: &Paths, cfg: &AppConfig) -> Result<()> {
-    std::fs::write(&paths.config, serde_json::to_vec_pretty(cfg)?)?;
+    // Prefer keychain-scrubbed; fall back to plaintext (0600) if the
+    // keychain is unavailable rather than losing the credentials.
+    let on_disk = scrub_secrets(cfg).unwrap_or_else(|| cfg.clone());
+    std::fs::write(&paths.config, serde_json::to_vec_pretty(&on_disk)?)?;
     restrict_perms(&paths.config);
     Ok(())
 }
@@ -463,7 +580,8 @@ pub struct SyncOutcome {
 /// `progress(done, total)` fires as push chunks complete; `total + 1` marks
 /// the pull phase, and the final call is `(total + 1, total + 1)`.
 pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) -> Result<SyncOutcome> {
-    let config = load_config(paths)?.context("VibeSync is not configured yet")?;
+    let mut config = load_config(paths)?.context("VibeSync is not configured yet")?;
+    resolve_secrets(&mut config)?;
     let store = engine::open_store(&config.store, config.passphrase.as_deref())?;
     let tok = engine::Tokenizer::from_env()?;
     let home = dirs::home_dir().context("no home dir")?;
