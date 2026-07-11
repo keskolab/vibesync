@@ -369,6 +369,11 @@ header {
   padding-right: 4px;
 }
 
+/* card title kept on one line (tlabel is a flex column — without this the
+   title and its note stack as separate rows) */
+.tname {
+  white-space: nowrap;
+}
 /* de-emphasized parenthetical after a card title */
 .name-note {
   font-weight: 400;
