@@ -371,6 +371,18 @@ fn position_popover(app: tauri::AppHandle) {
     }
 }
 
+/// Resize and re-anchor in one atomic step — two separate async calls race
+/// on Windows (the bottom-anchored placement computed with a stale height).
+#[tauri::command]
+fn fit_popover(app: tauri::AppHandle, width: f64, height: f64) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_size(tauri::LogicalSize { width, height });
+        if !cfg!(target_os = "macos") {
+            place_popover(&win);
+        }
+    }
+}
+
 #[tauri::command]
 fn show_popover(app: tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
@@ -484,6 +496,7 @@ pub fn run() {
             configure_default_store,
             sync_now,
             position_popover,
+            fit_popover,
             set_sync_plugins,
             set_tool_enabled,
             is_dev,

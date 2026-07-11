@@ -56,11 +56,7 @@ function fitWindow() {
     const page = $("pages").children[currentPage];
     const footer = document.querySelector("footer");
     const h = Math.min(640, page.offsetHeight + footer.offsetHeight + 2);
-    if (tauri?.window && tauri?.dpi) {
-      tauri.window.getCurrentWindow().setSize(new tauri.dpi.LogicalSize(320, h));
-      // Bottom-anchored on Windows: re-place after height changes.
-      if (!IS_MAC) invoke("position_popover").catch(() => {});
-    }
+    invoke("fit_popover", { width: 320, height: h }).catch(() => {});
   });
 }
 
