@@ -362,7 +362,14 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
             last = std::time::Instant::now();
             if let Ok(paths) = syncer::paths(&app) {
                 set_tray_busy(&app, true);
-                let result = syncer::sync_now(&paths, |_, _| {});
+                // Tell an open popover the background sync started — the tray
+                // icon alone isn't visible from inside the window.
+                let _ = app.emit("autosync-start", ());
+                let emitter = app.clone();
+                let result = syncer::sync_now(&paths, move |done, total| {
+                    let _ = emitter
+                        .emit("sync-progress", serde_json::json!({ "done": done, "total": total }));
+                });
                 set_tray_busy(&app, false);
                 match result {
                     Ok(outcome) => {

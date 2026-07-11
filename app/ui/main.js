@@ -361,8 +361,13 @@ window.addEventListener("DOMContentLoaded", async () => {
     $("progress-bar").style.width = `${Math.round((done / total) * 100)}%`;
   });
 
-  // Background autosync finished while the popover may be open.
-  tauri?.event.listen("autosync-done", () => refreshStatus().catch(() => {}));
+  // Background autosync: mirror the tray's busy state inside the popover.
+  tauri?.event.listen("autosync-start", () => setBusy(true, "Syncing\u2026"));
+  tauri?.event.listen("autosync-done", () => {
+    setBusy(false);
+    refreshStatus().catch(() => {});
+  });
+  tauri?.event.listen("autosync-error", () => setBusy(false));
 
   // Settings toggles: launch at login + autosync.
   invoke("get_settings").then((s) => {
