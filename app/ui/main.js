@@ -219,7 +219,7 @@ function renderAll() {
   if (status.sharedInstalled) {
     sl.innerHTML = `<li>
       ${ICONS.shared}
-      <div class="tlabel">Global skills<span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"} · ${fmtSizeStr(status.sharedBytes)}${newBadge(status.sharedNew, status.sharedNewMs)}<br>${SKILLS_PATH} — shared by all AI tools</span></div>
+      <div class="tlabel">Global Skills <span class="name-note">(shared by all AI tools)</span><span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"}, ${fmtSizeStr(status.sharedBytes)}${newBadge(status.sharedNew, status.sharedNewMs)}<br>Path: ${SKILLS_PATH}</span></div>
       <label class="switch"><input type="checkbox" ${status.sharedEnabled ? "checked" : ""} /><span class="knob"></span></label>`;
     sl.querySelector("label.switch").addEventListener("click", (e) => e.stopPropagation());
     sl.querySelector("input").addEventListener("change", async (e) => {
@@ -234,7 +234,7 @@ function renderAll() {
   } else {
     sl.innerHTML = `<li class="muted">
       ${ICONS.shared}
-      <div class="tlabel">Global skills<span class="tsub">No skills folder on this ${DEVICE} yet.<br>Create ${SKILLS_PATH} to share skills across your computers.</span></div>
+      <div class="tlabel">Global Skills <span class="name-note">(shared by all AI tools)</span><span class="tsub">No skills folder on this ${DEVICE} yet.<br>Path: ${SKILLS_PATH} — press Create to make it.</span></div>
       <button class="row-btn" id="create-skills">Create</button>`;
     sl.querySelector("#create-skills").addEventListener("click", async () => {
       status = await invoke("create_skills_dir");
