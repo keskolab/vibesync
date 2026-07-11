@@ -216,7 +216,7 @@ function renderEncryption() {
         <div class="strength"><div class="fill" id="pp-strength"></div></div>
         <div class="field"><label>Confirm passphrase</label><input type="password" id="pp2" /></div>
         <p class="inline-note" id="pp-note">Required \u2014 your data is always encrypted before it reaches ${b.name}.</p>
-        <p class="inline-note">You'll enter the same passphrase on each machine. It never leaves your ${DEVICES} \u2014 if you lose it, the data can't be recovered.</p>
+        <p class="inline-note">You'll enter the same passphrase on each machine. It never leaves your computer \u2014 if you lose it, the data can't be recovered.</p>
       </div>`;
     const pp1 = body.querySelector("#pp1");
     const pp2 = body.querySelector("#pp2");
