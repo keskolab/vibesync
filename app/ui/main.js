@@ -94,6 +94,13 @@ function fitWindow() {
 
 // ---------- rendering ----------
 
+function setSubText(msg) {
+  const el = $("substatus");
+  el.dataset.line = "";
+  el.innerHTML = `<span class="span-2"></span>`;
+  el.firstChild.textContent = msg;
+}
+
 function setPending(pending) {
   $("setup-pending").style.display = pending ? "flex" : "none";
   for (const id of ["counts", "hint", "tools-label", "tool-list", "shared-label", "shared-list", "sync-now", "progress"]) {
@@ -102,7 +109,7 @@ function setPending(pending) {
   if (pending) {
     $("status-dot").className = "dot";
     $("status-text").textContent = "Not set up";
-    $("substatus").textContent = "Waiting for setup";
+    setSubText("Choose where your sessions live to start syncing");
   }
   const setStore = $("set-store");
   if (setStore && pending) setStore.textContent = "Not set up";
@@ -124,7 +131,7 @@ function newBadge(count, ms) {
 }
 
 function renderStatusLine() {
-  if (!status) return;
+  if (!status || !status.configured) return;
   const when = status.lastSyncMs ? syncStamp(status.lastSyncMs) : "never";
   const loc = status.storeDesc || "not set";
   const auto = autosyncOn === null ? "" : `<span><span class="kv-label">Auto-sync:</span> ${autosyncOn ? "on" : "off"}</span>`;
@@ -138,7 +145,7 @@ function renderStatusLine() {
 }
 
 function renderAll() {
-  if (!status) return;
+  if (!status || !status.configured) return;
   // Totals across the apps that are actually syncing (installed + enabled).
   const active = status.tools.filter((t) => t.installed && t.enabled);
   statCards($("counts"), [
@@ -224,6 +231,8 @@ function renderAll() {
 
 async function refreshStatus() {
   status = await invoke("get_status");
+  if (!status.configured) localStorage.removeItem("setupDone");
+  setPending(!status.configured);
   renderAll();
 }
 
@@ -331,7 +340,7 @@ async function runSync(firstRun) {
   } catch (e) {
     $("status-dot").className = "dot";
     $("status-text").textContent = "Error";
-    $("substatus").textContent = String(e);
+    setSubText(String(e));
   } finally {
     setBusy(false);
     setTimeout(fitWindow, 260);
@@ -374,12 +383,10 @@ window.addEventListener("DOMContentLoaded", async () => {
       .catch(() => (e.target.checked = !e.target.checked))
   );
 
-  if (isSetup()) {
-    try {
-      await refreshStatus();
-    } catch (e) {
-      $("substatus").textContent = String(e);
-    }
+  try {
+    await refreshStatus();
+  } catch (e) {
+    setSubText(String(e));
   }
 
   // Onboarding finished → default store + real first sync.
