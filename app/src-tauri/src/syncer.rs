@@ -87,6 +87,7 @@ pub struct ToolStatus {
 pub struct Status {
     pub configured: bool,
     pub store_desc: Option<String>,
+    pub store_detail: Option<String>,
     pub last_sync_ms: Option<i64>,
     pub sync_plugins: bool,
     pub tools: Vec<ToolStatus>,
@@ -171,20 +172,29 @@ fn walkdir_files(root: &PathBuf, exclude_dirs: &[&str]) -> Vec<PathBuf> {
 pub fn status(paths: &Paths) -> Result<Status> {
     let home = dirs::home_dir().context("no home dir")?;
     let config = load_config(paths)?;
+    // Short, human description for the status line; the full detail goes in
+    // the tooltip. Users think "my code-sync bucket on R2", not endpoints.
     let store_desc = config.as_ref().map(|c| match &c.store {
         engine::StoreConfig::Folder { path, encrypted } => {
-            format!("Folder: {path}{}", if *encrypted { " (encrypted)" } else { "" })
+            let name = std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            format!("folder \u{201c}{name}\u{201d}{}", if *encrypted { " \u{1f512}" } else { "" })
         }
         engine::StoreConfig::S3 { bucket, endpoint, .. } => {
-            format!("Bucket: {bucket} @ {endpoint} (encrypted)")
+            let kind = if endpoint.contains("r2.cloudflarestorage") { "R2" } else { "S3" };
+            format!("{kind} bucket \u{201c}{bucket}\u{201d} \u{1f512}")
         }
-        engine::StoreConfig::AzureSas { container_sas_url } => {
-            let host = url::Url::parse(container_sas_url)
-                .ok()
-                .and_then(|u| u.host_str().map(str::to_string))
-                .unwrap_or_default();
-            format!("Azure: {host} (encrypted)")
-        }
+        engine::StoreConfig::AzureSas { .. } => "Azure container \u{1f512}".to_string(),
+    });
+    let store_detail = config.as_ref().map(|c| match &c.store {
+        engine::StoreConfig::Folder { path, .. } => path.clone(),
+        engine::StoreConfig::S3 { bucket, endpoint, .. } => format!("{bucket} @ {endpoint}, encrypted client-side"),
+        engine::StoreConfig::AzureSas { container_sas_url } => url::Url::parse(container_sas_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| format!("{h}, encrypted client-side")))
+            .unwrap_or_default(),
     });
     let last_sync_ms = std::fs::metadata(&paths.state)
         .and_then(|m| m.modified())
@@ -200,6 +210,7 @@ pub fn status(paths: &Paths) -> Result<Status> {
     Ok(Status {
         configured: config.is_some(),
         store_desc,
+        store_detail,
         last_sync_ms,
         sync_plugins,
         tools: vec![ToolStatus {

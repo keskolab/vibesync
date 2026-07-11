@@ -73,11 +73,11 @@ function setPending(pending) {
 function renderStatusLine() {
   if (!status) return;
   const when = status.lastSyncMs ? `Last synced ${relTime(status.lastSyncMs)}` : "Never synced";
-  const store = status.storeDesc ? status.storeDesc.split(/[\\/]/).pop() : "no store";
+  const store = status.storeDesc || "no store";
   const line = `${when} · ${store}`;
   if ($("substatus").textContent !== line) {
     $("substatus").textContent = line;
-    $("substatus").title = status.storeDesc || "";
+    $("substatus").title = status.storeDetail || "";
     setTimeout(fitWindow, 50); // long store names wrap to a second line
   }
 }
@@ -153,7 +153,7 @@ function openTool(t) {
   }
   $("tool-storage").innerHTML = `
     <div><span>Local size</span><b>${fmtMB(t.bytes)} MB</b></div>
-    <div><span>Store</span><b>${(status.storeDesc || "—").replace(/^[^:]+: /, "").split(/[\\/]/).pop()}</b></div>
+    <div><span>Store</span><b>${status.storeDesc || "—"}</b></div>
     <div><span>Adapter</span><b>${t.id} v1</b></div>`;
   goTo(1);
 }
