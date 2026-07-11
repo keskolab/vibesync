@@ -18,6 +18,9 @@ pub struct AppConfig {
     /// Plugins can be large — never synced unless the user opts in.
     #[serde(default)]
     pub sync_plugins: bool,
+    /// Background sync every ~15 minutes while the app runs.
+    #[serde(default)]
+    pub autosync: bool,
 }
 
 pub struct Paths {
@@ -56,6 +59,7 @@ pub fn default_config() -> Result<AppConfig> {
         },
         passphrase: None,
         sync_plugins: false,
+        autosync: false,
     })
 }
 
@@ -204,7 +208,9 @@ pub struct SyncOutcome {
     pub unchanged: usize,
 }
 
-pub fn sync_now(paths: &Paths) -> Result<SyncOutcome> {
+/// `progress(done, total)` fires as push chunks complete; `total + 1` marks
+/// the pull phase, and the final call is `(total + 1, total + 1)`.
+pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result<SyncOutcome> {
     let config = load_config(paths)?.context("Code Sync is not configured yet")?;
     let store = engine::open_store(&config.store, config.passphrase.as_deref())?;
     let tok = engine::Tokenizer::from_env()?;
@@ -217,10 +223,23 @@ pub fn sync_now(paths: &Paths) -> Result<SyncOutcome> {
         state.mark_deletions(prefix, &entries);
     }
 
-    let push = engine::sync::push(&entries, &mut state, store.as_ref(), &engine::machine_name())?;
+    // Chunked push so the UI gets real progress.
+    let total = entries.len();
+    let machine = engine::machine_name();
+    let mut push = engine::Report::default();
+    let mut done = 0usize;
+    for chunk in entries.chunks(10) {
+        let r = engine::sync::push(chunk, &mut state, store.as_ref(), &machine)?;
+        push.pushed += r.pushed;
+        push.unchanged += r.unchanged;
+        done += chunk.len();
+        progress(done, total + 1);
+    }
+
     let pull =
         engine::sync::pull(&CLAUDE_CODE, &home, &tok, &mut state, store.as_ref(), include_plugins)?;
     state.save(&paths.state)?;
+    progress(total + 1, total + 1);
 
     Ok(SyncOutcome {
         pushed: push.pushed,

@@ -12,6 +12,12 @@ use tauri_plugin_positioner::{Position, WindowExt};
 /// tray event, so track whether one has happened in this process.
 static TRAY_SEEN: AtomicBool = AtomicBool::new(false);
 
+/// Background autosync switch, mirrored from config at startup and toggled
+/// from the UI. The worker thread polls it.
+static AUTOSYNC: AtomicBool = AtomicBool::new(false);
+
+const AUTOSYNC_INTERVAL_SECS: u64 = 15 * 60;
+
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
@@ -80,12 +86,79 @@ fn is_dev() -> bool {
 #[tauri::command]
 async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Emitter;
         let paths = syncer::paths(&app)?;
-        syncer::sync_now(&paths)
+        let emitter = app.clone();
+        syncer::sync_now(&paths, move |done, total| {
+            let _ = emitter.emit("sync-progress", serde_json::json!({ "done": done, "total": total }));
+        })
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| format!("{e:#}"))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsState {
+    autostart: bool,
+    autosync: bool,
+}
+
+#[tauri::command]
+fn get_settings(app: tauri::AppHandle) -> SettingsState {
+    use tauri_plugin_autostart::ManagerExt;
+    SettingsState {
+        autostart: app.autolaunch().is_enabled().unwrap_or(false),
+        autosync: AUTOSYNC.load(Ordering::Relaxed),
+    }
+}
+
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let l = app.autolaunch();
+    if enabled { l.enable() } else { l.disable() }.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_autosync(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    AUTOSYNC.store(enabled, Ordering::Relaxed);
+    let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    if let Ok(Some(mut cfg)) = syncer::load_config(&paths) {
+        cfg.autosync = enabled;
+        syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Background worker: while autosync is on, sync every ~15 minutes and let an
+/// open popover know so it can refresh.
+fn spawn_autosync_worker(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        use tauri::Emitter;
+        let mut last = std::time::Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            if !AUTOSYNC.load(Ordering::Relaxed) {
+                continue;
+            }
+            if last.elapsed().as_secs() < AUTOSYNC_INTERVAL_SECS {
+                continue;
+            }
+            last = std::time::Instant::now();
+            if let Ok(paths) = syncer::paths(&app) {
+                match syncer::sync_now(&paths, |_, _| {}) {
+                    Ok(outcome) => {
+                        let _ = app.emit("autosync-done", serde_json::json!(outcome));
+                    }
+                    Err(e) => {
+                        let _ = app.emit("autosync-error", format!("{e:#}"));
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -186,6 +259,10 @@ fn tray_icon() -> Image<'static> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .invoke_handler(tauri::generate_handler![
             quit_app,
             show_onboarding,
@@ -197,7 +274,10 @@ pub fn run() {
             configure_default_store,
             sync_now,
             set_sync_plugins,
-            is_dev
+            is_dev,
+            get_settings,
+            set_autostart,
+            set_autosync
         ])
         .setup(|app| {
             // Menu bar app: no Dock icon.
@@ -247,6 +327,14 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // Autosync: restore the persisted flag and start the worker.
+            if let Ok(paths) = syncer::paths(app.handle()) {
+                if let Ok(Some(cfg)) = syncer::load_config(&paths) {
+                    AUTOSYNC.store(cfg.autosync, Ordering::Relaxed);
+                }
+            }
+            spawn_autosync_worker(app.handle().clone());
 
             Ok(())
         })

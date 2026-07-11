@@ -164,11 +164,12 @@ function setBusy(busy, label) {
   $("status-dot").className = busy ? "dot busy" : "dot ok";
   $("status-text").textContent = busy ? "Syncing" : "Synced";
   $("progress").classList.toggle("active", busy);
-  $("progress-bar").style.width = busy ? "90%" : "0";
+  if (!busy) $("progress-bar").style.width = "0";
 }
 
 async function runSync(firstRun) {
   setBusy(true, firstRun ? "First sync…" : "Syncing…");
+  $("progress-bar").style.width = "0";
   if (firstRun) $("substatus").textContent = "First sync in progress…";
   try {
     const outcome = await invoke("sync_now");
@@ -200,6 +201,27 @@ window.addEventListener("DOMContentLoaded", async () => {
   invoke("is_dev").then((dev) => {
     if (!dev) $("reset-firstrun").style.display = "none";
   });
+
+  // Real progress from the engine's chunked push.
+  tauri?.event.listen("sync-progress", (e) => {
+    const { done, total } = e.payload;
+    $("progress-bar").style.width = `${Math.round((done / total) * 100)}%`;
+  });
+
+  // Background autosync finished while the popover may be open.
+  tauri?.event.listen("autosync-done", () => refreshStatus().catch(() => {}));
+
+  // Settings toggles: launch at login + autosync.
+  invoke("get_settings").then((s) => {
+    $("opt-autostart").checked = s.autostart;
+    $("opt-autosync").checked = s.autosync;
+  });
+  $("opt-autostart").addEventListener("change", (e) =>
+    invoke("set_autostart", { enabled: e.target.checked }).catch(() => (e.target.checked = !e.target.checked))
+  );
+  $("opt-autosync").addEventListener("change", (e) =>
+    invoke("set_autosync", { enabled: e.target.checked }).catch(() => (e.target.checked = !e.target.checked))
+  );
 
   if (isSetup()) {
     try {
