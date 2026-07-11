@@ -1,5 +1,5 @@
-// VibeSync onboarding — pure UX mock. The flow adapts to the chosen storage:
-// iCloud skips credentials and passphrase; everything else routes through them.
+// VibeSync onboarding — real detection and real store tests. The flow adapts
+// to the chosen storage: folders skip the passphrase; cloud requires one.
 
 const tauri = window.__TAURI__;
 const IS_MAC = /Mac/i.test(navigator.platform || navigator.userAgent);
@@ -210,7 +210,7 @@ function renderEncryption() {
       </div>`;
   } else {
     $("enc-title").textContent = "Choose a passphrase";
-    $("enc-sub").textContent = `Everything is encrypted on this ${DEVICE} before it reaches ${b.name}. ${b.name === "External disk / USB" ? "Anyone with the disk" : b.name} only ever sees ciphertext.`;
+    $("enc-sub").textContent = `Everything is encrypted on this ${DEVICE} before it reaches ${b.name}. ${b.name} only ever sees ciphertext.`;
     body.innerHTML = `
       <div class="form">
         <div class="field"><label>Passphrase</label><input type="password" id="pp1" placeholder="At least 12 characters" /></div>
@@ -256,7 +256,7 @@ function renderDone() {
     <div><span>Storage</span><b>${b.name}</b></div>
     <div><span>Encryption</span><b>${needsPassphrase() ? "Passphrase (age)" : "None (your folder)"}</b></div>
     <div><span>Tools</span><b>${OB_TOOLS.filter((t) => t.on).map((t) => t.name).join(", ") || "None selected"}</b></div>
-    <div><span>This machine</span><b>${existing?.machine || ""}</b></div>`;
+    <div><span>This machine</span><b>${existing?.machine || "\u2014"}</b></div>`;
   const old = document.getElementById("switch-warning");
   if (old) old.remove();
   if (existing?.configured) {

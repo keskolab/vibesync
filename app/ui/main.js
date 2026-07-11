@@ -1,5 +1,6 @@
-// VibeSync popover — M2: real engine data for Claude Code; other tools are
-// shown as "adapter coming" placeholders until their adapters land.
+// VibeSync popover — all data comes from the engine via get_status; the only
+// static text here is labels. No mock values: anything dynamic-looking must
+// be filled from a backend call or left empty until one succeeds.
 
 const tauri = window.__TAURI__;
 const invoke = (cmd, args) => tauri.core.invoke(cmd, args);
@@ -40,8 +41,6 @@ const ICONS = {
   shared:
     '<svg class="row-icon" viewBox="0 0 16 16"><path d="M8 0.8l1.7 5.5L15.2 8l-5.5 1.7L8 15.2 6.3 9.7 0.8 8l5.5-1.7L8 0.8z"/></svg>',
 };
-
-const COMING_SOON = [];
 
 let status = null; // last get_status result
 const isSetup = () => !!localStorage.getItem("setupDone");
@@ -218,14 +217,6 @@ function renderAll() {
       renderAll();
     });
   }
-  for (const t of COMING_SOON) {
-    const li = document.createElement("li");
-    li.className = "muted";
-    li.innerHTML = `${ICONS[t.id] || ""}
-      <div class="tlabel">${t.name}<span class="tsub">Adapter coming soon</span></div>
-      <span class="na">—</span>`;
-    ul.appendChild(li);
-  }
   fitWindow();
 }
 
@@ -302,7 +293,7 @@ function openTool(t) {
   $("tool-storage").innerHTML = `
     <div><span>Last activity</span><b>${t.lastActivityMs ? syncStamp(t.lastActivityMs) : "—"}</b></div>
     <div><span>Store</span><b>${status.storeDesc || "—"}</b></div>
-    <div><span>Adapter</span><b>${t.id} v1</b></div>`;
+    <div><span>Adapter</span><b>${t.id}</b></div>`;
   goTo(1);
 }
 
@@ -313,8 +304,10 @@ function setBusy(busy, label) {
   btn.classList.toggle("busy", busy);
   btn.disabled = busy;
   $("sync-label").textContent = busy ? label : "Sync Now";
-  $("status-dot").className = busy ? "dot busy" : "dot ok";
-  $("status-text").textContent = busy ? "Syncing" : "Synced";
+  if (busy) {
+    $("status-dot").className = "dot busy";
+    $("status-text").textContent = "Syncing";
+  }
   $("progress").classList.toggle("active", busy);
   if (!busy) $("progress-bar").style.width = "0";
   setTimeout(fitWindow, 50); // busy label/progress change the page height
@@ -323,7 +316,7 @@ function setBusy(busy, label) {
 async function runSync(firstRun) {
   setBusy(true, firstRun ? "First sync…" : "Syncing…");
   $("progress-bar").style.width = "0";
-  if (firstRun) $("substatus").textContent = "First sync in progress…";
+  if (firstRun) setSubText("First sync in progress…");
   try {
     const outcome = await invoke("sync_now");
     await refreshStatus();
@@ -353,6 +346,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   setInterval(renderStatusLine, 15000);
 
   setPending(!isSetup());
+  invoke("engine_version").then((v) => { $("version").textContent = `v${v}`; }).catch(() => {});
   $("open-setup").addEventListener("click", () => invoke("show_onboarding"));
 
   // Real progress from the engine's chunked push.
@@ -367,7 +361,12 @@ window.addEventListener("DOMContentLoaded", async () => {
     setBusy(false);
     refreshStatus().catch(() => {});
   });
-  tauri?.event.listen("autosync-error", () => setBusy(false));
+  tauri?.event.listen("autosync-error", (e) => {
+    setBusy(false);
+    $("status-dot").className = "dot";
+    $("status-text").textContent = "Error";
+    setSubText(String(e.payload || "Sync failed"));
+  });
 
   // Settings toggles: launch at login + autosync.
   invoke("get_settings").then((s) => {

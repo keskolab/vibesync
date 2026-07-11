@@ -70,9 +70,8 @@ struct OnboardTool {
     sessions: usize,
 }
 
-/// Real detection for the setup assistant: probe each known tool's storage.
-/// Only Claude Code has a sync adapter today; the rest are detected and shown
-/// as "coming soon" so the list is honest, never a dead toggle.
+/// Real detection for the setup assistant: probe each known tool's storage
+/// with the same engine detects the syncer uses, so the two can't drift.
 #[tauri::command]
 fn detect_onboarding_tools() -> Vec<OnboardTool> {
     let Some(home) = dirs::home_dir() else { return vec![] };
