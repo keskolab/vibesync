@@ -99,7 +99,7 @@ fn detect_onboarding_tools() -> Vec<OnboardTool> {
         OnboardTool { id: "codex", name: "Codex", installed: exists(".codex/sessions"), supported: false, sessions: count_jsonl(".codex/sessions") },
         OnboardTool { id: "opencode", name: "OpenCode", installed: exists(".local/share/opencode"), supported: false, sessions: 0 },
         OnboardTool { id: "zed", name: "Zed", installed: exists("Library/Application Support/Zed/threads/threads.db"), supported: false, sessions: 0 },
-        OnboardTool { id: "vscode", name: "VS Code", installed: exists("Library/Application Support/Code/User/workspaceStorage"), supported: false, sessions: 0 },
+        OnboardTool { id: "vscode", name: "VS Code", installed: vibesync_engine::vscode::detect(), supported: true, sessions: vibesync_engine::vscode::light_counts().0 },
     ]
 }
 

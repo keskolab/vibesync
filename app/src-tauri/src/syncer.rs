@@ -91,6 +91,7 @@ pub struct ToolStatus {
     pub id: &'static str,
     pub name: &'static str,
     pub installed: bool,
+    pub enabled: bool,
     pub sessions: usize,
     pub plans: usize,
     pub bytes: u64,
@@ -227,10 +228,13 @@ pub fn status(paths: &Paths) -> Result<Status> {
         .map(|d| d.as_millis() as i64);
 
     let sync_plugins = config.as_ref().map(|c| c.sync_plugins).unwrap_or(false);
-    let claude_enabled = config
-        .as_ref()
-        .map(|c| !c.disabled_tools.iter().any(|t| t == "claude-code"))
-        .unwrap_or(true);
+    let enabled_for = |id: &str| {
+        config
+            .as_ref()
+            .map(|c| !c.disabled_tools.iter().any(|t| t == id))
+            .unwrap_or(true)
+    };
+    let claude_enabled = enabled_for("claude-code");
     let installed = CLAUDE_CODE.detect(&home);
     let (sessions, plans, bytes) =
         if installed { light_counts(&home, sync_plugins) } else { (0, 0, 0) };
@@ -243,14 +247,29 @@ pub fn status(paths: &Paths) -> Result<Status> {
         sync_plugins,
         claude_enabled,
         machine: engine::machine_name(),
-        tools: vec![ToolStatus {
-            id: CLAUDE_CODE.id,
-            name: CLAUDE_CODE.name,
-            installed,
-            sessions,
-            plans,
-            bytes,
-        }],
+        tools: {
+            let (vs_sessions, vs_bytes) = engine::vscode::light_counts();
+            vec![
+                ToolStatus {
+                    id: CLAUDE_CODE.id,
+                    name: CLAUDE_CODE.name,
+                    installed,
+                    enabled: claude_enabled,
+                    sessions,
+                    plans,
+                    bytes,
+                },
+                ToolStatus {
+                    id: "vscode",
+                    name: "VS Code",
+                    installed: engine::vscode::detect(),
+                    enabled: enabled_for("vscode"),
+                    sessions: vs_sessions,
+                    plans: 0,
+                    bytes: vs_bytes,
+                },
+            ]
+        },
     })
 }
 
@@ -278,23 +297,31 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     let tok = engine::Tokenizer::from_env()?;
     let home = dirs::home_dir().context("no home dir")?;
 
-    if config.disabled_tools.iter().any(|t| t == "claude-code") {
-        // The only adapter is switched off; nothing to do.
-        return Ok(SyncOutcome::default());
-    }
     let include_plugins = config.sync_plugins;
     let mut state = engine::SyncState::load(&paths.state)?;
+    let claude_on = !config.disabled_tools.iter().any(|t| t == "claude-code");
+    let vscode_on = !config.disabled_tools.iter().any(|t| t == "vscode");
     // All config dirs: ~/.claude plus auto-detected ~/.claude-* profiles.
     let dirs = engine::adapters::Adapter::detect_config_dirs(&home);
     let mut entries = Vec::new();
-    for dir in &dirs {
-        entries.extend(CLAUDE_CODE.scan_dir(&home, dir, &tok, include_plugins)?);
-    }
-    for dir in &dirs {
-        for prefix in CLAUDE_CODE.logical_prefixes(include_plugins) {
-            let p = if dir == ".claude" { prefix.to_string() } else { format!("profiles/{dir}/{prefix}") };
-            state.mark_deletions(&p, &entries);
+    if claude_on {
+        for dir in &dirs {
+            entries.extend(CLAUDE_CODE.scan_dir(&home, dir, &tok, include_plugins)?);
         }
+    }
+    if vscode_on {
+        entries.extend(engine::vscode::scan(&home)?);
+    }
+    if claude_on {
+        for dir in &dirs {
+            for prefix in CLAUDE_CODE.logical_prefixes(include_plugins) {
+                let p = if dir == ".claude" { prefix.to_string() } else { format!("profiles/{dir}/{prefix}") };
+                state.mark_deletions(&p, &entries);
+            }
+        }
+    }
+    if vscode_on {
+        state.mark_deletions("vscode/ws", &entries);
     }
 
     // Chunked push so the UI gets real progress.
@@ -311,7 +338,16 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     }
 
     let mut pull = engine::Report::default();
-    for dir in &dirs {
+    if vscode_on {
+        let r = engine::vscode::apply(store.as_ref(), &mut state, &home)?;
+        pull.pulled += r.applied;
+        pull.unchanged += r.unchanged;
+        pull.skipped_newer_local += r.skipped_newer_local;
+    }
+    if !claude_on {
+        // Claude disabled: skip its pull loops entirely.
+    }
+    for dir in dirs.iter().filter(|_| claude_on) {
         let r = engine::sync::pull_dir(
             &CLAUDE_CODE, &home, dir, &tok, &mut state, store.as_ref(), include_plugins,
         )?;
@@ -324,7 +360,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     progress(total + 1, total + 1);
 
     let (registry_pushed, registry_applied, registry_ghosts, registry_healed) =
-        if config.sync_registry {
+        if config.sync_registry && claude_on {
             sync_registry(paths, store.as_ref(), &tok, &mut state).unwrap_or((0, 0, 0, 0))
         } else {
             (0, 0, 0, 0)

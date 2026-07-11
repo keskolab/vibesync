@@ -16,7 +16,6 @@ const ICONS = {
 
 const COMING_SOON = [
   { id: "codex", name: "Codex" },
-  { id: "vscode", name: "VS Code" },
   { id: "zed", name: "Zed" },
 ];
 
@@ -114,7 +113,7 @@ function renderAll() {
       <div class="tlabel">${t.name}<span class="tsub">${
         t.installed ? `${t.sessions} sessions · ${t.plans} plans · ${fmtMB(t.bytes)} MB` : "Not installed"
       }</span></div>
-      ${t.installed ? `<label class="switch"><input type="checkbox" ${status.claudeEnabled ? "checked" : ""} /><span class="knob"></span></label>
+      ${t.installed ? `<label class="switch"><input type="checkbox" ${t.enabled ? "checked" : ""} /><span class="knob"></span></label>
        <svg class="chevron" viewBox="0 0 16 16"><path d="M5.5 3l5 5-5 5-1-1 4-4-4-4z"/></svg>` : `<span class="na">—</span>`}`;
     if (t.installed) {
       const input = li.querySelector("input");

@@ -10,6 +10,7 @@ pub mod state;
 pub mod store;
 pub mod sync;
 pub mod tokenizer;
+pub mod vscode;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
