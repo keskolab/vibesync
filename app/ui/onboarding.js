@@ -130,9 +130,9 @@ function renderConfigure() {
   }
 
   const forms = {
-    r2: field("cfg-account", "Account ID", "d8efee78803a1e14\u2026") + field("cfg-bucket", "Bucket", "codesync")
+    r2: field("cfg-bucket", "Bucket", "codesync") + field("cfg-account", "Account ID", "d8efee78803a1e14\u2026")
       + field("cfg-key", "Access key ID", "") + field("cfg-secret", "Secret access key", "", "password"),
-    s3: field("cfg-region", "Region", "eu-north-1") + field("cfg-bucket", "Bucket", "codesync")
+    s3: field("cfg-bucket", "Bucket", "codesync") + field("cfg-region", "Region", "eu-north-1")
       + field("cfg-key", "Access key ID", "") + field("cfg-secret", "Secret access key", "", "password"),
     azure: field("cfg-sas", "Container SAS URL", "https://acct.blob.core.windows.net/container?sv=\u2026"),
   };
