@@ -293,8 +293,22 @@ body.onboarding .toggles {
   user-select: text;
   -webkit-user-select: text;
 }
+/* Fully CSS-drawn select: WebView2's native select chrome ignores the page's
+   dark scheme (the jurisdiction dropdown rendered light-on-light), so never
+   let it paint — custom chevron, and OPAQUE option backgrounds because the
+   popup canvas behind translucent options is not ours to control. */
+.field select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: var(--menu-chevron);
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 10px 6px;
+  padding-right: 28px;
+  cursor: pointer;
+}
 .field select option {
-  background: var(--input-bg);
+  background: var(--menu-bg);
   color: var(--text);
 }
 .field input:focus,
