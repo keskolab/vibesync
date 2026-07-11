@@ -434,7 +434,10 @@ mod tests {
         let ws_a = make_ws(
             &a_root,
             "aaaa1111",
-            &format!("file://{}/dev/app", a_home.to_string_lossy()),
+            // Forward slashes: a raw Windows tempdir path would put `\U`
+            // escapes inside the JSON literal and break parsing. Real VS Code
+            // URIs are always forward-slash.
+            &format!("file://{}/dev/app", a_home.to_string_lossy().replace('\\', "/")),
         );
         std::fs::create_dir_all(ws_a.join("chatSessions")).unwrap();
         std::fs::write(ws_a.join("chatSessions/s1.jsonl"), "{\"chat\":1}\n").unwrap();
@@ -456,7 +459,7 @@ mod tests {
         let ws_b = make_ws(
             &b_root,
             "bbbb2222",
-            &format!("file://{}/dev/app", b_home.to_string_lossy()),
+            &format!("file://{}/dev/app", b_home.to_string_lossy().replace('\\', "/")),
         );
         make_ws(&b_root, "cccc3333", "file:///somewhere/else");
 
