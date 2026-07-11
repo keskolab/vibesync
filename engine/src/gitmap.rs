@@ -148,6 +148,12 @@ fn origin_identity(config: &Path) -> Option<String> {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct GitMap {
     pub roots: BTreeMap<String, String>,
+    /// Former roots (the folder was moved/renamed): old transcript dirs keep
+    /// the old path baked into their names forever, so these stay recognized
+    /// when TOKENIZING — history keeps its canonical `${GIT}` keys instead of
+    /// re-keying and splitting into a second project. Never used to expand.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub aliases: BTreeMap<String, Vec<String>>,
 }
 
 impl GitMap {
@@ -163,14 +169,23 @@ impl GitMap {
     }
 
     /// Learn the repo containing `cwd`. Returns true if the map changed.
-    /// First mapping wins; a stored root replaced only once its path is gone.
+    /// First mapping wins; a stored root replaced only once its path is gone
+    /// — and the replaced root is kept as a tokenize-only alias so existing
+    /// transcript dirs (named after the old path) keep their canonical keys.
     pub fn learn(&mut self, cwd: &Path) -> bool {
         let Some((root, id)) = discover(cwd) else { return false };
         let root = root.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
         match self.roots.get(&id) {
             Some(existing) if Path::new(existing).exists() => false,
             Some(existing) if *existing == root => false,
-            _ => {
+            old => {
+                if let Some(old_root) = old.cloned() {
+                    let aliases = self.aliases.entry(id.clone()).or_default();
+                    if old_root != root && !aliases.contains(&old_root) {
+                        aliases.push(old_root);
+                    }
+                    aliases.retain(|a| *a != root);
+                }
                 self.roots.insert(id, root);
                 true
             }
@@ -204,6 +219,27 @@ mod tests {
         assert_eq!(normalize_origin("C:\\repos\\bare.git"), None);
         assert_eq!(normalize_origin("/srv/git/repo.git"), None);
         assert_eq!(normalize_origin(""), None);
+    }
+
+    #[test]
+    fn rename_keeps_old_root_as_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("old-spot");
+        std::fs::create_dir_all(old.join(".git")).unwrap();
+        std::fs::write(
+            old.join(".git/config"),
+            "[remote \"origin\"]\n\turl = git@github.com:owner/repo.git\n",
+        )
+        .unwrap();
+        let mut map = GitMap::default();
+        assert!(map.learn(&old));
+        // "Move" the repo: old path disappears, new one appears.
+        let new = tmp.path().join("new-spot");
+        std::fs::rename(&old, &new).unwrap();
+        assert!(map.learn(&new));
+        let id = "github.com/owner/repo";
+        assert_eq!(map.roots.get(id).unwrap(), &new.to_string_lossy().to_string());
+        assert_eq!(map.aliases.get(id).unwrap(), &vec![old.to_string_lossy().to_string()]);
     }
 
     #[test]
