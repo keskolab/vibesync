@@ -191,7 +191,7 @@ impl S3Store {
         self.agent
             .put(url.as_str())
             .send_bytes(body)
-            .with_context(|| format!("PUT {key}"))?;
+            .map_err(|e| clean_s3_err("upload", e))?;
         Ok(())
     }
 
@@ -206,7 +206,25 @@ impl S3Store {
                 Ok(Some(buf))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(e) => Err(anyhow::Error::from(e)).with_context(|| format!("GET {key}")),
+            Err(e) => Err(clean_s3_err("download", e)),
+        }
+    }
+}
+
+/// Turn a ureq error into a human message WITHOUT the signed URL (which
+/// contains the request signature). Surfaces the HTTP status meaningfully.
+fn clean_s3_err(op: &str, e: ureq::Error) -> anyhow::Error {
+    match e {
+        ureq::Error::Status(403, _) => anyhow::anyhow!(
+            "Access denied (403) on {op}. Check that your API token is valid and has \
+             Object Read & Write permission for this bucket."
+        ),
+        ureq::Error::Status(404, _) => {
+            anyhow::anyhow!("Not found (404) on {op}. Check the bucket name.")
+        }
+        ureq::Error::Status(code, _) => anyhow::anyhow!("Storage returned HTTP {code} on {op}."),
+        ureq::Error::Transport(t) => {
+            anyhow::anyhow!("Could not reach storage on {op}: {}", t.kind())
         }
     }
 }
@@ -247,7 +265,7 @@ impl SyncStore for S3Store {
                 .agent
                 .get(url.as_str())
                 .call()
-                .context("LIST objects")?
+                .map_err(|e| clean_s3_err("list", e))?
                 .into_string()?;
             let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&text)
                 .context("parse LIST response")?;
@@ -395,7 +413,7 @@ impl AzureSasStore {
                 Ok(Some(buf))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(e) => Err(anyhow::Error::from(e)).with_context(|| format!("GET {key}")),
+            Err(e) => Err(clean_s3_err("download", e)),
         }
     }
 }
