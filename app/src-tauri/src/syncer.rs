@@ -322,6 +322,24 @@ pub fn status(paths: &Paths) -> Result<Status> {
                     skills: 0,
                     last_activity_ms: vs_last,
                 },
+                {
+                    let (n, b, p, last) = engine::codex::light_counts(&home);
+                    ToolStatus { id: "codex", name: "Codex", installed: engine::codex::detect(&home),
+                        enabled: enabled_for("codex"), sessions: n, plans: 0, projects: p,
+                        bytes: b, agents: 0, skills: 0, last_activity_ms: last }
+                },
+                {
+                    let (n, b, p, last) = engine::opencode::light_counts(&home);
+                    ToolStatus { id: "opencode", name: "OpenCode", installed: engine::opencode::detect(&home),
+                        enabled: enabled_for("opencode"), sessions: n, plans: 0, projects: p,
+                        bytes: b, agents: 0, skills: 0, last_activity_ms: last }
+                },
+                {
+                    let (n, b, p) = engine::zed::light_counts();
+                    ToolStatus { id: "zed", name: "Zed", installed: engine::zed::detect(),
+                        enabled: enabled_for("zed"), sessions: n, plans: 0, projects: p,
+                        bytes: b, agents: 0, skills: 0, last_activity_ms: None }
+                },
             ]
         },
     })
@@ -353,8 +371,12 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
 
     let include_plugins = config.sync_plugins;
     let mut state = engine::SyncState::load(&paths.state)?;
-    let claude_on = !config.disabled_tools.iter().any(|t| t == "claude-code");
-    let vscode_on = !config.disabled_tools.iter().any(|t| t == "vscode");
+    let on = |id: &str| !config.disabled_tools.iter().any(|t| t == id);
+    let claude_on = on("claude-code");
+    let vscode_on = on("vscode");
+    let codex_on = on("codex");
+    let opencode_on = on("opencode");
+    let zed_on = on("zed");
     // All config dirs: ~/.claude plus auto-detected ~/.claude-* profiles.
     let dirs = engine::adapters::Adapter::detect_config_dirs(&home);
     let mut entries = Vec::new();
@@ -365,6 +387,14 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     }
     if vscode_on {
         entries.extend(engine::vscode::scan(&home)?);
+    }
+    if codex_on {
+        entries.extend(engine::codex::scan(&home)?);
+        state.mark_deletions(engine::codex::SESSIONS_PREFIX, &entries);
+    }
+    if opencode_on {
+        entries.extend(engine::opencode::scan(&home)?);
+        state.mark_deletions(engine::opencode::PREFIX, &entries);
     }
     let shared_on = !config.disabled_scopes.iter().any(|s| s == "shared");
     if shared_on {
@@ -404,6 +434,29 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     }
 
     let mut pull = engine::Report::default();
+    if codex_on {
+        let r = engine::codex::push_index(&home, &engine::machine_name(), &mut state, store.as_ref());
+        let _ = r;
+        if let Ok(r) = engine::codex::apply(&home, &mut state, store.as_ref()) {
+            pull.pulled += r.pulled;
+            pull.unchanged += r.unchanged;
+            pull.skipped_newer_local += r.skipped_newer_local;
+        }
+    }
+    if opencode_on {
+        if let Ok(r) = engine::opencode::apply(&home, &mut state, store.as_ref()) {
+            pull.pulled += r.pulled;
+            pull.unchanged += r.unchanged;
+            pull.skipped_newer_local += r.skipped_newer_local;
+        }
+    }
+    if zed_on {
+        if let Ok(r) = engine::zed::apply(&home, &mut state, store.as_ref()) {
+            pull.pulled += r.applied;
+            pull.unchanged += r.unchanged;
+            pull.skipped_newer_local += r.skipped_newer_local;
+        }
+    }
     if vscode_on {
         let r = engine::vscode::apply(
             store.as_ref(),

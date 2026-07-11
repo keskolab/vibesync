@@ -30,15 +30,15 @@ const ICONS = {
   // Zed: framed bold Z.
   zed:
     '<svg class="row-icon" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M3 1.5h10A1.5 1.5 0 0 1 14.5 3v10a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 13V3A1.5 1.5 0 0 1 3 1.5zm0 1.5v10h10V3H3zm2 1.7h6v1.5l-3.9 4.1H11v1.5H5v-1.5l3.9-4.1H5V4.7z"/></svg>',
+  // OpenCode: open bracket-block.
+  opencode:
+    '<svg class="row-icon" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h9A1.5 1.5 0 0 1 14 3.5v9A1.5 1.5 0 0 1 12.5 14h-9A1.5 1.5 0 0 1 2 12.5v-9zm3.6 2.1L3.2 8l2.4 2.4.9-.9L4.9 8l1.6-1.5-.9-.9zM10 5.6l-.9.9L10.7 8 9.1 9.5l.9.9L12.4 8 10 5.6z"/></svg>',
   // Shared skills: four-point spark.
   shared:
     '<svg class="row-icon" viewBox="0 0 16 16"><path d="M8 0.8l1.7 5.5L15.2 8l-5.5 1.7L8 15.2 6.3 9.7 0.8 8l5.5-1.7L8 0.8z"/></svg>',
 };
 
-const COMING_SOON = [
-  { id: "codex", name: "Codex" },
-  { id: "zed", name: "Zed" },
-];
+const COMING_SOON = [];
 
 let status = null; // last get_status result
 const isSetup = () => !!localStorage.getItem("setupDone");
@@ -232,6 +232,15 @@ function openTool(t) {
     vscode: [
       { tool: "vscode", name: "Copilot chats", sub: "Chat history per project folder", on: t.enabled },
       { scope: "vscode-index", name: "Chat history panel", sub: "Synced chats appear in matching folders", on: on("vscode-index") },
+    ],
+    codex: [
+      { tool: "codex", name: "Sessions", sub: "Rollout transcripts + session index", on: t.enabled },
+    ],
+    opencode: [
+      { tool: "opencode", name: "Sessions", sub: "Chat records (archive — see notes)", on: t.enabled },
+    ],
+    zed: [
+      { tool: "zed", name: "Agent threads", sub: "Zed AI threads (sync while Zed is closed)", on: t.enabled },
     ],
   };
   for (const s of SCOPES[t.id] || []) {

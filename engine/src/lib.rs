@@ -3,6 +3,8 @@
 
 pub mod adapters;
 pub mod codec;
+pub mod codex;
+pub mod opencode;
 pub mod config;
 pub mod registry;
 pub mod scanner;
@@ -10,6 +12,7 @@ pub mod state;
 pub mod store;
 pub mod sync;
 pub mod tokenizer;
+pub mod zed;
 pub mod vscode;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
