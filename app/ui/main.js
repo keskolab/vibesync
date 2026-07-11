@@ -9,10 +9,30 @@ const DEVICE = IS_MAC ? "Mac" : "PC";
 if (!IS_MAC) document.documentElement.classList.add("win");
 
 const ICONS = {
-  "claude-code": '<svg class="row-icon" viewBox="0 0 16 16"><path d="M8 1l1.6 4.2L14 6.8l-3.4 2.9 1 4.3L8 11.7 4.4 14l1-4.3L2 6.8l4.4-1.6z"/></svg>',
-  codex: '<svg class="row-icon" viewBox="0 0 16 16"><path d="M8 1.2l5.9 3.4v6.8L8 14.8l-5.9-3.4V4.6L8 1.2zm0 1.7L3.6 5.4v5.2L8 13.1l4.4-2.5V5.4L8 2.9zM8 5a3 3 0 1 1 0 6 3 3 0 0 1 0-6z"/></svg>',
-  vscode: '<svg class="row-icon" viewBox="0 0 16 16"><path d="M6.2 8L2.8 5.2l1-1.2L8 7l3.4-6 2.6 1v12l-2.6 1L8 9 3.8 12l-1-1.2L6.2 8z"/></svg>',
-  zed: '<svg class="row-icon" viewBox="0 0 16 16"><path d="M3 2h10v2.2L7.5 11H13v3H3v-2.2L8.5 5H3V2z"/></svg>',
+  // Claude: starburst (8-spoke asterisk).
+  "claude-code":
+    '<svg class="row-icon" viewBox="0 0 16 16">' +
+    '<rect x="7.25" y="1" width="1.5" height="14" rx="0.75"/>' +
+    '<rect x="7.25" y="1" width="1.5" height="14" rx="0.75" transform="rotate(45 8 8)"/>' +
+    '<rect x="7.25" y="1" width="1.5" height="14" rx="0.75" transform="rotate(90 8 8)"/>' +
+    '<rect x="7.25" y="1" width="1.5" height="14" rx="0.75" transform="rotate(135 8 8)"/>' +
+    "</svg>",
+  // Codex: six-petal knot.
+  codex:
+    '<svg class="row-icon" viewBox="0 0 16 16">' +
+    [0, 60, 120, 180, 240, 300]
+      .map((a) => `<ellipse cx="8" cy="4.6" rx="1.5" ry="3.4" transform="rotate(${a} 8 8)"/>`)
+      .join("") +
+    "</svg>",
+  // VS Code: folded-ribbon mark silhouette.
+  vscode:
+    '<svg class="row-icon" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M10.8 1.2L15 3v10l-4.2 1.8L4.6 9.2l-2.5 2-1.1-.7L3.5 8 1 5.5l1.1-.7 2.5 2 6.2-5.6zM10.8 4.7L7.1 8l3.7 3.3V4.7z"/></svg>',
+  // Zed: framed bold Z.
+  zed:
+    '<svg class="row-icon" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M3 1.5h10A1.5 1.5 0 0 1 14.5 3v10a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 13V3A1.5 1.5 0 0 1 3 1.5zm0 1.5v10h10V3H3zm2 1.7h6v1.5l-3.9 4.1H11v1.5H5v-1.5l3.9-4.1H5V4.7z"/></svg>',
+  // Shared skills: four-point spark.
+  shared:
+    '<svg class="row-icon" viewBox="0 0 16 16"><path d="M8 0.8l1.7 5.5L15.2 8l-5.5 1.7L8 15.2 6.3 9.7 0.8 8l5.5-1.7L8 0.8z"/></svg>',
 };
 
 const COMING_SOON = [
@@ -151,7 +171,7 @@ function renderAll() {
     sLabel.style.display = "";
     sl.style.display = "";
     sl.innerHTML = `<li>
-      <svg class="row-icon" viewBox="0 0 16 16"><path d="M8 1l1.8 3.6L14 5.2l-3 2.9.7 4.1L8 10.3l-3.7 1.9.7-4.1-3-2.9 4.2-.6L8 1z"/></svg>
+      ${ICONS.shared}
       <div class="tlabel">Global skills<span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"} · ${fmtMB(status.sharedBytes)} MB<br>~/.agents/skills — shared by all AI tools</span></div>
       <label class="switch"><input type="checkbox" ${status.sharedEnabled ? "checked" : ""} /><span class="knob"></span></label>`;
     sl.querySelector("label.switch").addEventListener("click", (e) => e.stopPropagation());
