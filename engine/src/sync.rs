@@ -123,6 +123,12 @@ pub fn pull_dir(
         let Some(abs) = adapter.resolve_dir(logical, home, dir, tok, include_optional) else {
             continue; // not this adapter's namespace (or opted out)
         };
+        if abs.to_string_lossy().contains(crate::gitmap::GIT_TOKEN_PREFIX) {
+            // Repo unknown on this machine: park in the store (state stays
+            // untracked, so the entry is retried once the repo appears).
+            on_file();
+            continue;
+        }
         if let Some(st) = state.files.get(logical) {
             if st.deleted_locally {
                 report.skipped_deleted += 1;

@@ -7,6 +7,7 @@ pub mod codex;
 pub mod opencode;
 pub mod config;
 pub mod copilot;
+pub mod gitmap;
 pub mod registry;
 pub mod scanner;
 pub mod state;

@@ -573,7 +573,37 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     let mut config = load_config(paths)?.context("VibeSync is not configured yet")?;
     resolve_secrets(&mut config)?;
     let store = engine::open_store(&config.store, config.passphrase.as_deref())?;
-    let tok = engine::Tokenizer::from_env()?;
+    // Project identity mapping: learn `git origin -> local clone root` from
+    // this machine's own sidebar entries, so the same repo cloned at
+    // different paths on different machines still syncs as ONE project.
+    let gitmap_path = paths.config.parent().unwrap().join("git_roots.json");
+    let mut gitmap = engine::gitmap::GitMap::load(&gitmap_path);
+    let mut gitmap_changed = false;
+    if let Some(dir) = registry_dir() {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !name.starts_with("local_") || !name.ends_with(".json") {
+                    continue;
+                }
+                let Ok(v) = std::fs::read(e.path())
+                    .map_err(anyhow::Error::from)
+                    .and_then(|b| Ok(serde_json::from_slice::<serde_json::Value>(&b)?))
+                else {
+                    continue;
+                };
+                for key in ["cwd", "originCwd"] {
+                    if let Some(cwd) = v.get(key).and_then(|c| c.as_str()) {
+                        gitmap_changed |= gitmap.learn(std::path::Path::new(cwd));
+                    }
+                }
+            }
+        }
+    }
+    if gitmap_changed {
+        let _ = gitmap.save(&gitmap_path);
+    }
+    let tok = engine::Tokenizer::from_env()?.with_gitmap(&gitmap);
     let home = dirs::home_dir().context("no home dir")?;
 
     let include_plugins = config.sync_plugins;
