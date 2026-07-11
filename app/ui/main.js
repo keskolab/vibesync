@@ -157,6 +157,54 @@ function setPending(pending) {
 
 let autosyncOn = null; // mirrored from settings
 let autosyncMins = 15; // interval, mirrored from settings
+let pendingMapDir = null; // folder picked for a new project mapping
+
+function fmtInterval(mins) {
+	return mins % 60 === 0
+		? `${mins / 60} hour${mins === 60 ? "" : "s"}`
+		: `${mins} minutes`;
+}
+
+function updateMapAdd() {
+	$("map-add").disabled =
+		!pendingMapDir || !/^[A-Za-z0-9._-]{1,64}$/.test($("map-name").value.trim());
+}
+
+// Fill every settings-page control from a SettingsState payload.
+function applySettings(s) {
+	$("opt-autostart").checked = s.autostart;
+	$("opt-autosync").checked = s.autosync;
+	$("autosync-sub").textContent = `Sync every ${fmtInterval(s.autosyncIntervalMins)}`;
+	autosyncMins = s.autosyncIntervalMins;
+	autosyncOn = s.autosync;
+	const sel = $("opt-interval");
+	// A hand-edited config value outside the presets still shows correctly.
+	if (![...sel.options].some((o) => Number(o.value) === s.autosyncIntervalMins)) {
+		const o = document.createElement("option");
+		o.value = String(s.autosyncIntervalMins);
+		o.textContent = fmtInterval(s.autosyncIntervalMins);
+		sel.appendChild(o);
+	}
+	sel.value = String(s.autosyncIntervalMins);
+	const ul = $("mapping-list");
+	const entries = Object.entries(s.projectMappings || {});
+	ul.innerHTML = entries.length
+		? ""
+		: `<li class="muted"><div class="tlabel">No mappings yet<span class="tsub">Git repos with a remote are matched automatically</span></div></li>`;
+	for (const [name, path] of entries) {
+		const li = document.createElement("li");
+		li.innerHTML = `
+      <div class="tlabel">${name}<span class="tsub mapping-path-sub"></span></div>
+      <button class="row-btn danger" aria-label="Remove mapping">Remove</button>`;
+		li.querySelector(".mapping-path-sub").textContent = path;
+		li.querySelector("button").addEventListener("click", async () => {
+			applySettings(await invoke("remove_project_mapping", { name }));
+		});
+		ul.appendChild(li);
+	}
+	renderStatusLine();
+	fitWindow();
+}
 
 function fmtClock(ms) {
 	return new Date(ms).toLocaleTimeString([], {
@@ -534,15 +582,47 @@ window.addEventListener("DOMContentLoaded", async () => {
 		setSubText(String(e.payload || "Sync failed"));
 	});
 
-	// Settings toggles: launch at login + autosync.
-	invoke("get_settings").then((s) => {
-		$("opt-autostart").checked = s.autostart;
-		$("opt-autosync").checked = s.autosync;
-		$("autosync-sub").textContent =
-			`Sync every ${s.autosyncIntervalMins} minutes`;
-		autosyncMins = s.autosyncIntervalMins;
-		autosyncOn = s.autosync;
-		renderStatusLine();
+	// Settings toggles: launch at login + autosync + interval + mappings.
+	invoke("get_settings").then(applySettings);
+	$("opt-interval").addEventListener("change", (e) => {
+		const mins = Number(e.target.value);
+		invoke("set_autosync_interval", { mins })
+			.then(() => {
+				autosyncMins = mins;
+				$("autosync-sub").textContent = `Sync every ${fmtInterval(mins)}`;
+				renderStatusLine();
+			})
+			.catch(() => (e.target.value = String(autosyncMins)));
+	});
+	$("map-browse").addEventListener("click", async () => {
+		const dir = await invoke("pick_folder").catch(() => null);
+		if (!dir) return;
+		pendingMapDir = dir;
+		$("map-path-preview").textContent = dir;
+		// Default the name to the folder's basename if empty.
+		const name = $("map-name");
+		if (!name.value.trim()) {
+			name.value = (dir.split(/[\\/]/).pop() || "")
+				.toLowerCase()
+				.replace(/[^a-z0-9._-]/g, "-");
+		}
+		updateMapAdd();
+	});
+	$("map-name").addEventListener("input", updateMapAdd);
+	$("map-add").addEventListener("click", async () => {
+		try {
+			const s = await invoke("set_project_mapping", {
+				name: $("map-name").value.trim(),
+				path: pendingMapDir,
+			});
+			pendingMapDir = null;
+			$("map-name").value = "";
+			$("map-path-preview").textContent = "";
+			applySettings(s);
+		} catch (e) {
+			$("map-path-preview").textContent = String(e);
+		}
+		updateMapAdd();
 	});
 	$("opt-autostart").addEventListener("change", (e) =>
 		invoke("set_autostart", { enabled: e.target.checked }).catch(

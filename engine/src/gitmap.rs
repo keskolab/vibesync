@@ -25,6 +25,11 @@ use std::path::{Path, PathBuf};
 
 /// `${GIT:github.com:owner:repo}` — identity with `/` swapped to `:`.
 pub const GIT_TOKEN_PREFIX: &str = "${GIT:";
+/// `${PROJ:name}` — user-chosen fleet-wide project name, configured per
+/// machine ("this local folder is project <name>"). Manual mappings outrank
+/// git identities: an explicit mapping is intent, and it covers repos with
+/// no remote as well as folders that aren't repos at all.
+pub const PROJ_TOKEN_PREFIX: &str = "${PROJ:";
 
 pub fn git_token(identity: &str) -> String {
     format!("{GIT_TOKEN_PREFIX}{}}}", identity.replace('/', ":"))
@@ -35,6 +40,32 @@ pub fn parse_git_token(s: &str) -> Option<(String, &str)> {
     let inner = s.strip_prefix(GIT_TOKEN_PREFIX)?;
     let end = inner.find('}')?;
     Some((inner[..end].replace(':', "/"), &inner[end + 1..]))
+}
+
+pub fn proj_token(name: &str) -> String {
+    format!("{PROJ_TOKEN_PREFIX}{name}}}")
+}
+
+/// Split `${PROJ:name}rest` into (name, rest). None if not a project token.
+pub fn parse_proj_token(s: &str) -> Option<(&str, &str)> {
+    let inner = s.strip_prefix(PROJ_TOKEN_PREFIX)?;
+    let end = inner.find('}')?;
+    Some((&inner[..end], &inner[end + 1..]))
+}
+
+/// Project names live inside tokens and travel across machines: keep them to
+/// a safe, unambiguous charset.
+pub fn valid_project_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// True if the string still carries a token this machine could not expand
+/// (repo not cloned / project not mapped here) — such paths must park, never
+/// materialize literally on disk.
+pub fn has_unresolved_token(s: &str) -> bool {
+    s.contains(GIT_TOKEN_PREFIX) || s.contains(PROJ_TOKEN_PREFIX)
 }
 
 /// Normalize a git remote URL to a stable identity: `host/path`, lowercased,

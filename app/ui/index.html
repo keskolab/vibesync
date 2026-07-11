@@ -84,7 +84,27 @@
               <div class="tlabel">Auto-sync<span class="tsub" id="autosync-sub">Sync automatically in the background</span></div>
               <label class="switch"><input type="checkbox" id="opt-autosync" /><span class="knob"></span></label>
             </li>
+            <li>
+              <div class="tlabel">Sync interval<span class="tsub">How often auto-sync runs</span></div>
+              <select id="opt-interval" class="mini-select">
+                <option value="5">5 min</option>
+                <option value="10">10 min</option>
+                <option value="15">15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">1 hour</option>
+                <option value="180">3 hours</option>
+              </select>
+            </li>
           </ul>
+          <div class="section-label">Project mappings</div>
+          <div class="tsub mapping-help">Sync a folder as the same project on every computer, even when it lives at different paths. Auto-detected for git repos with a remote; add a mapping to override or to cover folders without one.</div>
+          <ul class="toggles" id="mapping-list"></ul>
+          <div class="mapping-add">
+            <input type="text" id="map-name" placeholder="Project name" spellcheck="false" />
+            <button class="secondary" id="map-browse">Choose folder&hellip;</button>
+            <button class="secondary" id="map-add" disabled>Add</button>
+          </div>
+          <div class="tsub mapping-path" id="map-path-preview"></div>
           <div class="section-label">Storage</div>
           <div class="kv kv-left">
             <div><span>Location</span><b id="set-store">&ndash;</b></div>

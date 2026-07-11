@@ -35,6 +35,11 @@ pub struct AppConfig {
     /// Scope ids switched off ("sessions", "plans", "config", "vscode-index").
     #[serde(default)]
     pub disabled_scopes: Vec<String>,
+    /// Manual project mappings: fleet-wide project name -> this machine's
+    /// local folder. Produces `${PROJ:name}` store tokens; outranks the
+    /// automatic git-origin identity for the mapped folder.
+    #[serde(default)]
+    pub project_mappings: std::collections::BTreeMap<String, String>,
 }
 
 fn default_true() -> bool {
@@ -259,6 +264,7 @@ pub fn default_config() -> Result<AppConfig> {
         sync_registry: true,
         disabled_tools: Vec::new(),
         disabled_scopes: Vec::new(),
+        project_mappings: std::collections::BTreeMap::new(),
     })
 }
 
@@ -603,7 +609,9 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     if gitmap_changed {
         let _ = gitmap.save(&gitmap_path);
     }
-    let tok = engine::Tokenizer::from_env()?.with_gitmap(&gitmap);
+    let tok = engine::Tokenizer::from_env()?
+        .with_gitmap(&gitmap)
+        .with_manual_projects(&config.project_mappings);
     let home = dirs::home_dir().context("no home dir")?;
 
     let include_plugins = config.sync_plugins;
