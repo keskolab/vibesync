@@ -123,9 +123,10 @@ function renderAll() {
       ${t.installed ? `<label class="switch"><input type="checkbox" ${t.enabled ? "checked" : ""} /><span class="knob"></span></label>
        <svg class="chevron" viewBox="0 0 16 16"><path d="M5.5 3l5 5-5 5-1-1 4-4-4-4z"/></svg>` : `<span class="na">—</span>`}`;
     if (t.installed) {
-      const input = li.querySelector("input");
-      input.addEventListener("click", (e) => e.stopPropagation());
-      input.addEventListener("change", async (e) => {
+      // Clicks on the switch (label + knob, not just the hidden input) must
+      // toggle without navigating into the tool page.
+      li.querySelector("label.switch").addEventListener("click", (e) => e.stopPropagation());
+      li.querySelector("input").addEventListener("change", async (e) => {
         status = await invoke("set_tool_enabled", { id: t.id, enabled: e.target.checked });
         renderAll();
       });
