@@ -132,6 +132,7 @@ function setPending(pending) {
 }
 
 let autosyncOn = null; // mirrored from settings
+let autosyncMins = 15; // interval, mirrored from settings
 
 function fmtClock(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -147,7 +148,15 @@ function renderStatusLine() {
   if (!status || !status.configured) return;
   const when = status.lastSyncMs ? syncStamp(status.lastSyncMs) : "never";
   const loc = status.storeDesc || "not set";
-  const auto = autosyncOn === null ? "" : `<span><span class="kv-label">Auto-sync:</span> ${autosyncOn ? "on" : "off"}</span>`;
+  let auto = "";
+  if (autosyncOn === false) {
+    auto = `<span><span class="kv-label">Auto-sync:</span> off</span>`;
+  } else if (autosyncOn === true) {
+    // Worker due-check: interval after the last sync, polled once a minute —
+    // an overdue machine (just woke or launched) syncs within one: "soon".
+    const next = (status.lastSyncMs || 0) + autosyncMins * 60000;
+    auto = `<span><span class="kv-label">Next sync:</span> ${next <= Date.now() ? "soon" : fmtClock(next)}</span>`;
+  }
   const html = `<span><span class="kv-label">Last sync:</span> ${when}</span>${auto}<span class="span-2"><span class="kv-label">Location:</span> ${loc}</span>`;
   if ($("substatus").dataset.line !== html) {
     $("substatus").dataset.line = html;
@@ -394,6 +403,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     $("opt-autostart").checked = s.autostart;
     $("opt-autosync").checked = s.autosync;
     $("autosync-sub").textContent = `Sync every ${s.autosyncIntervalMins} minutes`;
+    autosyncMins = s.autosyncIntervalMins;
     autosyncOn = s.autosync;
     renderStatusLine();
   });
