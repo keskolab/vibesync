@@ -335,6 +335,19 @@ fn registry_dir() -> Option<PathBuf> {
     None
 }
 
+/// The transcript a registry entry points at: <projects>/<encode(cwd)>/<cli>.jsonl.
+/// Returns None if the entry has no cliSessionId or cwd.
+fn transcript_path(entry: &serde_json::Value, home: &std::path::Path) -> Option<PathBuf> {
+    let cli = entry.get("cliSessionId").and_then(|s| s.as_str())?;
+    let cwd = entry.get("cwd").and_then(|s| s.as_str())?;
+    let encoded = engine::tokenizer::encode_cwd(cwd);
+    Some(home.join(".claude").join("projects").join(encoded).join(format!("{cli}.jsonl")))
+}
+
+fn transcript_exists(entry: &serde_json::Value, home: &std::path::Path) -> bool {
+    transcript_path(entry, home).map(|p| p.exists()).unwrap_or(false)
+}
+
 /// Validated, atomic, compact, 0600 write — every rule Gate A taught us.
 fn write_registry_entry(path: &PathBuf, entry: &serde_json::Value) -> Result<()> {
     engine::registry::validate(entry)?;
@@ -364,6 +377,15 @@ fn sync_registry(
     use engine::registry;
     let Some(dir) = registry_dir() else { return Ok((0, 0)) };
 
+    // Session IDs we've written to the local registry from remote — lets us
+    // safely remove ghost entries we created without ever touching the
+    // machine's own native entries.
+    let applied_path = paths.config.parent().unwrap().join("applied_registry.json");
+    let mut applied: std::collections::HashSet<String> = std::fs::read(&applied_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+
     // Load all local entries.
     let mut local: std::collections::HashMap<String, (serde_json::Value, PathBuf)> =
         std::collections::HashMap::new();
@@ -387,9 +409,13 @@ fn sync_registry(
     // PUSH: tokenized, validated entries into the registry/ namespace.
     let mut pushed = 0usize;
     let scanned: Vec<String> = local.keys().map(|s| format!("registry/{s}.json")).collect();
+    let home = dirs::home_dir().context("no home dir")?;
     for (sid, (entry, path)) in &local {
         if registry::validate(entry).is_err() {
             continue; // never propagate a malformed entry
+        }
+        if !transcript_exists(entry, &home) {
+            continue; // ghost entry — transcript deleted; would be unopenable
         }
         let mut out = entry.clone();
         registry::tokenize_paths(&mut out, tok);
@@ -420,7 +446,7 @@ fn sync_registry(
     }
 
     // PULL: apply remote entries.
-    let mut applied = 0usize;
+    let mut applied_count = 0usize;
     let mut backed_up = false;
     for (logical, meta) in store.list()? {
         let Some(sid) = logical.strip_prefix("registry/").and_then(|s| s.strip_suffix(".json")) else {
@@ -436,6 +462,19 @@ fn sync_registry(
         registry::expand_paths(&mut remote, tok);
 
         let target = dir.join(format!("{sid}.json"));
+
+        // Ghost guard: if the transcript isn't present locally, this entry
+        // would be an unopenable sidebar item. Skip it — and if WE wrote it
+        // on a previous sync, remove it (self-heal already-synced ghosts).
+        if !transcript_exists(&remote, &home) {
+            // We only ever wrote entries tracked in `applied`; a machine's own
+            // native entries are never in that set, so this cannot delete them.
+            if applied.contains(sid) && target.exists() {
+                let _ = std::fs::remove_file(&target);
+                applied.remove(sid);
+            }
+            continue;
+        }
         let final_entry = match local.get(sid) {
             Some((local_entry, _)) => {
                 let merged = registry::merge(local_entry, &remote);
@@ -476,12 +515,16 @@ fn sync_registry(
             if let Some(cli) = final_entry.get("cliSessionId").and_then(|s| s.as_str()) {
                 cli_ids.insert(cli.to_string());
             }
+            if !local.contains_key(sid) {
+                applied.insert(sid.to_string());
+            }
             state.files.insert(
                 logical.clone(),
                 engine::FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
             );
-            applied += 1;
+            applied_count += 1;
         }
     }
-    Ok((pushed, applied))
+    let _ = std::fs::write(&applied_path, serde_json::to_vec(&applied).unwrap_or_default());
+    Ok((pushed, applied_count))
 }
