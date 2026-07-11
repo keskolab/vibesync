@@ -196,9 +196,17 @@ async function runSync(firstRun) {
   try {
     const outcome = await invoke("sync_now");
     await refreshStatus();
+    const notes = [];
     if (outcome.registryApplied > 0) {
-      $("hint").querySelector("span").textContent =
-        `${outcome.registryApplied} session${outcome.registryApplied === 1 ? "" : "s"} added to your Claude sidebar — restart the Claude app to see them.`;
+      notes.push(`${outcome.registryApplied} session${outcome.registryApplied === 1 ? "" : "s"} added to your Claude sidebar — restart the Claude app to see them.`);
+    }
+    if (outcome.registryHealed > 0) {
+      notes.push(`${outcome.registryHealed} expired session${outcome.registryHealed === 1 ? "" : "s"} removed — Claude auto-deletes conversations after ~30 days; your storage still keeps them.`);
+    } else if (outcome.registryGhosts > 0 && outcome.registryApplied > 0) {
+      notes.push(`${outcome.registryGhosts} expired session${outcome.registryGhosts === 1 ? " was" : "s were"} skipped (auto-deleted by Claude after ~30 days).`);
+    }
+    if (notes.length > 0) {
+      $("hint").querySelector("span").textContent = notes.join(" ");
       $("hint").classList.remove("hidden");
     } else if (outcome.pulled > 0) {
       $("hint").querySelector("span").textContent =

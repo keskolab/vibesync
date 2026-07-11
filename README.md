@@ -62,6 +62,8 @@ AI coding tools keep their sessions on the machine where they happened. Vendors 
 
 - When a tool cleans up old sessions (Claude Code deletes them after about 30 days), your storage still keeps them forever — and VibeSync is smart enough not to push them back onto a computer that already cleaned them up. Your storage becomes a permanent history.
 
+- **About "Session not found on disk" in the Claude app:** Claude sometimes keeps a session in its sidebar even after it has auto-deleted the conversation behind it — clicking one shows exactly that message. This is Claude's own behavior, not something VibeSync causes. VibeSync never syncs these empty leftovers, and it automatically removes any that it created itself on earlier syncs. Ones that Claude created you can clean up with the Archive or Delete buttons the app offers — the conversations themselves are still safe in your VibeSync storage.
+
 - Adding another computer is just: install VibeSync, point it at the same place (and enter the same passphrase if you use cloud storage) and press Sync.
 
 ## Getting started (development builds)

@@ -261,6 +261,10 @@ pub struct SyncOutcome {
     pub pulled: usize,
     pub registry_pushed: usize,
     pub registry_applied: usize,
+    /// Expired remote entries skipped (their conversations were auto-deleted).
+    pub registry_ghosts: usize,
+    /// Previously-synced expired entries removed from this machine's sidebar.
+    pub registry_healed: usize,
     pub skipped_newer_local: usize,
     pub skipped_deleted: usize,
     pub unchanged: usize,
@@ -319,12 +323,12 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     state.save(&paths.state)?;
     progress(total + 1, total + 1);
 
-    let (registry_pushed, registry_applied) = if config.sync_registry {
-        sync_registry(paths, store.as_ref(), &tok, &mut state)
-            .unwrap_or((0, 0))
-    } else {
-        (0, 0)
-    };
+    let (registry_pushed, registry_applied, registry_ghosts, registry_healed) =
+        if config.sync_registry {
+            sync_registry(paths, store.as_ref(), &tok, &mut state).unwrap_or((0, 0, 0, 0))
+        } else {
+            (0, 0, 0, 0)
+        };
     state.save(&paths.state)?;
 
     Ok(SyncOutcome {
@@ -332,6 +336,8 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
         pulled: pull.pulled,
         registry_pushed,
         registry_applied,
+        registry_ghosts,
+        registry_healed,
         skipped_newer_local: pull.skipped_newer_local,
         skipped_deleted: pull.skipped_deleted,
         unchanged: push.unchanged + pull.unchanged,
@@ -399,9 +405,9 @@ fn sync_registry(
     store: &dyn engine::SyncStore,
     tok: &engine::Tokenizer,
     state: &mut engine::SyncState,
-) -> Result<(usize, usize)> {
+) -> Result<(usize, usize, usize, usize)> {
     use engine::registry;
-    let Some(dir) = registry_dir() else { return Ok((0, 0)) };
+    let Some(dir) = registry_dir() else { return Ok((0, 0, 0, 0)) };
 
     // Session IDs we've written to the local registry from remote — lets us
     // safely remove ghost entries we created without ever touching the
@@ -473,6 +479,8 @@ fn sync_registry(
 
     // PULL: apply remote entries.
     let mut applied_count = 0usize;
+    let mut ghosts = 0usize;
+    let mut healed = 0usize;
     let mut backed_up = false;
     for (logical, meta) in store.list()? {
         let Some(sid) = logical.strip_prefix("registry/").and_then(|s| s.strip_suffix(".json")) else {
@@ -493,11 +501,13 @@ fn sync_registry(
         // would be an unopenable sidebar item. Skip it — and if WE wrote it
         // on a previous sync, remove it (self-heal already-synced ghosts).
         if !transcript_exists(&remote, &home) {
+            ghosts += 1;
             // We only ever wrote entries tracked in `applied`; a machine's own
             // native entries are never in that set, so this cannot delete them.
             if applied.contains(sid) && target.exists() {
                 let _ = std::fs::remove_file(&target);
                 applied.remove(sid);
+                healed += 1;
             }
             continue;
         }
@@ -552,5 +562,5 @@ fn sync_registry(
         }
     }
     let _ = std::fs::write(&applied_path, serde_json::to_vec(&applied).unwrap_or_default());
-    Ok((pushed, applied_count))
+    Ok((pushed, applied_count, ghosts, healed))
 }
