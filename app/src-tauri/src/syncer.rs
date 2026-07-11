@@ -11,16 +11,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub store: engine::StoreConfig,
-    /// M2 dev-only: plaintext in config.json. Moves to the OS keychain
-    /// before anything ships.
+    /// Stored in the config file with owner-only (0600) permissions — the
+    /// ~/.aws/credentials posture. Moves to the OS keychain with signed
+    /// release builds (unsigned dev builds re-prompt on every rebuild).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<String>,
     /// Plugins can be large — never synced unless the user opts in.
     #[serde(default)]
     pub sync_plugins: bool,
-    /// Background sync every ~15 minutes while the app runs.
+    /// Background sync while the app runs.
     #[serde(default)]
     pub autosync: bool,
+    /// Minutes between background syncs.
+    #[serde(default = "default_interval_mins")]
+    pub autosync_interval_mins: u64,
     /// Sync the Claude desktop app's sidebar registry (macOS).
     #[serde(default = "default_true")]
     pub sync_registry: bool,
@@ -101,16 +105,33 @@ pub fn paths(app: &tauri::AppHandle) -> Result<Paths> {
     Ok(Paths { config: dir.join("config.json"), state: dir.join("state.json") })
 }
 
+fn default_interval_mins() -> u64 {
+    15
+}
+
+/// The config holds credentials — owner-only, like ~/.aws/credentials.
+fn restrict_perms(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path; // %APPDATA% is already per-user on Windows
+}
+
 pub fn load_config(paths: &Paths) -> Result<Option<AppConfig>> {
     if !paths.config.exists() {
         return Ok(None);
     }
+    restrict_perms(&paths.config); // heal configs written by older builds
     let cfg = serde_json::from_slice(&std::fs::read(&paths.config)?)?;
     Ok(Some(cfg))
 }
 
 pub fn save_config(paths: &Paths, cfg: &AppConfig) -> Result<()> {
     std::fs::write(&paths.config, serde_json::to_vec_pretty(cfg)?)?;
+    restrict_perms(&paths.config);
     Ok(())
 }
 
@@ -126,6 +147,7 @@ pub fn default_config() -> Result<AppConfig> {
         passphrase: None,
         sync_plugins: false,
         autosync: false,
+        autosync_interval_mins: default_interval_mins(),
         sync_registry: true,
         disabled_tools: Vec::new(),
         disabled_scopes: Vec::new(),

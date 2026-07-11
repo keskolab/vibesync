@@ -376,6 +376,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   invoke("get_settings").then((s) => {
     $("opt-autostart").checked = s.autostart;
     $("opt-autosync").checked = s.autosync;
+    $("autosync-sub").textContent = `Sync every ${s.autosyncIntervalMins} minutes`;
     autosyncOn = s.autosync;
     renderStatusLine();
   });

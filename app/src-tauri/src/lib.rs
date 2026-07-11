@@ -315,14 +315,21 @@ async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> 
 struct SettingsState {
     autostart: bool,
     autosync: bool,
+    autosync_interval_mins: u64,
 }
 
 #[tauri::command]
 fn get_settings(app: tauri::AppHandle) -> SettingsState {
     use tauri_plugin_autostart::ManagerExt;
+    let interval = syncer::paths(&app)
+        .ok()
+        .and_then(|p| syncer::load_config(&p).ok().flatten())
+        .map(|c| c.autosync_interval_mins)
+        .unwrap_or(AUTOSYNC_INTERVAL_SECS / 60);
     SettingsState {
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         autosync: AUTOSYNC.load(Ordering::Relaxed),
+        autosync_interval_mins: interval,
     }
 }
 
@@ -359,6 +366,11 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
                 continue;
             }
             let Ok(paths) = syncer::paths(&app) else { continue };
+            let interval_secs = syncer::load_config(&paths)
+                .ok()
+                .flatten()
+                .map(|c| c.autosync_interval_mins * 60)
+                .unwrap_or(AUTOSYNC_INTERVAL_SECS);
             // Due-check on the WALL clock against the last real sync (the
             // state file's mtime — the same value "Last sync" displays, so
             // schedule and UI can't disagree). Instant is useless here: it
@@ -374,7 +386,7 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
-            if now_ms - last_ms < (AUTOSYNC_INTERVAL_SECS as i64) * 1000 {
+            if now_ms - last_ms < (interval_secs as i64) * 1000 {
                 continue;
             }
             set_tray_busy(&app, true);
