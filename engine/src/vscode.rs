@@ -183,8 +183,9 @@ pub fn apply(
     store: &dyn SyncStore,
     state: &mut SyncState,
     home: &Path,
+    merge_index: bool,
 ) -> Result<ApplyReport> {
-    apply_roots(&storage_roots(), store, state, home)
+    apply_roots_opts(&storage_roots(), store, state, home, merge_index)
 }
 
 pub fn apply_roots(
@@ -192,6 +193,16 @@ pub fn apply_roots(
     store: &dyn SyncStore,
     state: &mut SyncState,
     home: &Path,
+) -> Result<ApplyReport> {
+    apply_roots_opts(roots, store, state, home, true)
+}
+
+pub fn apply_roots_opts(
+    roots: &[PathBuf],
+    store: &dyn SyncStore,
+    state: &mut SyncState,
+    home: &Path,
+    merge_index: bool,
 ) -> Result<ApplyReport> {
     let mut report = ApplyReport::default();
     let home = home_norm(home);
@@ -270,7 +281,7 @@ pub fn apply_roots(
             }
         }
     }
-    for (ws_dir, sessions) in to_index {
+    for (ws_dir, sessions) in to_index.into_iter().filter(|_| merge_index) {
         match merge_chat_index(&ws_dir, &sessions) {
             Ok(n) => report.indexed += n,
             Err(_) => {} // db locked or absent: files are placed; index next sync

@@ -94,7 +94,7 @@ pub fn pull(
     store: &dyn SyncStore,
     include_optional: bool,
 ) -> Result<Report> {
-    pull_dir(adapter, home, ".claude", tok, state, store, include_optional)
+    pull_dir(adapter, home, ".claude", tok, state, store, include_optional, &|_| false)
 }
 
 /// Pull for one config dir (default `.claude` or a `.claude-*` profile).
@@ -107,9 +107,13 @@ pub fn pull_dir(
     state: &mut SyncState,
     store: &dyn SyncStore,
     include_optional: bool,
+    skip: &dyn Fn(&str) -> bool,
 ) -> Result<Report> {
     let mut report = Report::default();
     for (logical, meta) in store.list()? {
+        if skip(&logical) {
+            continue;
+        }
         let Some(abs) = adapter.resolve_dir(&logical, home, dir, tok, include_optional) else {
             continue; // not this adapter's namespace (or opted out)
         };

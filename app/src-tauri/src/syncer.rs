@@ -27,6 +27,9 @@ pub struct AppConfig {
     /// Tool ids the user has switched off (e.g. "claude-code").
     #[serde(default)]
     pub disabled_tools: Vec<String>,
+    /// Scope ids switched off ("sessions", "plans", "config", "vscode-index").
+    #[serde(default)]
+    pub disabled_scopes: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -82,6 +85,7 @@ pub fn default_config() -> Result<AppConfig> {
         autosync: false,
         sync_registry: true,
         disabled_tools: Vec::new(),
+        disabled_scopes: Vec::new(),
     })
 }
 
@@ -105,6 +109,8 @@ pub struct Status {
     pub store_detail: Option<String>,
     pub last_sync_ms: Option<i64>,
     pub sync_plugins: bool,
+    pub sync_registry: bool,
+    pub disabled_scopes: Vec<String>,
     pub claude_enabled: bool,
     pub machine: String,
     pub tools: Vec<ToolStatus>,
@@ -245,6 +251,8 @@ pub fn status(paths: &Paths) -> Result<Status> {
         store_detail,
         last_sync_ms,
         sync_plugins,
+        sync_registry: config.as_ref().map(|c| c.sync_registry).unwrap_or(true),
+        disabled_scopes: config.as_ref().map(|c| c.disabled_scopes.clone()).unwrap_or_default(),
         claude_enabled,
         machine: engine::machine_name(),
         tools: {
@@ -312,6 +320,9 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     if vscode_on {
         entries.extend(engine::vscode::scan(&home)?);
     }
+    // Per-scope switches: drop disabled scopes from the push set.
+    let off: Vec<String> = config.disabled_scopes.clone();
+    entries.retain(|e| scope_of(&e.logical).map(|s| !off.iter().any(|o| o == s)).unwrap_or(true));
     if claude_on {
         for dir in &dirs {
             for prefix in CLAUDE_CODE.logical_prefixes(include_plugins) {
@@ -343,7 +354,12 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
 
     let mut pull = engine::Report::default();
     if vscode_on {
-        let r = engine::vscode::apply(store.as_ref(), &mut state, &home)?;
+        let r = engine::vscode::apply(
+            store.as_ref(),
+            &mut state,
+            &home,
+            !config.disabled_scopes.iter().any(|s| s == "vscode-index"),
+        )?;
         pull.pulled += r.applied;
         pull.unchanged += r.unchanged;
         pull.skipped_newer_local += r.skipped_newer_local;
@@ -354,6 +370,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     for dir in dirs.iter().filter(|_| claude_on) {
         let r = engine::sync::pull_dir(
             &CLAUDE_CODE, &home, dir, &tok, &mut state, store.as_ref(), include_plugins,
+            &|logical| scope_of(logical).map(|s| off.iter().any(|o| o == s)).unwrap_or(false),
         )?;
         pull.pulled += r.pulled;
         pull.skipped_newer_local += r.skipped_newer_local;
@@ -381,6 +398,24 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
         skipped_newer_local: pull.skipped_newer_local,
         skipped_deleted: pull.skipped_deleted,
         unchanged: push.unchanged + pull.unchanged,
+    })
+}
+
+/// Which user-facing scope a Claude logical path belongs to.
+pub fn scope_of(logical: &str) -> Option<&'static str> {
+    let rest = logical.strip_prefix("claude/")?;
+    let rest = match rest.strip_prefix("profiles/") {
+        Some(r) => r.splitn(2, '/').nth(1)?,
+        None => rest,
+    };
+    Some(match rest.split('/').next()? {
+        "projects" => "sessions",
+        "plans" | "tasks" => "plans",
+        "agents" | "skills" | "rules" => "config",
+        "meta" => {
+            if rest.ends_with("history.jsonl") { "plans" } else { "config" }
+        }
+        _ => return None, // plugins/registry have their own flags
     })
 }
 

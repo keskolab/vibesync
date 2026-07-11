@@ -155,32 +155,33 @@ function openTool(t) {
   $("tool-substatus").textContent = `${t.sessions} sessions · ${t.plans} plans on this ${DEVICE}`;
   const ul = $("tool-scopes");
   ul.innerHTML = "";
+  const offScopes = status.disabledScopes || [];
+  const on = (id) => !offScopes.includes(id);
   const SCOPES = {
     "claude-code": [
-      { name: "Sessions & memory", sub: "Transcripts, subagents, auto-memory", on: true, locked: true },
-      { name: "Plans, tasks & history", sub: "Plans, tasks, command history", on: true, locked: true },
-      { name: "Agents, skills & settings", sub: "Custom agents, skills, rules, CLAUDE.md", on: true, locked: true },
-      { name: "Plugins", sub: "Can be large — off by default", on: status.syncPlugins, locked: false, id: "scope-plugins" },
-      { name: "App sidebar", sub: "Claude desktop session list", on: true, locked: true },
+      { scope: "sessions", name: "Sessions & memory", sub: "Transcripts, subagents, auto-memory", on: on("sessions") },
+      { scope: "plans", name: "Plans, tasks & history", sub: "Plans, tasks, command history", on: on("plans") },
+      { scope: "config", name: "Agents, skills & settings", sub: "Custom agents, skills, rules, CLAUDE.md", on: on("config") },
+      { scope: "plugins", name: "Plugins", sub: "Can be large — off by default", on: status.syncPlugins },
+      { scope: "registry", name: "App sidebar", sub: "Claude desktop session list", on: status.syncRegistry },
     ],
     vscode: [
-      { name: "Copilot chats", sub: "Chat history per project folder", on: true, locked: true },
-      { name: "Chat history panel", sub: "Synced chats appear in matching folders", on: true, locked: true },
+      { tool: "vscode", name: "Copilot chats", sub: "Chat history per project folder", on: t.enabled },
+      { scope: "vscode-index", name: "Chat history panel", sub: "Synced chats appear in matching folders", on: on("vscode-index") },
     ],
   };
   for (const s of SCOPES[t.id] || []) {
     const li = document.createElement("li");
     li.innerHTML = `
       <div class="tlabel">${s.name}<span class="tsub">${s.sub}</span></div>
-      <label class="switch"><input type="checkbox" ${s.on ? "checked" : ""} ${s.locked ? "disabled" : ""} ${s.id ? `id="${s.id}"` : ""} /><span class="knob"></span></label>`;
-    ul.appendChild(li);
-  }
-  const plugins = ul.querySelector("#scope-plugins");
-  if (plugins) {
-    plugins.addEventListener("change", async (e) => {
-      status = await invoke("set_sync_plugins", { enabled: e.target.checked });
+      <label class="switch"><input type="checkbox" ${s.on ? "checked" : ""} /><span class="knob"></span></label>`;
+    li.querySelector("input").addEventListener("change", async (e) => {
+      status = s.tool
+        ? await invoke("set_tool_enabled", { id: s.tool, enabled: e.target.checked })
+        : await invoke("set_scope_enabled", { scope: s.scope, enabled: e.target.checked });
       renderAll();
     });
+    ul.appendChild(li);
   }
   $("tool-storage").innerHTML = `
     <div><span>Local size</span><b>${fmtMB(t.bytes)} MB</b></div>

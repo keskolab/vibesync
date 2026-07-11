@@ -153,6 +153,36 @@ async fn set_tool_enabled(
     .map_err(|e| format!("{e:#}"))
 }
 
+/// Toggle a sync scope. "plugins" and "registry" map to their dedicated
+/// flags; the rest live in disabled_scopes.
+#[tauri::command]
+async fn set_scope_enabled(
+    app: tauri::AppHandle,
+    scope: String,
+    enabled: bool,
+) -> Result<syncer::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = syncer::paths(&app)?;
+        let mut cfg = syncer::load_config(&paths)?
+            .ok_or_else(|| anyhow::anyhow!("not configured yet"))?;
+        match scope.as_str() {
+            "plugins" => cfg.sync_plugins = enabled,
+            "registry" => cfg.sync_registry = enabled,
+            _ => {
+                cfg.disabled_scopes.retain(|s| s != &scope);
+                if !enabled {
+                    cfg.disabled_scopes.push(scope);
+                }
+            }
+        }
+        syncer::save_config(&paths, &cfg)?;
+        syncer::status(&paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
 /// Toggle the opt-in plugins scope (never on by default — can be large).
 #[tauri::command]
 async fn set_sync_plugins(app: tauri::AppHandle, enabled: bool) -> Result<syncer::Status, String> {
@@ -498,6 +528,7 @@ pub fn run() {
             position_popover,
             fit_popover,
             set_sync_plugins,
+            set_scope_enabled,
             set_tool_enabled,
             is_dev,
             get_settings,
