@@ -165,14 +165,16 @@ function renderAll() {
     ul.appendChild(li);
   }
   // Shared (cross-tool) content: global skills per the Agent Skills spec.
+  // Always shown — when the folder is missing, instruct + offer to create it.
   const sl = $("shared-list");
   const sLabel = $("shared-label");
+  const SKILLS_PATH = IS_MAC ? "~/.agents/skills" : "%USERPROFILE%\\.agents\\skills";
+  sLabel.style.display = "";
+  sl.style.display = "";
   if (status.sharedInstalled) {
-    sLabel.style.display = "";
-    sl.style.display = "";
     sl.innerHTML = `<li>
       ${ICONS.shared}
-      <div class="tlabel">Global skills<span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"} · ${fmtMB(status.sharedBytes)} MB<br>~/.agents/skills — shared by all AI tools</span></div>
+      <div class="tlabel">Global skills<span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"} · ${fmtMB(status.sharedBytes)} MB<br>${SKILLS_PATH} — shared by all AI tools</span></div>
       <label class="switch"><input type="checkbox" ${status.sharedEnabled ? "checked" : ""} /><span class="knob"></span></label>`;
     sl.querySelector("label.switch").addEventListener("click", (e) => e.stopPropagation());
     sl.querySelector("input").addEventListener("change", async (e) => {
@@ -180,8 +182,14 @@ function renderAll() {
       renderAll();
     });
   } else {
-    sLabel.style.display = "none";
-    sl.style.display = "none";
+    sl.innerHTML = `<li class="muted">
+      ${ICONS.shared}
+      <div class="tlabel">Global skills<span class="tsub">No skills folder on this ${DEVICE} yet.<br>Create ${SKILLS_PATH} to share skills across your computers.</span></div>
+      <button class="row-btn" id="create-skills">Create</button>`;
+    sl.querySelector("#create-skills").addEventListener("click", async () => {
+      status = await invoke("create_skills_dir");
+      renderAll();
+    });
   }
   for (const t of COMING_SOON) {
     const li = document.createElement("li");

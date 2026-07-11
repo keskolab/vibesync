@@ -114,6 +114,21 @@ async fn get_status(app: tauri::AppHandle) -> Result<syncer::Status, String> {
     .map_err(|e| format!("{e:#}"))
 }
 
+/// Create the global skills folder (agentskills.io spec) so shared skills can
+/// live on this machine; returns refreshed status.
+#[tauri::command]
+async fn create_skills_dir(app: tauri::AppHandle) -> Result<syncer::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
+        std::fs::create_dir_all(home.join(".agents/skills"))?;
+        let paths = syncer::paths(&app)?;
+        syncer::status(&paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
 /// Ensure a store exists (first run): writes the default local-folder config
 /// if none is present. Real backend selection wires into onboarding later.
 #[tauri::command]
@@ -529,6 +544,7 @@ pub fn run() {
             fit_popover,
             set_sync_plugins,
             set_scope_enabled,
+            create_skills_dir,
             set_tool_enabled,
             is_dev,
             get_settings,

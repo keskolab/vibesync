@@ -355,6 +355,22 @@ header {
   padding-right: 4px;
 }
 
+/* small inline action inside a toggle row (e.g. create skills folder) */
+.row-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--sep);
+  background: var(--card);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.row-btn:hover {
+  background: var(--card-hover);
+}
+
 /* key-value block (tool detail storage) */
 .kv {
   background: var(--card);
