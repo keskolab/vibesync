@@ -31,7 +31,9 @@ function buildStore() {
       return chosen.path ? { type: "folder", path: chosen.path, encrypted: false } : null;
     case "r2":
       return f.account && f.bucket && f.key && f.secret
-        ? { type: "s3", endpoint: `https://${f.account}.r2.cloudflarestorage.com`, region: "auto",
+        ? { type: "s3",
+            endpoint: `https://${f.account}.${f.jurisdiction ? f.jurisdiction + "." : ""}r2.cloudflarestorage.com`,
+            region: "auto",
             bucket: f.bucket, access_key_id: f.key, secret_access_key: f.secret } : null;
     case "s3":
       return f.region && f.bucket && f.key && f.secret
@@ -145,6 +147,11 @@ function renderConfigure() {
 
   const map = { "cfg-account": "account", "cfg-region": "region", "cfg-bucket": "bucket",
                 "cfg-key": "key", "cfg-secret": "secret", "cfg-sas": "sas" };
+  const jur = body.querySelector("#cfg-jurisdiction");
+  if (jur) {
+    jur.value = chosen.fields.jurisdiction || "";
+    jur.addEventListener("change", (e) => { chosen.fields.jurisdiction = e.target.value; update(); });
+  }
   for (const [id, k] of Object.entries(map)) {
     const el = body.querySelector(`#${id}`);
     if (!el) continue;

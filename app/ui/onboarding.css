@@ -278,7 +278,8 @@ body.onboarding .toggles {
   font-weight: 500;
   color: var(--text-2);
 }
-.field input {
+.field input,
+.field select {
   font-family: inherit;
   font-size: 13px;
   color: var(--text);
@@ -290,7 +291,8 @@ body.onboarding .toggles {
   user-select: text;
   -webkit-user-select: text;
 }
-.field input:focus {
+.field input:focus,
+.field select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.22);
 }
