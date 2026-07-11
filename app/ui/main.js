@@ -25,13 +25,18 @@ const isSetup = () => !!localStorage.getItem("setupDone");
 
 // ---------- helpers ----------
 
-function relTime(ts) {
-  const s = Math.round((Date.now() - ts) / 1000);
-  if (s < 10) return "just now";
-  if (s < 60) return `${s} s ago`;
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m} min ago`;
-  return `${Math.round(m / 60)} h ago`;
+// Real timestamp: "14:02" today, "Yesterday 14:02", else "11 Jul 14:02".
+function syncStamp(ts) {
+  const d = new Date(ts);
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const today = new Date();
+  const sameDay = (a, b) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  if (sameDay(d, today)) return time;
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (sameDay(d, yesterday)) return `Yesterday ${time}`;
+  return `${d.toLocaleDateString([], { day: "numeric", month: "short" })} ${time}`;
 }
 
 function fmtMB(bytes) {
@@ -80,7 +85,7 @@ function setPending(pending) {
 
 function renderStatusLine() {
   if (!status) return;
-  const when = status.lastSyncMs ? relTime(status.lastSyncMs) : "never";
+  const when = status.lastSyncMs ? syncStamp(status.lastSyncMs) : "never";
   const loc = status.storeDesc || "not set";
   const html = `<span class="kv-label">Last sync:</span> ${when}<br><span class="kv-label">Location:</span> ${loc}`;
   if ($("substatus").dataset.line !== html) {
