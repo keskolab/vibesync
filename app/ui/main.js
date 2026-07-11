@@ -282,6 +282,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   // Settings toggles: launch at login + autosync.
   invoke("get_settings").then((s) => {
+    $("opt-shared").checked = !(status?.disabledScopes || []).includes("shared");
     $("opt-autostart").checked = s.autostart;
     $("opt-autosync").checked = s.autosync;
     autosyncOn = s.autosync;
@@ -289,6 +290,11 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
   $("opt-autostart").addEventListener("change", (e) =>
     invoke("set_autostart", { enabled: e.target.checked }).catch(() => (e.target.checked = !e.target.checked))
+  );
+  $("opt-shared").addEventListener("change", (e) =>
+    invoke("set_scope_enabled", { scope: "shared", enabled: e.target.checked })
+      .then((st) => { status = st; renderAll(); })
+      .catch(() => (e.target.checked = !e.target.checked))
   );
   $("opt-autosync").addEventListener("change", (e) =>
     invoke("set_autosync", { enabled: e.target.checked })

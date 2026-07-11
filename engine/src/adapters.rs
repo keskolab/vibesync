@@ -25,6 +25,8 @@ pub struct RootSpec {
 pub struct Adapter {
     pub id: &'static str,
     pub name: &'static str,
+    /// Top-level store namespace this adapter's files live under.
+    pub store_ns: &'static str,
     pub roots: &'static [RootSpec],
     /// Opt-in roots (potentially large); synced only when the user enables
     /// them — e.g. Claude plugins.
@@ -42,6 +44,7 @@ const fn file_root(home_rel: &'static str, logical_prefix: &'static str) -> Root
 pub const CLAUDE_CODE: Adapter = Adapter {
     id: "claude-code",
     name: "Claude Code",
+    store_ns: "claude",
     roots: &[
         // Sessions, subagent transcripts, and auto-memory.
         root(".claude/projects", "projects", &["jsonl", "md"]),
@@ -66,6 +69,17 @@ pub const CLAUDE_CODE: Adapter = Adapter {
             is_file: false,
         },
     ],
+};
+
+/// Cross-tool skills per the Agent Skills spec (agentskills.io):
+/// ~/.agents/skills is read by multiple tools and belongs to the user,
+/// so it syncs under its own tool-agnostic namespace.
+pub const SHARED_SKILLS: Adapter = Adapter {
+    id: "shared",
+    name: "Global skills",
+    store_ns: "shared",
+    roots: &[root(".agents/skills", "skills", &[])],
+    optional_roots: &[],
 };
 
 impl Adapter {
@@ -97,9 +111,9 @@ impl Adapter {
         // Everything belongs to the claude/ tool namespace; extra config
         // dirs (multi-account) nest under claude/profiles/<dir>/.
         let ns = if dir == ".claude" {
-            "claude/".to_string()
+            format!("{}/", self.store_ns)
         } else {
-            format!("claude/profiles/{dir}/")
+            format!("{}/profiles/{dir}/", self.store_ns)
         };
         let mut out = Vec::new();
         for root in self.active_roots(include_optional) {
@@ -158,7 +172,9 @@ impl Adapter {
         tok: &Tokenizer,
         include_optional: bool,
     ) -> Option<std::path::PathBuf> {
-        let logical = logical.strip_prefix("claude/")?;
+        let logical = logical
+            .strip_prefix(self.store_ns)
+            .and_then(|l| l.strip_prefix('/'))?;
         let logical = if dir == ".claude" {
             if logical.starts_with("profiles/") {
                 return None; // profile namespace belongs to a non-default dir

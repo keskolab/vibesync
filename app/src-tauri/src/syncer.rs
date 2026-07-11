@@ -348,6 +348,11 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     if vscode_on {
         entries.extend(engine::vscode::scan(&home)?);
     }
+    let shared_on = !config.disabled_scopes.iter().any(|s| s == "shared");
+    if shared_on {
+        entries.extend(engine::adapters::SHARED_SKILLS.scan(&home, &tok, false)?);
+        state.mark_deletions("shared/skills", &entries);
+    }
     // Per-scope switches: drop disabled scopes from the push set.
     let off: Vec<String> = config.disabled_scopes.clone();
     entries.retain(|e| scope_of(&e.logical).map(|s| !off.iter().any(|o| o == s)).unwrap_or(true));
@@ -392,8 +397,14 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
         pull.unchanged += r.unchanged;
         pull.skipped_newer_local += r.skipped_newer_local;
     }
-    if !claude_on {
-        // Claude disabled: skip its pull loops entirely.
+    if shared_on {
+        let r = engine::sync::pull_dir(
+            &engine::adapters::SHARED_SKILLS, &home, ".claude", &tok, &mut state,
+            store.as_ref(), false, &|_| false,
+        )?;
+        pull.pulled += r.pulled;
+        pull.unchanged += r.unchanged;
+        pull.skipped_newer_local += r.skipped_newer_local;
     }
     for dir in dirs.iter().filter(|_| claude_on) {
         let r = engine::sync::pull_dir(
