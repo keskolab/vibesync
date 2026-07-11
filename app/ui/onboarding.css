@@ -29,14 +29,15 @@ body.onboarding {
   min-height: 0;
   overflow: hidden;
 }
+/* Track/step widths must match STEPS in onboarding.js (6). */
 #steps-track {
   display: flex;
-  width: 700%;
+  width: 600%;
   height: 100%;
   transition: transform 0.32s cubic-bezier(0.3, 0.9, 0.3, 1);
 }
 .step {
-  width: 14.2857%;
+  width: 16.6667%;
   height: 100%;
   padding: 34px 38px 16px;
   display: flex;
