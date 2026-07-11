@@ -74,8 +74,12 @@ function renderStatusLine() {
   if (!status) return;
   const when = status.lastSyncMs ? `Last synced ${relTime(status.lastSyncMs)}` : "Never synced";
   const store = status.storeDesc ? status.storeDesc.split(/[\\/]/).pop() : "no store";
-  $("substatus").textContent = `${when} · ${store}`;
-  $("substatus").title = status.storeDesc || "";
+  const line = `${when} · ${store}`;
+  if ($("substatus").textContent !== line) {
+    $("substatus").textContent = line;
+    $("substatus").title = status.storeDesc || "";
+    setTimeout(fitWindow, 50); // long store names wrap to a second line
+  }
 }
 
 function renderAll() {
@@ -165,6 +169,7 @@ function setBusy(busy, label) {
   $("status-text").textContent = busy ? "Syncing" : "Synced";
   $("progress").classList.toggle("active", busy);
   if (!busy) $("progress-bar").style.width = "0";
+  setTimeout(fitWindow, 50); // busy label/progress change the page height
 }
 
 async function runSync(firstRun) {
