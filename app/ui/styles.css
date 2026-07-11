@@ -135,7 +135,11 @@ header {
 .substatus {
   margin-top: 5px;
   font-size: 11px;
+  line-height: 1.5;
   color: var(--text-2);
+}
+.substatus .kv-label {
+  color: var(--text-3);
 }
 
 /* ---------- counts ---------- */

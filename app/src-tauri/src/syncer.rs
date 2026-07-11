@@ -176,17 +176,25 @@ pub fn status(paths: &Paths) -> Result<Status> {
     // the tooltip. Users think "my code-sync bucket on R2", not endpoints.
     let store_desc = config.as_ref().map(|c| match &c.store {
         engine::StoreConfig::Folder { path, encrypted } => {
-            let name = std::path::Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.clone());
-            format!("folder \u{201c}{name}\u{201d}{}", if *encrypted { " (encrypted)" } else { "" })
+            // Show the last few path components — enough to recognize the
+            // folder without the full path.
+            let comps: Vec<String> = std::path::Path::new(path)
+                .components()
+                .map(|p| p.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            let tail = comps.len().saturating_sub(3);
+            let shown = comps[tail..].join("/");
+            let prefix = if tail > 1 { "\u{2026}/" } else { "" };
+            format!("{prefix}{shown}{}", if *encrypted { " (encrypted)" } else { "" })
         }
-        engine::StoreConfig::S3 { bucket, endpoint, .. } => {
-            let kind = if endpoint.contains("r2.cloudflarestorage") { "R2" } else { "S3" };
-            format!("{kind} bucket \u{201c}{bucket}\u{201d} (encrypted)")
+        engine::StoreConfig::S3 { endpoint, .. } => {
+            if endpoint.contains("r2.cloudflarestorage") {
+                "R2 Cloudflare (encrypted)".to_string()
+            } else {
+                "Amazon S3 (encrypted)".to_string()
+            }
         }
-        engine::StoreConfig::AzureSas { .. } => "Azure container (encrypted)".to_string(),
+        engine::StoreConfig::AzureSas { .. } => "Azure Blob (encrypted)".to_string(),
     });
     let store_detail = config.as_ref().map(|c| match &c.store {
         engine::StoreConfig::Folder { path, .. } => path.clone(),

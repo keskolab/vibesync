@@ -72,13 +72,14 @@ function setPending(pending) {
 
 function renderStatusLine() {
   if (!status) return;
-  const when = status.lastSyncMs ? `Last synced ${relTime(status.lastSyncMs)}` : "Never synced";
-  const store = status.storeDesc || "no store";
-  const line = `${when} · ${store}`;
-  if ($("substatus").textContent !== line) {
-    $("substatus").textContent = line;
+  const when = status.lastSyncMs ? relTime(status.lastSyncMs) : "never";
+  const loc = status.storeDesc || "not set";
+  const html = `<span class="kv-label">Last sync:</span> ${when}<br><span class="kv-label">Location:</span> ${loc}`;
+  if ($("substatus").dataset.line !== html) {
+    $("substatus").dataset.line = html;
+    $("substatus").innerHTML = html;
     $("substatus").title = status.storeDetail || "";
-    setTimeout(fitWindow, 50); // long store names wrap to a second line
+    setTimeout(fitWindow, 50); // height changes with content
   }
 }
 
