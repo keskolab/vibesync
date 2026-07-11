@@ -54,6 +54,13 @@ fn detect_tools() -> Vec<vibesync_engine::adapters::DetectedTool> {
     vibesync_engine::adapters::detect_all()
 }
 
+/// True while any sync (manual or autosync) is running — lets a popover
+/// opened mid-sync adopt the busy state instead of claiming Synced.
+#[tauri::command]
+fn is_syncing() -> bool {
+    SYNCING.load(Ordering::SeqCst)
+}
+
 #[tauri::command]
 fn engine_version() -> &'static str {
     vibesync_engine::VERSION
@@ -611,6 +618,7 @@ pub fn run() {
             detect_tools,
             detect_onboarding_tools,
             engine_version,
+            is_syncing,
             get_status,
             configure_default_store,
             sync_now,

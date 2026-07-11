@@ -338,11 +338,11 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   $("ob-next").addEventListener("click", () => {
     if (step === STEPS - 1) {
-      const claude = OB_TOOLS.find((t) => t.id === "claude-code");
       tauri?.event.emit("setup-complete", {
         store: buildStore(),
         passphrase: needsPassphrase() ? chosen.passphrase || null : null,
-        claudeEnabled: claude ? !!claude.on : true,
+        // Every deselected (installed, supported) tool — not just Claude.
+        disabledTools: OB_TOOLS.filter((t) => t.installed && t.supported && !t.on).map((t) => t.id),
       });
       tauri?.core.invoke("close_onboarding");
       // reset so reopening from Settings starts fresh

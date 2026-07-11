@@ -441,7 +441,10 @@ function openTool(t) {
 
 // ---------- sync ----------
 
+let uiBusy = false;
+
 function setBusy(busy, label) {
+  uiBusy = busy;
 	const btn = $("sync-now");
 	btn.classList.toggle("busy", busy);
 	btn.disabled = busy;
@@ -571,12 +574,9 @@ window.addEventListener("DOMContentLoaded", async () => {
 			$("substatus").textContent = String(err);
 			return;
 		}
-		if (choice.claudeEnabled === false) {
+		for (const id of choice.disabledTools || []) {
 			try {
-				status = await invoke("set_tool_enabled", {
-					id: "claude-code",
-					enabled: false,
-				});
+				status = await invoke("set_tool_enabled", { id, enabled: false });
 			} catch {}
 		}
 		renderAll();
