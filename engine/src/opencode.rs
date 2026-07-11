@@ -40,9 +40,13 @@ fn storage_root(home: &Path) -> Option<PathBuf> {
     data_root(home).map(|r| r.join("storage")).filter(|s| s.is_dir())
 }
 
-/// Installed = data root exists. Fresh (db-only) installs have no storage/.
+/// Installed = the data root holds something a real install writes (db,
+/// auth, bin, logs). Pre-gating VibeSync versions created storage/ on
+/// machines without OpenCode — such residue must not read as an install.
 pub fn detect(home: &Path) -> bool {
-    data_root(home).is_some()
+    let Some(root) = data_root(home) else { return false };
+    let Ok(rd) = std::fs::read_dir(&root) else { return false };
+    rd.flatten().any(|e| e.file_name() != "storage")
 }
 
 pub fn scan(home: &Path) -> Result<Vec<FileEntry>> {
@@ -178,6 +182,16 @@ pub fn light_counts(home: &Path) -> (usize, u64, usize, Option<i64>) {
 mod tests {
     use super::*;
     use crate::FolderStore;
+
+    #[test]
+    fn sync_residue_is_not_an_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".local/share/opencode/storage/session")).unwrap();
+        assert!(!detect(home), "storage/ alone is sync residue");
+        std::fs::write(home.join(".local/share/opencode/auth.json"), "{}").unwrap();
+        assert!(detect(home), "a real install marker flips detection");
+    }
 
     #[test]
     fn storage_files_sync_additively() {

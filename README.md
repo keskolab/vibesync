@@ -113,21 +113,27 @@ Transparency matters when a tool reads your AI sessions. This is the complete li
 | Zed | `.../Zed/threads/threads.db` ² | Syncs thread rows (newest wins) |
 | All tools | `~/.agents/skills/` | Syncs global skills ([Agent Skills spec](https://agentskills.io)) |
 
-¹ macOS: `~/Library/Application Support/Code/User/workspaceStorage/`, Windows: `%APPDATA%\Code\User\workspaceStorage\`.
-² macOS: `~/Library/Application Support/Zed/`, Windows: `%APPDATA%\Zed\` or `%LOCALAPPDATA%\Zed\`.
+macOS: `~/Library/Application Support/Code/User/workspaceStorage/`
+macOS: `~/Library/Application Support/Zed/`
 
-**VibeSync's own files** (macOS: `~/Library/Application Support/com.keskolabs.vibesync/`, Windows: `%APPDATA%\com.keskolabs.vibesync\`):
+Windows: `%APPDATA%\Code\User\workspaceStorage\`
+Windows: `%APPDATA%\Zed\` or `%LOCALAPPDATA%\Zed\`
 
-| File | What it holds |
+**VibeSync files:**
+macOS: `~/Library/Application Support/com.keskolabs.vibesync/`
+Windows: `%APPDATA%\com.keskolabs.vibesync\`
+
+| File | What  |
 |---|---|
-| `config.json` | Your settings, storage location, and credentials/passphrase. Stays on this machine — never uploaded |
+| `config.json` | Your settings, storage location, and credentials/passphrase. Stays locally — never uploaded |
 | `state.json` | Fingerprints of already-synced files, so only changes transfer |
 | `new_items.json` | The unseen "+N new" counts shown on each app's card |
 | `applied_registry.json` | Which sidebar entries VibeSync added, so it can clean up only its own |
 
-**Inside your storage location** (everything under `v1/files/`, each file paired with a small `.meta` sidecar; encrypted before upload on cloud backends):
+**Storage Provider:** 
+Everything under `v1/files/`, each file paired with a small `.meta` sidecar; encrypted before upload on cloud backends
 
-| Folder | Contents |
+| Folder | Content |
 |---|---|
 | `claude/` | Claude Code files, mirroring the folders above (`claude/registry/` holds sidebar entries, `claude/profiles/` extra accounts) |
 | `vscode/ws/` | VS Code Copilot chats, one folder per project |

@@ -30,9 +30,15 @@ fn root(home: &Path) -> PathBuf {
     home.join(".codex")
 }
 
-/// Installed = ~/.codex exists (a fresh install has no sessions dir yet).
+/// Installed = ~/.codex holds something a real install writes (auth, config,
+/// logs). Pre-gating VibeSync versions created sessions/ + the index on
+/// machines without Codex — such residue must not read as an install.
 pub fn detect(home: &Path) -> bool {
-    root(home).is_dir()
+    let Ok(rd) = std::fs::read_dir(root(home)) else { return false };
+    rd.flatten().any(|e| {
+        let n = e.file_name();
+        n != "sessions" && n != "session_index.jsonl"
+    })
 }
 
 /// Scan session files (index is handled separately on push/apply).
@@ -246,6 +252,17 @@ fn sanitize(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::FolderStore;
+
+    #[test]
+    fn sync_residue_is_not_an_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".codex/sessions/2026/01/01")).unwrap();
+        std::fs::write(home.join(".codex/session_index.jsonl"), "{}\n").unwrap();
+        assert!(!detect(home), "sessions+index alone are sync residue");
+        std::fs::write(home.join(".codex/config.toml"), "").unwrap();
+        assert!(detect(home), "a real install marker flips detection");
+    }
 
     #[test]
     fn sessions_sync_and_index_unions() {
