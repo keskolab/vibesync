@@ -31,13 +31,7 @@
             <button id="open-setup">Open Setup Assistant</button>
           </div>
 
-          <div class="counts" id="counts">
-            <div class="count"><b id="c-sessions">–</b><span>sessions</span></div>
-            <div class="vsep"></div>
-            <div class="count"><b id="c-apps">–</b><span>apps syncing</span></div>
-            <div class="vsep"></div>
-            <div class="count"><b id="c-size">–</b><span>MB local</span></div>
-          </div>
+          <div class="counts" id="counts"></div>
 
           <div class="hint hidden" id="hint">
             <svg class="hint-icon" viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM8 4.6a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8zM9 11.5H7v-1h.4V8.6H7v-1h1.6v2.9H9v1z"/></svg>
@@ -60,8 +54,8 @@
               <span class="app-name" id="tool-title">Tool</span>
               <span class="header-spacer"></span>
             </div>
-            <div class="substatus" id="tool-substatus"></div>
           </header>
+          <div class="counts" id="tool-counts"></div>
           <div class="section-label">Sync scopes</div>
           <ul class="toggles" id="tool-scopes"></ul>
           <div class="section-label">Storage</div>

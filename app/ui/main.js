@@ -43,6 +43,13 @@ function fmtMB(bytes) {
   return (bytes / (1024 * 1024)).toFixed(bytes > 50e6 ? 0 : 1);
 }
 
+// Reusable stat-card row (used on the main page and every tool page).
+function statCards(el, items) {
+  el.innerHTML = items
+    .map(({ value, label }) => `<div class="count"><b>${value}</b><span>${label}</span></div>`)
+    .join('<div class="vsep"></div>');
+}
+
 let currentPage = 0;
 
 function goTo(page) {
@@ -99,9 +106,11 @@ function renderAll() {
   if (!status) return;
   // Totals across the apps that are actually syncing (installed + enabled).
   const active = status.tools.filter((t) => t.installed && t.enabled);
-  $("c-sessions").textContent = active.reduce((n, t) => n + t.sessions, 0);
-  $("c-apps").textContent = active.length;
-  $("c-size").textContent = fmtMB(active.reduce((n, t) => n + t.bytes, 0));
+  statCards($("counts"), [
+    { value: active.reduce((n, t) => n + t.sessions, 0), label: "sessions" },
+    { value: active.length, label: "apps syncing" },
+    { value: fmtMB(active.reduce((n, t) => n + t.bytes, 0)), label: "MB local" },
+  ]);
   $("status-dot").className = "dot ok";
   $("status-text").textContent = "Synced";
   const setStore = $("set-store");
@@ -153,8 +162,11 @@ async function refreshStatus() {
 
 function openTool(t) {
   $("tool-title").textContent = t.name;
-  $("tool-substatus").innerHTML =
-    `${t.sessions} session${t.sessions === 1 ? "" : "s"}<br>${t.projects} project${t.projects === 1 ? "" : "s"}`;
+  statCards($("tool-counts"), [
+    { value: t.sessions, label: t.sessions === 1 ? "session" : "sessions" },
+    { value: t.projects, label: t.projects === 1 ? "project" : "projects" },
+    { value: fmtMB(t.bytes), label: "MB local" },
+  ]);
   const ul = $("tool-scopes");
   ul.innerHTML = "";
   const offScopes = status.disabledScopes || [];
@@ -186,7 +198,6 @@ function openTool(t) {
     ul.appendChild(li);
   }
   $("tool-storage").innerHTML = `
-    <div><span>Local size</span><b>${fmtMB(t.bytes)} MB</b></div>
     <div><span>Store</span><b>${status.storeDesc || "—"}</b></div>
     <div><span>Adapter</span><b>${t.id} v1</b></div>`;
   goTo(1);
