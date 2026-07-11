@@ -93,16 +93,6 @@ fn now_ms() -> i64 {
 pub fn paths(app: &tauri::AppHandle) -> Result<Paths> {
     use tauri::Manager;
     let dir = app.path().app_data_dir().context("resolve app data dir")?;
-    // One-time migration from the pre-rename identifier so existing
-    // machines keep their config, state and applied-registry tracking.
-    if !dir.exists() {
-        if let Some(parent) = dir.parent() {
-            let old = parent.join("com.keskolabs.codesync");
-            if old.join("config.json").exists() {
-                let _ = std::fs::rename(&old, &dir);
-            }
-        }
-    }
     std::fs::create_dir_all(&dir)?;
     Ok(Paths { config: dir.join("config.json"), state: dir.join("state.json") })
 }
