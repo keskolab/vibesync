@@ -59,6 +59,50 @@ fn engine_version() -> &'static str {
     vibesync_engine::VERSION
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OnboardTool {
+    id: &'static str,
+    name: &'static str,
+    installed: bool,
+    /// Whether VibeSync can actually sync it yet (adapter built).
+    supported: bool,
+    sessions: usize,
+}
+
+/// Real detection for the setup assistant: probe each known tool's storage.
+/// Only Claude Code has a sync adapter today; the rest are detected and shown
+/// as "coming soon" so the list is honest, never a dead toggle.
+#[tauri::command]
+fn detect_onboarding_tools() -> Vec<OnboardTool> {
+    let Some(home) = dirs::home_dir() else { return vec![] };
+    let count_jsonl = |rel: &str| -> usize {
+        let mut n = 0;
+        let mut stack = vec![home.join(rel)];
+        while let Some(d) = stack.pop() {
+            if let Ok(rd) = std::fs::read_dir(&d) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    };
+    let exists = |rel: &str| home.join(rel).exists();
+    vec![
+        OnboardTool { id: "claude-code", name: "Claude Code", installed: exists(".claude/projects"), supported: true, sessions: count_jsonl(".claude/projects") },
+        OnboardTool { id: "codex", name: "Codex", installed: exists(".codex/sessions"), supported: false, sessions: count_jsonl(".codex/sessions") },
+        OnboardTool { id: "opencode", name: "OpenCode", installed: exists(".local/share/opencode"), supported: false, sessions: 0 },
+        OnboardTool { id: "zed", name: "Zed", installed: exists("Library/Application Support/Zed/threads/threads.db"), supported: false, sessions: 0 },
+        OnboardTool { id: "vscode", name: "VS Code", installed: exists("Library/Application Support/Code/User/workspaceStorage"), supported: false, sessions: 0 },
+    ]
+}
+
 #[tauri::command]
 async fn get_status(app: tauri::AppHandle) -> Result<syncer::Status, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -380,6 +424,7 @@ pub fn run() {
             close_onboarding,
             show_popover,
             detect_tools,
+            detect_onboarding_tools,
             engine_version,
             get_status,
             configure_default_store,

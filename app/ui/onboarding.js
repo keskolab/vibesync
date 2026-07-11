@@ -47,13 +47,7 @@ function buildStore() {
 
 const needsPassphrase = () => storage !== "folder";
 
-const OB_TOOLS = [
-  { name: "Claude Code", sub: "86 sessions", found: true, on: true },
-  { name: "Codex", sub: "14 sessions", found: true, on: true },
-  { name: "OpenCode", sub: "7 sessions", found: true, on: false },
-  { name: "Zed", sub: "Not installed", found: false },
-  { name: "VS Code", sub: "Not installed", found: false },
-];
+let OB_TOOLS = []; // filled by real detection at boot
 
 const STEPS = 7;
 let step = 0;
@@ -70,10 +64,25 @@ function renderTools() {
   ul.innerHTML = "";
   for (const t of OB_TOOLS) {
     const li = document.createElement("li");
-    if (!t.found) li.className = "muted";
-    li.innerHTML = `
-      <div class="tlabel">${t.name}<span class="tsub">${t.sub}</span></div>
-      ${t.found ? `<label class="switch"><input type="checkbox" ${t.on ? "checked" : ""} /><span class="knob"></span></label>` : `<span class="na">—</span>`}`;
+    let sub, control;
+    if (t.installed && t.supported) {
+      sub = `${t.sessions} session${t.sessions === 1 ? "" : "s"}`;
+      control = `<label class="switch"><input type="checkbox" ${t.on ? "checked" : ""} data-id="${t.id}" /><span class="knob"></span></label>`;
+    } else if (t.installed) {
+      sub = "Detected \u00b7 adapter coming soon";
+      control = `<span class="na">soon</span>`;
+      li.className = "muted";
+    } else {
+      sub = "Not installed";
+      control = `<span class="na">\u2014</span>`;
+      li.className = "muted";
+    }
+    li.innerHTML = `<div class="tlabel">${t.name}<span class="tsub">${sub}</span></div>${control}`;
+    const input = li.querySelector("input");
+    if (input) input.addEventListener("change", (e) => {
+      const tool = OB_TOOLS.find((x) => x.id === e.target.dataset.id);
+      if (tool) tool.on = e.target.checked;
+    });
     ul.appendChild(li);
   }
 }
@@ -274,8 +283,12 @@ function update() {
   refreshNav();
 }
 
-window.addEventListener("DOMContentLoaded", () => {
+window.addEventListener("DOMContentLoaded", async () => {
   tauri?.core.invoke("get_status").then((s) => { existing = s; }).catch(() => {});
+  try {
+    const detected = await tauri?.core.invoke("detect_onboarding_tools");
+    OB_TOOLS = (detected || []).map((t) => ({ ...t, on: t.installed && t.supported }));
+  } catch (_) { OB_TOOLS = []; }
   tauri?.event.listen("open-at-storage", () => {
     tauri?.core.invoke("get_status").then((s) => { existing = s; }).catch(() => {});
     step = 2;
