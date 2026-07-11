@@ -131,10 +131,16 @@ function renderConfigure() {
     return;
   }
 
+  const jurisdictionField = `<div class="field"><label>Jurisdiction</label><select id="cfg-jurisdiction">
+      <option value="">Default (global)</option>
+      <option value="eu">European Union</option>
+      <option value="fedramp">FedRAMP</option>
+    </select></div>`;
   const forms = {
-    r2: field("cfg-bucket", "Bucket", "vibesync") + field("cfg-account", "Account ID", "d8efee78803a1e14\u2026")
+    r2: field("cfg-bucket", "Bucket", "my-bucket") + field("cfg-account", "Account ID", "d8efee78803a1e14\u2026")
+      + jurisdictionField
       + field("cfg-key", "Access key ID", "") + field("cfg-secret", "Secret access key", "", "password"),
-    s3: field("cfg-bucket", "Bucket", "vibesync") + field("cfg-region", "Region", "eu-north-1")
+    s3: field("cfg-bucket", "Bucket", "my-bucket") + field("cfg-region", "Region", "eu-north-1")
       + field("cfg-key", "Access key ID", "") + field("cfg-secret", "Secret access key", "", "password"),
     azure: field("cfg-sas", "Container SAS URL", "https://acct.blob.core.windows.net/container?sv=\u2026"),
   };
