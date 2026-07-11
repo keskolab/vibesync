@@ -42,8 +42,16 @@ pub fn db_path() -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
+/// Installed = a Zed dir exists (threads.db only appears after first agent
+/// use, so don't require it).
 pub fn detect() -> bool {
-    db_path().is_some()
+    if db_path().is_some() {
+        return true;
+    }
+    [dirs::config_dir(), dirs::data_dir(), dirs::data_local_dir()]
+        .into_iter()
+        .flatten()
+        .any(|d| d.join("Zed").is_dir())
 }
 
 #[derive(Debug, Serialize, Deserialize)]

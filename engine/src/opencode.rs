@@ -7,9 +7,10 @@
 //! files (opaque, additive — records are id-keyed and never collide) and
 //! never writes the db. That guarantees a safe cross-machine archive.
 //!
-//! KNOWN LIMIT: if the current OpenCode reads sessions from opencode.db
-//! rather than storage/, synced records won't appear in its UI until a db
-//! merge is added — pending a live injection test on a machine with OpenCode.
+//! KNOWN LIMIT: current OpenCode builds are db-first (fresh installs may
+//! never create storage/), so synced records won't appear in its UI until a
+//! db merge is added — pending a live injection test. Detection and stats
+//! therefore key off the data root / db, not the storage/ layer.
 //! Interior `directory` paths inside records are not rewritten (same policy
 //! as Claude transcripts).
 
@@ -25,20 +26,23 @@ pub const PREFIX: &str = "opencode/storage";
 /// Volatile/derived subdirs we never sync.
 const SKIP: &[&str] = &["session_diff", "session_share", "migration"];
 
-fn storage_root(home: &Path) -> Option<PathBuf> {
-    for cand in [
-        home.join(".local/share/opencode/storage"),
-        dirs::data_dir().map(|d| d.join("opencode/storage")).unwrap_or_default(),
-    ] {
-        if cand.is_dir() {
-            return Some(cand);
-        }
+/// OpenCode's data root (`~/.local/share/opencode` everywhere in practice;
+/// platform data dirs checked as fallback).
+fn data_root(home: &Path) -> Option<PathBuf> {
+    let mut cands = vec![home.join(".local/share/opencode")];
+    for d in [dirs::data_dir(), dirs::data_local_dir()].into_iter().flatten() {
+        cands.push(d.join("opencode"));
     }
-    None
+    cands.into_iter().find(|c| c.is_dir())
 }
 
+fn storage_root(home: &Path) -> Option<PathBuf> {
+    data_root(home).map(|r| r.join("storage")).filter(|s| s.is_dir())
+}
+
+/// Installed = data root exists. Fresh (db-only) installs have no storage/.
 pub fn detect(home: &Path) -> bool {
-    storage_root(home).is_some()
+    data_root(home).is_some()
 }
 
 pub fn scan(home: &Path) -> Result<Vec<FileEntry>> {
@@ -124,8 +128,29 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore) -> Resul
     Ok(report)
 }
 
-/// (session records, bytes, projects, newest mtime).
+/// (sessions, bytes, projects, newest activity ms). Prefers opencode.db
+/// (read-only — the authoritative layer on current builds); falls back to
+/// counting storage/ files for old installs without the db.
 pub fn light_counts(home: &Path) -> (usize, u64, usize, Option<i64>) {
+    if let Some(root) = data_root(home) {
+        let db = root.join("opencode.db");
+        if db.exists() {
+            if let Ok(conn) = rusqlite::Connection::open_with_flags(
+                &db,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            ) {
+                let n: usize =
+                    conn.query_row("SELECT COUNT(*) FROM session", [], |r| r.get(0)).unwrap_or(0);
+                let p: usize =
+                    conn.query_row("SELECT COUNT(*) FROM project", [], |r| r.get(0)).unwrap_or(0);
+                let last: Option<i64> = conn
+                    .query_row("SELECT MAX(time_updated) FROM session", [], |r| r.get(0))
+                    .unwrap_or(None);
+                let bytes = std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0);
+                return (n, bytes, p, last);
+            }
+        }
+    }
     let Some(root) = storage_root(home) else { return (0, 0, 0, None) };
     let mut sessions = 0;
     let mut bytes = 0u64;

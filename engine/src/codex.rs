@@ -30,8 +30,9 @@ fn root(home: &Path) -> PathBuf {
     home.join(".codex")
 }
 
+/// Installed = ~/.codex exists (a fresh install has no sessions dir yet).
 pub fn detect(home: &Path) -> bool {
-    root(home).join("sessions").is_dir()
+    root(home).is_dir()
 }
 
 /// Scan session files (index is handled separately on push/apply).
