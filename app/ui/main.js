@@ -83,11 +83,14 @@ function setPending(pending) {
   fitWindow();
 }
 
+let autosyncOn = null; // mirrored from settings
+
 function renderStatusLine() {
   if (!status) return;
   const when = status.lastSyncMs ? syncStamp(status.lastSyncMs) : "never";
   const loc = status.storeDesc || "not set";
-  const html = `<span class="kv-label">Last sync:</span> ${when}<br><span class="kv-label">Location:</span> ${loc}`;
+  const auto = autosyncOn === null ? "" : `<br><span class="kv-label">Auto-sync:</span> ${autosyncOn ? "on" : "off"}`;
+  const html = `<span class="kv-label">Last sync:</span> ${when}<br><span class="kv-label">Location:</span> ${loc}${auto}`;
   if ($("substatus").dataset.line !== html) {
     $("substatus").dataset.line = html;
     $("substatus").innerHTML = html;
@@ -251,12 +254,19 @@ window.addEventListener("DOMContentLoaded", async () => {
   invoke("get_settings").then((s) => {
     $("opt-autostart").checked = s.autostart;
     $("opt-autosync").checked = s.autosync;
+    autosyncOn = s.autosync;
+    renderStatusLine();
   });
   $("opt-autostart").addEventListener("change", (e) =>
     invoke("set_autostart", { enabled: e.target.checked }).catch(() => (e.target.checked = !e.target.checked))
   );
   $("opt-autosync").addEventListener("change", (e) =>
-    invoke("set_autosync", { enabled: e.target.checked }).catch(() => (e.target.checked = !e.target.checked))
+    invoke("set_autosync", { enabled: e.target.checked })
+      .then(() => {
+        autosyncOn = e.target.checked;
+        renderStatusLine();
+      })
+      .catch(() => (e.target.checked = !e.target.checked))
   );
 
   if (isSetup()) {
