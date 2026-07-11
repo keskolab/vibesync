@@ -45,9 +45,10 @@ pub struct Paths {
     pub state: PathBuf,
 }
 
-/// Per-tool "new items arrived" ledger: accumulates across syncs and clears
-/// when the user views the tool, so an autosync can't silently wipe a badge
-/// nobody has seen yet.
+/// Per-tool "new items" ledger: holds what the MOST RECENT sync pulled in.
+/// Every completed sync rewrites it, so a sync that brings nothing for a
+/// tool clears its badge — "+N new" always describes the latest sync, never
+/// a stale hour-old one. Viewing the tool clears its entry immediately.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct NewLedger(pub std::collections::BTreeMap<String, NewEntry>);
 
@@ -661,18 +662,14 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         let e = new_by_tool.entry("claude-code").or_default();
         *e = (*e).max(registry_applied);
     }
-    let arrived: Vec<(&str, usize)> =
-        new_by_tool.into_iter().filter(|(_, n)| *n > 0).collect();
-    if !arrived.is_empty() {
-        let mut ledger = load_ledger(paths);
-        let now = now_ms();
-        for (id, n) in arrived {
-            let e = ledger.0.entry(id.to_string()).or_insert(NewEntry { count: 0, ts_ms: now });
-            e.count += n;
-            e.ts_ms = now;
-        }
-        let _ = save_ledger(paths, &ledger);
+    // Rewrite (not merge): the ledger reflects this sync only, clearing
+    // badges for tools that received nothing.
+    let mut ledger = NewLedger::default();
+    let now = now_ms();
+    for (id, n) in new_by_tool.into_iter().filter(|(_, n)| *n > 0) {
+        ledger.0.insert(id.to_string(), NewEntry { count: n, ts_ms: now });
     }
+    let _ = save_ledger(paths, &ledger);
 
     Ok(SyncOutcome {
         pushed: push.pushed,
