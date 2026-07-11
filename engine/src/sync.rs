@@ -80,9 +80,23 @@ pub fn pull(
     store: &dyn SyncStore,
     include_optional: bool,
 ) -> Result<Report> {
+    pull_dir(adapter, home, ".claude", tok, state, store, include_optional)
+}
+
+/// Pull for one config dir (default `.claude` or a `.claude-*` profile).
+#[allow(clippy::too_many_arguments)]
+pub fn pull_dir(
+    adapter: &Adapter,
+    home: &Path,
+    dir: &str,
+    tok: &Tokenizer,
+    state: &mut SyncState,
+    store: &dyn SyncStore,
+    include_optional: bool,
+) -> Result<Report> {
     let mut report = Report::default();
     for (logical, meta) in store.list()? {
-        let Some(abs) = adapter.resolve(&logical, home, tok, include_optional) else {
+        let Some(abs) = adapter.resolve_dir(&logical, home, dir, tok, include_optional) else {
             continue; // not this adapter's namespace (or opted out)
         };
         if let Some(st) = state.files.get(&logical) {

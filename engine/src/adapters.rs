@@ -81,12 +81,49 @@ impl Adapter {
     }
 
     pub fn scan(&self, home: &Path, tok: &Tokenizer, include_optional: bool) -> Result<Vec<FileEntry>> {
+        self.scan_dir(home, ".claude", tok, include_optional)
+    }
+
+    /// Scan with the tool's default config dir replaced by `dir` (multi-account
+    /// setups: `.claude-client1`, ...). Non-default dirs are namespaced under
+    /// `profiles/<dir>/` in the store so accounts never collide.
+    pub fn scan_dir(
+        &self,
+        home: &Path,
+        dir: &str,
+        tok: &Tokenizer,
+        include_optional: bool,
+    ) -> Result<Vec<FileEntry>> {
+        let ns = if dir == ".claude" { String::new() } else { format!("profiles/{dir}/") };
         let mut out = Vec::new();
         for root in self.active_roots(include_optional) {
-            let abs = join_home(home, root.home_rel);
-            out.extend(scan_root(&abs, root.logical_prefix, tok, root.exts, root.exclude_dirs)?);
+            let rel = root.home_rel.replacen(".claude", dir, 1);
+            let abs = join_home(home, &rel);
+            let mut entries = scan_root(&abs, root.logical_prefix, tok, root.exts, root.exclude_dirs)?;
+            if !ns.is_empty() {
+                for e in &mut entries {
+                    e.logical = format!("{ns}{}", e.logical);
+                }
+            }
+            out.extend(entries);
         }
         Ok(out)
+    }
+
+    /// Enumerate config dirs under `home`: `.claude` plus any `.claude-*`
+    /// profile dir that contains a `projects/` folder.
+    pub fn detect_config_dirs(home: &Path) -> Vec<String> {
+        let mut dirs = vec![".claude".to_string()];
+        if let Ok(read) = std::fs::read_dir(home) {
+            for entry in read.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(".claude-") && entry.path().join("projects").is_dir() {
+                    dirs.push(name);
+                }
+            }
+        }
+        dirs.sort();
+        dirs
     }
 
     /// Logical prefixes to consider for deletion-marking after a scan.
@@ -106,10 +143,29 @@ impl Adapter {
         tok: &Tokenizer,
         include_optional: bool,
     ) -> Option<std::path::PathBuf> {
+        self.resolve_dir(logical, home, ".claude", tok, include_optional)
+    }
+
+    pub fn resolve_dir(
+        &self,
+        logical: &str,
+        home: &Path,
+        dir: &str,
+        tok: &Tokenizer,
+        include_optional: bool,
+    ) -> Option<std::path::PathBuf> {
+        let logical = if dir == ".claude" {
+            if logical.starts_with("profiles/") {
+                return None; // profile namespace belongs to a non-default dir
+            }
+            logical
+        } else {
+            logical.strip_prefix(&format!("profiles/{dir}/"))?
+        };
         for root in self.active_roots(include_optional) {
             let prefix = format!("{}/", root.logical_prefix);
             let Some(rest) = logical.strip_prefix(&prefix) else { continue };
-            let abs = join_home(home, root.home_rel);
+            let abs = join_home(home, &root.home_rel.replacen(".claude", dir, 1));
             if root.is_file {
                 // Logical is "<prefix>/<filename>"; must match this root's file.
                 let fname = root.home_rel.rsplit('/').next().unwrap_or_default();

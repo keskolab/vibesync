@@ -225,9 +225,17 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
 
     let include_plugins = config.sync_plugins;
     let mut state = engine::SyncState::load(&paths.state)?;
-    let entries = CLAUDE_CODE.scan(&home, &tok, include_plugins)?;
-    for prefix in CLAUDE_CODE.logical_prefixes(include_plugins) {
-        state.mark_deletions(prefix, &entries);
+    // All config dirs: ~/.claude plus auto-detected ~/.claude-* profiles.
+    let dirs = engine::adapters::Adapter::detect_config_dirs(&home);
+    let mut entries = Vec::new();
+    for dir in &dirs {
+        entries.extend(CLAUDE_CODE.scan_dir(&home, dir, &tok, include_plugins)?);
+    }
+    for dir in &dirs {
+        for prefix in CLAUDE_CODE.logical_prefixes(include_plugins) {
+            let p = if dir == ".claude" { prefix.to_string() } else { format!("profiles/{dir}/{prefix}") };
+            state.mark_deletions(&p, &entries);
+        }
     }
 
     // Chunked push so the UI gets real progress.
@@ -243,8 +251,16 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
         progress(done, total + 1);
     }
 
-    let pull =
-        engine::sync::pull(&CLAUDE_CODE, &home, &tok, &mut state, store.as_ref(), include_plugins)?;
+    let mut pull = engine::Report::default();
+    for dir in &dirs {
+        let r = engine::sync::pull_dir(
+            &CLAUDE_CODE, &home, dir, &tok, &mut state, store.as_ref(), include_plugins,
+        )?;
+        pull.pulled += r.pulled;
+        pull.skipped_newer_local += r.skipped_newer_local;
+        pull.skipped_deleted += r.skipped_deleted;
+        pull.unchanged += r.unchanged;
+    }
     state.save(&paths.state)?;
     progress(total + 1, total + 1);
 
