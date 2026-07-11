@@ -65,6 +65,20 @@ function fmtMB(bytes) {
   return (bytes / (1024 * 1024)).toFixed(bytes > 50e6 ? 0 : 1);
 }
 
+// 220 MB stays MB; past 1024 MB switch to GB ("1.23 GB").
+function fmtSize(bytes) {
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1024) {
+    const gb = mb / 1024;
+    return { v: gb.toLocaleString(undefined, { maximumFractionDigits: gb >= 100 ? 0 : 2 }), unit: "GB" };
+  }
+  return { v: fmtMB(bytes), unit: "MB" };
+}
+const fmtSizeStr = (b) => {
+  const s = fmtSize(b);
+  return `${s.v} ${s.unit}`;
+};
+
 // Reusable stat-card row (used on the main page and every tool page).
 function statCards(el, items) {
   el.innerHTML = items
@@ -147,10 +161,11 @@ function renderAll() {
   if (!status || !status.configured) return;
   // Totals across the apps that are actually syncing (installed + enabled).
   const active = status.tools.filter((t) => t.installed && t.enabled);
+  const totalSize = fmtSize(active.reduce((n, t) => n + t.bytes, 0));
   statCards($("counts"), [
     { value: active.reduce((n, t) => n + t.sessions, 0), label: "sessions" },
     { value: active.length, label: "apps syncing" },
-    { value: fmtMB(active.reduce((n, t) => n + t.bytes, 0)), label: "MB local" },
+    { value: totalSize.v, label: `${totalSize.unit} local` },
   ]);
   $("status-dot").className = "dot ok";
   $("status-text").textContent = "Synced";
@@ -169,7 +184,7 @@ function renderAll() {
     li.innerHTML = `
       ${ICONS[t.id] || ""}
       <div class="tlabel">${t.name}<span class="tsub">${
-        t.installed ? `${t.sessions} sessions · ${t.plans} plans · ${fmtMB(t.bytes)} MB${newBadge(t.newItems, t.newMs)}` : "Not installed"
+        t.installed ? `${t.sessions} sessions · ${t.plans} plans · ${fmtSizeStr(t.bytes)}${newBadge(t.newItems, t.newMs)}` : "Not installed"
       }</span></div>
       ${t.installed ? `<label class="switch"><input type="checkbox" ${t.enabled ? "checked" : ""} /><span class="knob"></span></label>
        <svg class="chevron" viewBox="0 0 16 16"><path d="M5.5 3l5 5-5 5-1-1 4-4-4-4z"/></svg>` : `<span class="na">—</span>`}`;
@@ -195,7 +210,7 @@ function renderAll() {
   if (status.sharedInstalled) {
     sl.innerHTML = `<li>
       ${ICONS.shared}
-      <div class="tlabel">Global skills<span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"} · ${fmtMB(status.sharedBytes)} MB${newBadge(status.sharedNew, status.sharedNewMs)}<br>${SKILLS_PATH} — shared by all AI tools</span></div>
+      <div class="tlabel">Global skills<span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"} · ${fmtSizeStr(status.sharedBytes)}${newBadge(status.sharedNew, status.sharedNewMs)}<br>${SKILLS_PATH} — shared by all AI tools</span></div>
       <label class="switch"><input type="checkbox" ${status.sharedEnabled ? "checked" : ""} /><span class="knob"></span></label>`;
     sl.querySelector("label.switch").addEventListener("click", (e) => e.stopPropagation());
     sl.querySelector("input").addEventListener("change", async (e) => {
@@ -232,10 +247,11 @@ function openTool(t) {
     invoke("ack_new", { id: t.id }).then((s) => { status = s; renderAll(); }).catch(() => {});
   }
   $("tool-title").textContent = t.name;
+  const sz = fmtSize(t.bytes);
   statCards($("tool-counts"), [
     { value: t.sessions, label: t.sessions === 1 ? "session" : "sessions" },
     { value: t.projects, label: t.projects === 1 ? "project" : "projects" },
-    { value: fmtMB(t.bytes), label: "MB local" },
+    { value: sz.v, label: `${sz.unit} local` },
   ]);
   const extra = $("tool-counts-extra");
   if (t.id === "claude-code") {
@@ -353,6 +369,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   tauri?.event.listen("sync-progress", (e) => {
     const { done, total } = e.payload;
     $("progress-bar").style.width = `${Math.round((done / total) * 100)}%`;
+    $("sync-label").textContent = `${done.toLocaleString()} / ${total.toLocaleString()} files`;
   });
 
   // Every open re-fetches status: events fired while the window was hidden

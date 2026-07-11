@@ -20,7 +20,7 @@ use anyhow::Result;
 
 use crate::scanner::{hash_file, mtime_ms, FileEntry};
 use crate::state::{FileState, SyncState};
-use crate::store::SyncStore;
+use crate::store::{RemoteMeta, SyncStore};
 
 pub const PREFIX: &str = "opencode/storage";
 /// Volatile/derived subdirs we never sync.
@@ -89,14 +89,15 @@ pub struct ApplyReport {
     pub skipped_newer_local: usize,
 }
 
-pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore) -> Result<ApplyReport> {
+pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn()) -> Result<ApplyReport> {
     let mut report = ApplyReport::default();
     // Apply even if the dir doesn't exist yet (first pull creates it).
     let root = home.join(".local/share/opencode/storage");
     let prefix = format!("{PREFIX}/");
-    for (logical, meta) in store.list()? {
+    for (logical, meta) in listing {
         let Some(rest) = logical.strip_prefix(&prefix) else { continue };
-        if let Some(st) = state.files.get(&logical) {
+        on_file();
+        if let Some(st) = state.files.get(logical) {
             if st.deleted_locally || st.hash == meta.hash {
                 report.unchanged += 1;
                 continue;
@@ -116,7 +117,7 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore) -> Resul
                 continue;
             }
         }
-        let Some((data, _)) = store.get(&logical)? else { continue };
+        let Some((data, _)) = store.get(logical)? else { continue };
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -215,7 +216,8 @@ mod tests {
         let b = tmp.path().join("b");
         std::fs::create_dir_all(b.join(".local/share/opencode/storage")).unwrap();
         let mut state_b = SyncState::default();
-        let report = apply(&b, &mut state_b, &store).unwrap();
+        let listing = store.list().unwrap();
+        let report = apply(&b, &mut state_b, &store, &listing, &|| {}).unwrap();
         assert_eq!(report.pulled, 1);
         assert!(b.join(".local/share/opencode/storage/session/ses_1.json").exists());
     }

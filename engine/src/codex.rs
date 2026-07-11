@@ -139,7 +139,7 @@ pub fn push_index(
 
 /// Apply session files this machine lacks, then union every machine's index
 /// into the local session_index.jsonl (never dropping local entries).
-pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore) -> Result<ApplyReport> {
+pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn()) -> Result<ApplyReport> {
     let mut report = ApplyReport::default();
     let sessions_root = root(home).join("sessions");
     let index_prefix = format!("{INDEX_PREFIX}/");
@@ -150,10 +150,11 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore) -> Resul
         .map(|b| parse_index(&b))
         .unwrap_or_default();
 
-    for (logical, meta) in store.list()? {
+    for (logical, meta) in listing {
         // Index objects: union in.
         if let Some(_machine) = logical.strip_prefix(&index_prefix) {
-            if let Some((bytes, _)) = store.get(&logical)? {
+            on_file();
+            if let Some((bytes, _)) = store.get(logical)? {
                 for (id, (updated, line)) in parse_index(&bytes) {
                     match merged.get(&id) {
                         Some((cur, _)) if *cur >= updated => {}
@@ -169,7 +170,8 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore) -> Resul
         }
         // Session files.
         let Some(rest) = logical.strip_prefix(&session_prefix) else { continue };
-        if let Some(st) = state.files.get(&logical) {
+        on_file();
+        if let Some(st) = state.files.get(logical) {
             if st.deleted_locally || st.hash == meta.hash {
                 report.unchanged += 1;
                 continue;
@@ -189,7 +191,7 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore) -> Resul
                 continue;
             }
         }
-        let Some((data, _)) = store.get(&logical)? else { continue };
+        let Some((data, _)) = store.get(logical)? else { continue };
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -296,7 +298,8 @@ mod tests {
         .unwrap();
 
         let mut state_b = SyncState::default();
-        let report = apply(&b, &mut state_b, &store).unwrap();
+        let listing = store.list().unwrap();
+        let report = apply(&b, &mut state_b, &store, &listing, &|| {}).unwrap();
         assert_eq!(report.pulled, 1); // A's session file landed
         assert!(b.join(".codex/sessions/2026/04/21/rollout-aaa.jsonl").exists());
 

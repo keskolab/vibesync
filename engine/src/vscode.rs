@@ -26,7 +26,7 @@ use filetime::FileTime;
 
 use crate::scanner::{hash_file, mtime_ms, FileEntry};
 use crate::state::{FileState, SyncState};
-use crate::store::SyncStore;
+use crate::store::{RemoteMeta, SyncStore};
 
 pub const LOGICAL_PREFIX: &str = "vscode/ws";
 const VARIANTS: &[&str] = &["Code", "Code - Insiders"];
@@ -184,8 +184,10 @@ pub fn apply(
     state: &mut SyncState,
     home: &Path,
     merge_index: bool,
+    listing: &[(String, RemoteMeta)],
+    on_file: &dyn Fn(),
 ) -> Result<ApplyReport> {
-    apply_roots_opts(&storage_roots(), store, state, home, merge_index)
+    apply_roots_opts(&storage_roots(), store, state, home, merge_index, listing, on_file)
 }
 
 pub fn apply_roots(
@@ -194,7 +196,8 @@ pub fn apply_roots(
     state: &mut SyncState,
     home: &Path,
 ) -> Result<ApplyReport> {
-    apply_roots_opts(roots, store, state, home, true)
+    let listing = store.list()?;
+    apply_roots_opts(roots, store, state, home, true, &listing, &|| {})
 }
 
 pub fn apply_roots_opts(
@@ -203,6 +206,8 @@ pub fn apply_roots_opts(
     state: &mut SyncState,
     home: &Path,
     merge_index: bool,
+    listing: &[(String, RemoteMeta)],
+    on_file: &dyn Fn(),
 ) -> Result<ApplyReport> {
     let mut report = ApplyReport::default();
     let home = home_norm(home);
@@ -211,7 +216,7 @@ pub fn apply_roots_opts(
     // Workspace dir -> chat sessions newly applied there (uuid, mtime).
     let mut to_index: HashMap<PathBuf, Vec<(String, i64)>> = HashMap::new();
 
-    for (logical, meta) in store.list()? {
+    for (logical, meta) in listing {
         let Some(rest) = logical.strip_prefix(&prefix) else { continue };
         let comps: Vec<&str> = rest.split('/').collect();
         let Some(marker) = comps.iter().position(|c| SESSION_DIRS.contains(c)) else {
@@ -221,7 +226,8 @@ pub fn apply_roots_opts(
             continue;
         }
         let ws_key = comps[..marker].join("/");
-        if let Some(st) = state.files.get(&logical) {
+        on_file();
+        if let Some(st) = state.files.get(logical) {
             if st.deleted_locally || st.hash == meta.hash {
                 report.unchanged += 1;
                 continue;
@@ -240,7 +246,7 @@ pub fn apply_roots_opts(
                 report.unchanged += 1;
                 state.files.insert(
                     logical.clone(),
-                    FileState { hash: meta.hash, mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
+                    FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
                 );
                 continue;
             }
@@ -254,7 +260,7 @@ pub fn apply_roots_opts(
             });
             std::fs::copy(&abs, &bak)?;
         }
-        let Some((data, _)) = store.get(&logical)? else { continue };
+        let Some((data, _)) = store.get(logical)? else { continue };
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }

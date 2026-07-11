@@ -149,7 +149,7 @@ pub struct ApplyReport {
     pub skipped_newer_local: usize,
 }
 
-pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore) -> Result<ApplyReport> {
+pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn()) -> Result<ApplyReport> {
     let mut report = ApplyReport::default();
     let Some(path) = db_path() else { return Ok(report) };
     let home_s = home.to_string_lossy().into_owned();
@@ -157,17 +157,17 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore) -> Resul
     conn.busy_timeout(std::time::Duration::from_millis(1500))?;
 
     let prefix = format!("{PREFIX}/");
-    for (logical, meta) in store.list()? {
+    for (logical, meta) in listing {
         if !logical.starts_with(&prefix) {
             continue;
         }
-        if let Some(st) = state.files.get(&logical) {
+        if let Some(st) = state.files.get(logical) {
             if st.deleted_locally || st.hash == meta.hash {
                 report.unchanged += 1;
                 continue;
             }
         }
-        let Some((json, _)) = store.get(&logical)? else { continue };
+        let Some((json, _)) = store.get(logical)? else { continue };
         let row: ThreadRow = match serde_json::from_slice(&json) {
             Ok(r) => r,
             Err(_) => continue,

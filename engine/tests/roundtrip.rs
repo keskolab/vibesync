@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use vibesync_engine::SyncStore;
 use vibesync_engine::adapters::CLAUDE_CODE;
 use vibesync_engine::tokenizer::encode_cwd;
 use vibesync_engine::{sync, FolderStore, SyncState, Tokenizer};
@@ -72,7 +73,7 @@ fn two_machine_roundtrip() {
     assert_eq!(report.unchanged, 2);
 
     // Pull on B: files land under B's home with B's encoded paths.
-    let report = sync::pull_dir(&CLAUDE_CODE, &b.home, ".claude", &b.tok, &mut b.state, &store, false, &|_| false).unwrap();
+    let report = sync::pull_dir(&CLAUDE_CODE, &b.home, ".claude", &b.tok, &mut b.state, &store, false, &|_| false, &store.list().unwrap(), &|| {}).unwrap();
     assert_eq!(report.pulled, 2);
     let restored = b.session_path("dev/proj", "11111111-aaaa");
     assert!(restored.exists(), "expected {}", restored.display());
@@ -82,7 +83,7 @@ fn two_machine_roundtrip() {
     );
 
     // Pull again: nothing to do.
-    let report = sync::pull_dir(&CLAUDE_CODE, &b.home, ".claude", &b.tok, &mut b.state, &store, false, &|_| false).unwrap();
+    let report = sync::pull_dir(&CLAUDE_CODE, &b.home, ".claude", &b.tok, &mut b.state, &store, false, &|_| false, &store.list().unwrap(), &|| {}).unwrap();
     assert_eq!(report.pulled, 0);
     assert_eq!(report.unchanged, 2);
 }
@@ -102,7 +103,7 @@ fn deleted_sessions_are_not_resurrected() {
     assert_eq!(marked, 1);
 
     // Pull must NOT bring it back.
-    let report = sync::pull_dir(&CLAUDE_CODE, &a.home, ".claude", &a.tok, &mut a.state, &store, false, &|_| false).unwrap();
+    let report = sync::pull_dir(&CLAUDE_CODE, &a.home, ".claude", &a.tok, &mut a.state, &store, false, &|_| false, &store.list().unwrap(), &|| {}).unwrap();
     assert_eq!(report.pulled, 0);
     assert_eq!(report.skipped_deleted, 1);
     assert!(!a.session_path("dev/proj", "11111111-aaaa").exists());
@@ -124,13 +125,13 @@ fn newer_local_content_is_never_clobbered() {
     let path_b = b.write_session("dev/proj", "11111111-aaaa", "newer local\n");
     filetime::set_file_mtime(&path_b, filetime::FileTime::from_unix_time(2_000_000, 0)).unwrap();
 
-    let report = sync::pull_dir(&CLAUDE_CODE, &b.home, ".claude", &b.tok, &mut b.state, &store, false, &|_| false).unwrap();
+    let report = sync::pull_dir(&CLAUDE_CODE, &b.home, ".claude", &b.tok, &mut b.state, &store, false, &|_| false, &store.list().unwrap(), &|| {}).unwrap();
     assert_eq!(report.skipped_newer_local, 1);
     assert_eq!(std::fs::read_to_string(&path_b).unwrap(), "newer local\n");
 
     // Reverse case: B's file is older than the store's -> it is replaced, with a backup kept.
     filetime::set_file_mtime(&path_b, filetime::FileTime::from_unix_time(500_000, 0)).unwrap();
-    let report = sync::pull_dir(&CLAUDE_CODE, &b.home, ".claude", &b.tok, &mut b.state, &store, false, &|_| false).unwrap();
+    let report = sync::pull_dir(&CLAUDE_CODE, &b.home, ".claude", &b.tok, &mut b.state, &store, false, &|_| false, &store.list().unwrap(), &|| {}).unwrap();
     assert_eq!(report.pulled, 1);
     assert_eq!(std::fs::read_to_string(&path_b).unwrap(), "old remote\n");
     let bak = path_b.with_extension("jsonl.vibesync-bak");

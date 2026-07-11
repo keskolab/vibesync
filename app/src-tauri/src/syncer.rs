@@ -461,7 +461,7 @@ pub struct SyncOutcome {
 
 /// `progress(done, total)` fires as push chunks complete; `total + 1` marks
 /// the pull phase, and the final call is `(total + 1, total + 1)`.
-pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result<SyncOutcome> {
+pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) -> Result<SyncOutcome> {
     let config = load_config(paths)?.context("VibeSync is not configured yet")?;
     let store = engine::open_store(&config.store, config.passphrase.as_deref())?;
     let tok = engine::Tokenizer::from_env()?;
@@ -545,17 +545,33 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
         state.mark_deletions("vscode/ws", &entries);
     }
 
+    // ONE store listing for the whole sync — every pull below shares it.
+    // (Each adapter used to list separately: 7+ full listings with per-object
+    // meta fetches per sync.)
+    let listing = store.list()?;
+    // Unified progress space: pushed files + pull-side entries + registry.
+    let total = entries.len() + listing.len() + 1;
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let progress_cell = std::sync::Mutex::new(&mut progress);
+    let report_progress = |d: usize| {
+        if let Ok(mut p) = progress_cell.lock() {
+            p(d, total);
+        }
+    };
+    let tick = || {
+        let d = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        report_progress(d);
+    };
+
     // Chunked push so the UI gets real progress.
-    let total = entries.len();
     let machine = engine::machine_name();
     let mut push = engine::Report::default();
-    let mut done = 0usize;
     for chunk in entries.chunks(10) {
         let r = engine::sync::push(chunk, &mut state, store.as_ref(), &machine)?;
         push.pushed += r.pushed;
         push.unchanged += r.unchanged;
-        done += chunk.len();
-        progress(done, total + 1);
+        let d = done.fetch_add(chunk.len(), std::sync::atomic::Ordering::Relaxed) + chunk.len();
+        report_progress(d);
     }
 
     let mut pull = engine::Report::default();
@@ -563,7 +579,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     if codex_on {
         let r = engine::codex::push_index(&home, &engine::machine_name(), &mut state, store.as_ref());
         let _ = r;
-        if let Ok(r) = engine::codex::apply(&home, &mut state, store.as_ref()) {
+        if let Ok(r) = engine::codex::apply(&home, &mut state, store.as_ref(), &listing, &tick) {
             *new_by_tool.entry("codex").or_default() += r.pulled;
             pull.pulled += r.pulled;
             pull.unchanged += r.unchanged;
@@ -571,7 +587,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
         }
     }
     if opencode_on {
-        if let Ok(r) = engine::opencode::apply(&home, &mut state, store.as_ref()) {
+        if let Ok(r) = engine::opencode::apply(&home, &mut state, store.as_ref(), &listing, &tick) {
             *new_by_tool.entry("opencode").or_default() += r.pulled;
             pull.pulled += r.pulled;
             pull.unchanged += r.unchanged;
@@ -579,7 +595,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
         }
     }
     if copilot_on {
-        if let Ok(r) = engine::copilot::apply(&home, &mut state, store.as_ref()) {
+        if let Ok(r) = engine::copilot::apply(&home, &mut state, store.as_ref(), &listing, &tick) {
             *new_by_tool.entry("copilot").or_default() += r.pulled;
             pull.pulled += r.pulled;
             pull.unchanged += r.unchanged;
@@ -587,7 +603,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
         }
     }
     if zed_on {
-        if let Ok(r) = engine::zed::apply(&home, &mut state, store.as_ref()) {
+        if let Ok(r) = engine::zed::apply(&home, &mut state, store.as_ref(), &listing, &tick) {
             *new_by_tool.entry("zed").or_default() += r.applied;
             pull.pulled += r.applied;
             pull.unchanged += r.unchanged;
@@ -600,6 +616,8 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
             &mut state,
             &home,
             !config.disabled_scopes.iter().any(|s| s == "vscode-index"),
+            &listing,
+            &tick,
         )?;
         *new_by_tool.entry("vscode").or_default() += r.applied;
         pull.pulled += r.applied;
@@ -609,7 +627,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     if shared_on {
         let r = engine::sync::pull_dir(
             &engine::adapters::SHARED_SKILLS, &home, ".claude", &tok, &mut state,
-            store.as_ref(), false, &|_| false,
+            store.as_ref(), false, &|_| false, &listing, &tick,
         )?;
         *new_by_tool.entry("shared").or_default() += r.pulled;
         pull.pulled += r.pulled;
@@ -620,6 +638,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
         let r = engine::sync::pull_dir(
             &CLAUDE_CODE, &home, dir, &tok, &mut state, store.as_ref(), include_plugins,
             &|logical| scope_of(logical).map(|s| off.iter().any(|o| o == s)).unwrap_or(false),
+            &listing, &tick,
         )?;
         *new_by_tool.entry("claude-code").or_default() += r.pulled;
         pull.pulled += r.pulled;
@@ -628,14 +647,14 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
         pull.unchanged += r.unchanged;
     }
     state.save(&paths.state)?;
-    progress(total + 1, total + 1);
 
     let (registry_pushed, registry_applied, registry_ghosts, registry_healed) =
         if config.sync_registry && claude_on {
-            sync_registry(paths, store.as_ref(), &tok, &mut state).unwrap_or((0, 0, 0, 0))
+            sync_registry(paths, store.as_ref(), &tok, &mut state, &listing).unwrap_or((0, 0, 0, 0))
         } else {
             (0, 0, 0, 0)
         };
+    report_progress(total);
     state.save(&paths.state)?;
 
     if registry_applied > 0 {
@@ -747,6 +766,7 @@ fn sync_registry(
     store: &dyn engine::SyncStore,
     tok: &engine::Tokenizer,
     state: &mut engine::SyncState,
+    listing: &[(String, engine::RemoteMeta)],
 ) -> Result<(usize, usize, usize, usize)> {
     use engine::registry;
     let Some(dir) = registry_dir() else { return Ok((0, 0, 0, 0)) };
@@ -824,16 +844,16 @@ fn sync_registry(
     let mut ghosts = 0usize;
     let mut healed = 0usize;
     let mut backed_up = false;
-    for (logical, meta) in store.list()? {
+    for (logical, meta) in listing {
         let Some(sid) = logical.strip_prefix("claude/registry/").and_then(|s| s.strip_suffix(".json")) else {
             continue;
         };
-        if let Some(st) = state.files.get(&logical) {
+        if let Some(st) = state.files.get(logical) {
             if st.deleted_locally || st.hash == meta.hash {
                 continue;
             }
         }
-        let Some((bytes, _)) = store.get(&logical)? else { continue };
+        let Some((bytes, _)) = store.get(logical)? else { continue };
         let Ok(mut remote) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
         registry::expand_paths(&mut remote, tok);
 

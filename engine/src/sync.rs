@@ -94,7 +94,8 @@ pub fn pull(
     store: &dyn SyncStore,
     include_optional: bool,
 ) -> Result<Report> {
-    pull_dir(adapter, home, ".claude", tok, state, store, include_optional, &|_| false)
+    let listing = store.list()?;
+    pull_dir(adapter, home, ".claude", tok, state, store, include_optional, &|_| false, &listing, &|| {})
 }
 
 /// Pull for one config dir (default `.claude` or a `.claude-*` profile).
@@ -108,22 +109,29 @@ pub fn pull_dir(
     store: &dyn SyncStore,
     include_optional: bool,
     skip: &dyn Fn(&str) -> bool,
+    listing: &[(String, RemoteMeta)],
+    on_file: &(dyn Fn() + Sync),
 ) -> Result<Report> {
     let mut report = Report::default();
-    for (logical, meta) in store.list()? {
-        if skip(&logical) {
+    // Pass 1 (serial, cheap): classify every entry in our namespace; collect
+    // the downloads so pass 2 can fetch them in parallel.
+    let mut to_fetch: Vec<(&String, &RemoteMeta, std::path::PathBuf)> = Vec::new();
+    for (logical, meta) in listing {
+        if skip(logical) {
             continue;
         }
-        let Some(abs) = adapter.resolve_dir(&logical, home, dir, tok, include_optional) else {
+        let Some(abs) = adapter.resolve_dir(logical, home, dir, tok, include_optional) else {
             continue; // not this adapter's namespace (or opted out)
         };
-        if let Some(st) = state.files.get(&logical) {
+        if let Some(st) = state.files.get(logical) {
             if st.deleted_locally {
                 report.skipped_deleted += 1;
+                on_file();
                 continue;
             }
             if st.hash == meta.hash {
                 report.unchanged += 1;
+                on_file();
                 continue;
             }
         }
@@ -141,11 +149,13 @@ pub fn pull_dir(
                     },
                 );
                 report.unchanged += 1;
+                on_file();
                 continue;
             }
             let local_mtime = crate::scanner::mtime_ms(&abs)?;
             if local_mtime > meta.mtime_ms {
                 report.skipped_newer_local += 1;
+                on_file();
                 continue;
             }
             // Local loses: keep its content as a backup sibling before replacing.
@@ -155,21 +165,35 @@ pub fn pull_dir(
             });
             std::fs::copy(&abs, &bak)?;
         }
-        let Some((data, _)) = store.get(&logical)? else {
-            continue;
-        };
+        to_fetch.push((logical, meta, abs));
+    }
+    // Pass 2: parallel downloads — the slow half of a first sync.
+    use rayon::prelude::*;
+    let fetched: Vec<(usize, Option<Vec<u8>>)> = to_fetch
+        .par_iter()
+        .enumerate()
+        .map(|(i, (logical, _, _))| {
+            let data = store.get(logical).map(|o| o.map(|(d, _)| d));
+            on_file();
+            data.map(|d| (i, d))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // Pass 3 (serial): write files and update state in order.
+    for (i, data) in fetched {
+        let (logical, meta, abs) = &to_fetch[i];
+        let Some(data) = data else { continue };
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = abs.with_extension("vibesync-tmp");
         std::fs::write(&tmp, &data)?;
-        std::fs::rename(&tmp, &abs)?;
+        std::fs::rename(&tmp, abs)?;
         filetime::set_file_mtime(
-            &abs,
+            abs,
             FileTime::from_unix_time(meta.mtime_ms / 1000, ((meta.mtime_ms % 1000) * 1_000_000) as u32),
         )?;
         state.files.insert(
-            logical.clone(),
+            (*logical).clone(),
             FileState {
                 hash: meta.hash.clone(),
                 mtime_ms: meta.mtime_ms,
