@@ -182,7 +182,8 @@ function renderStatusLine() {
 		// Worker due-check: interval after the last sync, polled once a minute —
 		// an overdue machine (just woke or launched) syncs within one: "soon".
 		const next = (status.lastSyncMs || 0) + autosyncMins * 60000;
-		auto = `<span><span class="kv-label">Next sync:</span> ${next <= Date.now() ? "soon" : fmtClock(next)}</span>`;
+		const label = uiBusy ? "now" : next <= Date.now() ? "soon" : fmtClock(next);
+		auto = `<span><span class="kv-label">Next sync:</span> ${label}</span>`;
 	}
 	const html = `<span><span class="kv-label">Last sync:</span> ${when}</span>${auto}<span class="span-2"><span class="kv-label">Location:</span> ${loc}</span>`;
 	if ($("substatus").dataset.line !== html) {
@@ -203,8 +204,10 @@ function renderAll() {
 		{ value: active.length, label: "apps syncing" },
 		{ value: totalSize.v, label: `${totalSize.unit} local` },
 	]);
-	$("status-dot").className = "dot ok";
-	$("status-text").textContent = "Synced";
+	if (!uiBusy) {
+		$("status-dot").className = "dot ok";
+		$("status-text").textContent = "Synced";
+	}
 	const setStore = $("set-store");
 	if (setStore) {
 		setStore.textContent = status.storeDesc || "not set";
@@ -300,6 +303,10 @@ async function refreshStatus() {
 	if (!status.configured) localStorage.removeItem("setupDone");
 	setPending(!status.configured);
 	renderAll();
+	// Reconcile with the backend: a popover opened mid-autosync (or that
+	// missed events while suspended) must adopt the true busy state.
+	const syncing = await invoke("is_syncing").catch(() => false);
+	if (syncing !== uiBusy) setBusy(syncing, "Syncing\u2026");
 }
 
 function openTool(t) {
