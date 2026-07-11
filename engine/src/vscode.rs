@@ -369,25 +369,31 @@ fn merge_chat_index(ws_dir: &Path, sessions: &[(String, i64)]) -> Result<usize> 
     Ok(added)
 }
 
-/// Cheap counts for the UI: (chat files, bytes).
-pub fn light_counts() -> (usize, u64) {
+/// Cheap counts for the UI: (chat files, bytes, workspaces with chats).
+pub fn light_counts() -> (usize, u64, usize) {
     let mut n = 0usize;
     let mut bytes = 0u64;
+    let mut projects = 0usize;
     for root in storage_roots() {
         let Ok(dirs) = std::fs::read_dir(&root) else { continue };
         for ws in dirs.flatten() {
             let dir = ws.path().join("chatSessions");
             let Ok(files) = std::fs::read_dir(&dir) else { continue };
+            let mut here = 0usize;
             for f in files.flatten() {
                 let p = f.path();
                 if matches!(p.extension().and_then(|e| e.to_str()), Some("json") | Some("jsonl")) {
-                    n += 1;
+                    here += 1;
                     bytes += f.metadata().map(|m| m.len()).unwrap_or(0);
                 }
             }
+            if here > 0 {
+                projects += 1;
+            }
+            n += here;
         }
     }
-    (n, bytes)
+    (n, bytes, projects)
 }
 
 #[cfg(test)]

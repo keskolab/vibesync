@@ -152,7 +152,8 @@ async function refreshStatus() {
 
 function openTool(t) {
   $("tool-title").textContent = t.name;
-  $("tool-substatus").textContent = `${t.sessions} sessions · ${t.plans} plans on this ${DEVICE}`;
+  $("tool-substatus").innerHTML =
+    `${t.sessions} session${t.sessions === 1 ? "" : "s"}<br>${t.projects} project${t.projects === 1 ? "" : "s"}`;
   const ul = $("tool-scopes");
   ul.innerHTML = "";
   const offScopes = status.disabledScopes || [];

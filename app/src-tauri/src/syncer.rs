@@ -98,6 +98,7 @@ pub struct ToolStatus {
     pub enabled: bool,
     pub sessions: usize,
     pub plans: usize,
+    pub projects: usize,
     pub bytes: u64,
 }
 
@@ -244,6 +245,9 @@ pub fn status(paths: &Paths) -> Result<Status> {
     let installed = CLAUDE_CODE.detect(&home);
     let (sessions, plans, bytes) =
         if installed { light_counts(&home, sync_plugins) } else { (0, 0, 0) };
+    let claude_projects = std::fs::read_dir(home.join(".claude/projects"))
+        .map(|rd| rd.flatten().filter(|e| e.path().is_dir()).count())
+        .unwrap_or(0);
 
     Ok(Status {
         configured: config.is_some(),
@@ -256,7 +260,7 @@ pub fn status(paths: &Paths) -> Result<Status> {
         claude_enabled,
         machine: engine::machine_name(),
         tools: {
-            let (vs_sessions, vs_bytes) = engine::vscode::light_counts();
+            let (vs_sessions, vs_bytes, vs_projects) = engine::vscode::light_counts();
             vec![
                 ToolStatus {
                     id: CLAUDE_CODE.id,
@@ -265,6 +269,7 @@ pub fn status(paths: &Paths) -> Result<Status> {
                     enabled: claude_enabled,
                     sessions,
                     plans,
+                    projects: claude_projects,
                     bytes,
                 },
                 ToolStatus {
@@ -274,6 +279,7 @@ pub fn status(paths: &Paths) -> Result<Status> {
                     enabled: enabled_for("vscode"),
                     sessions: vs_sessions,
                     plans: 0,
+                    projects: vs_projects,
                     bytes: vs_bytes,
                 },
             ]
