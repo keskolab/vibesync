@@ -6,6 +6,7 @@ const invoke = (cmd, args) => tauri.core.invoke(cmd, args);
 const $ = (id) => document.getElementById(id);
 const IS_MAC = /Mac/i.test(navigator.platform || navigator.userAgent);
 const DEVICE = IS_MAC ? "Mac" : "PC";
+if (!IS_MAC) document.documentElement.classList.add("win");
 
 const ICONS = {
   "claude-code": '<svg class="row-icon" viewBox="0 0 16 16"><path d="M8 1l1.6 4.2L14 6.8l-3.4 2.9 1 4.3L8 11.7 4.4 14l1-4.3L2 6.8l4.4-1.6z"/></svg>',
@@ -52,6 +53,8 @@ function fitWindow() {
     const h = Math.min(640, page.offsetHeight + footer.offsetHeight + 2);
     if (tauri?.window && tauri?.dpi) {
       tauri.window.getCurrentWindow().setSize(new tauri.dpi.LogicalSize(320, h));
+      // Bottom-anchored on Windows: re-place after height changes.
+      if (!IS_MAC) invoke("position_popover").catch(() => {});
     }
   });
 }

@@ -58,6 +58,16 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* Windows has no vibrancy backdrop — give the popover a solid surface. */
+html.win #popover {
+  background: #f2f2f5;
+}
+@media (prefers-color-scheme: dark) {
+  html.win #popover {
+    background: #202124;
+  }
+}
+
 #popover {
   width: 100%;
   height: 100%;

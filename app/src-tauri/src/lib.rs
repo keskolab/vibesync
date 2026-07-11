@@ -342,14 +342,39 @@ fn close_onboarding(app: tauri::AppHandle) {
     }
 }
 
-#[tauri::command]
-fn show_popover(app: tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
+/// Place the popover: under the tray icon on macOS (menu bar on top),
+/// bottom-right of the work area on Windows (taskbar at the bottom).
+fn place_popover(win: &tauri::WebviewWindow) {
+    if cfg!(target_os = "macos") {
         if TRAY_SEEN.load(Ordering::Relaxed) {
             let _ = win.move_window(Position::TrayBottomCenter);
         } else {
             let _ = win.center();
         }
+        return;
+    }
+    let (Ok(Some(monitor)), Ok(size)) = (win.current_monitor(), win.outer_size()) else {
+        let _ = win.center();
+        return;
+    };
+    let wa = monitor.work_area();
+    let margin = (12.0 * monitor.scale_factor()) as i32;
+    let x = wa.position.x + wa.size.width as i32 - size.width as i32 - margin;
+    let y = wa.position.y + wa.size.height as i32 - size.height as i32 - margin;
+    let _ = win.set_position(tauri::PhysicalPosition { x, y });
+}
+
+#[tauri::command]
+fn position_popover(app: tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        place_popover(&win);
+    }
+}
+
+#[tauri::command]
+fn show_popover(app: tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        place_popover(&win);
         let _ = win.show();
         let _ = win.set_focus();
     }
@@ -425,7 +450,13 @@ fn tray_icon_ex(busy: bool) -> Image<'static> {
             }
             let alpha = (hits * 255 / 9) as u8;
             let o = (yi * S + xi) * 4;
-            rgba[o + 3] = alpha; // black glyph, alpha = coverage (template image)
+            // macOS: black template image (system tints it). Windows: white —
+            // taskbars are dark and there is no auto-tinting.
+            let shade: u8 = if cfg!(windows) { 255 } else { 0 };
+            rgba[o] = shade;
+            rgba[o + 1] = shade;
+            rgba[o + 2] = shade;
+            rgba[o + 3] = alpha;
         }
     }
     Image::new_owned(rgba, S as u32, S as u32)
@@ -452,6 +483,7 @@ pub fn run() {
             get_status,
             configure_default_store,
             sync_now,
+            position_popover,
             set_sync_plugins,
             set_tool_enabled,
             is_dev,
@@ -502,7 +534,7 @@ pub fn run() {
                             if win.is_visible().unwrap_or(false) {
                                 let _ = win.hide();
                             } else {
-                                let _ = win.move_window(Position::TrayBottomCenter);
+                                place_popover(&win);
                                 let _ = win.show();
                                 let _ = win.set_focus();
                             }
