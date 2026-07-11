@@ -99,7 +99,9 @@ function renderStorage() {
       <span class="radio"></span>`;
     card.addEventListener("click", () => {
       storage = b.id;
+      renderedStep = -1; // force configure re-render for the new backend
       renderStorage();
+      refreshNav();
     });
     host.appendChild(card);
   }
@@ -122,7 +124,7 @@ function renderConfigure() {
     body.querySelector("#cfg-choose").addEventListener("click", async () => {
       const p = await tauri?.core.invoke("pick_folder");
       if (p) { chosen.path = p; body.querySelector("#cfg-path").textContent = p; }
-      update();
+      refreshNav();
     });
     return;
   }
@@ -147,7 +149,7 @@ function renderConfigure() {
     const el = body.querySelector(`#${id}`);
     if (!el) continue;
     el.value = chosen.fields[k] || "";
-    el.addEventListener("input", (e) => { chosen.fields[k] = e.target.value.trim(); update(); });
+    el.addEventListener("input", (e) => { chosen.fields[k] = e.target.value.trim(); refreshNav(); });
   }
   body.querySelector("#cfg-test").addEventListener("click", async () => {
     const r = body.querySelector("#cfg-test-result");
@@ -233,17 +235,30 @@ function accessComplete() {
   return [...document.querySelectorAll(".grant-row[data-granted]")].every((r) => r.dataset.granted === "true");
 }
 
-function update() {
-  $("steps-track").style.transform = `translateX(${-step * (100 / STEPS)}%)`;
+// Nav-only refresh: safe to call on every keystroke — never rebuilds DOM
+// that the user is typing into.
+function refreshNav() {
   renderDots();
   $("ob-back").classList.toggle("hidden-btn", step === 0 || step === STEPS - 1);
   const next = $("ob-next");
   next.textContent = step === 0 ? "Get Started" : step === STEPS - 1 ? (existing?.configured ? "Switch Storage & Sync" : "Start First Sync") : "Continue";
   next.disabled = (step === 3 && !buildStore()) || (step === 5 && !accessComplete());
+}
 
-  if (step === 3) renderConfigure();
-  if (step === 4) renderEncryption();
-  if (step === 6) renderDone();
+let renderedStep = -1;
+
+function update() {
+  $("steps-track").style.transform = `translateX(${-step * (100 / STEPS)}%)`;
+  // Rebuild step content only when the visible step changes — re-rendering
+  // on input events destroys focused fields (the one-character-per-keypress
+  // bug).
+  if (step !== renderedStep) {
+    renderedStep = step;
+    if (step === 3) renderConfigure();
+    if (step === 4) renderEncryption();
+    if (step === 6) renderDone();
+  }
+  refreshNav();
 }
 
 window.addEventListener("DOMContentLoaded", () => {
