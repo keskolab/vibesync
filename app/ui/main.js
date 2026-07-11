@@ -97,10 +97,11 @@ function renderStatusLine() {
 
 function renderAll() {
   if (!status) return;
-  const claude = status.tools.find((t) => t.id === "claude-code") || {};
-  $("c-sessions").textContent = claude.sessions ?? "–";
-  $("c-plans").textContent = claude.plans ?? "–";
-  $("c-size").textContent = fmtMB(claude.bytes || 0);
+  // Totals across the apps that are actually syncing (installed + enabled).
+  const active = status.tools.filter((t) => t.installed && t.enabled);
+  $("c-sessions").textContent = active.reduce((n, t) => n + t.sessions, 0);
+  $("c-apps").textContent = active.length;
+  $("c-size").textContent = fmtMB(active.reduce((n, t) => n + t.bytes, 0));
   $("status-dot").className = "dot ok";
   $("status-text").textContent = "Synced";
   const setStore = $("set-store");
