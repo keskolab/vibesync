@@ -117,6 +117,10 @@ pub struct Status {
     pub disabled_scopes: Vec<String>,
     pub claude_enabled: bool,
     pub machine: String,
+    pub shared_installed: bool,
+    pub shared_enabled: bool,
+    pub shared_skills: usize,
+    pub shared_bytes: u64,
     pub tools: Vec<ToolStatus>,
 }
 
@@ -245,6 +249,10 @@ pub fn status(paths: &Paths) -> Result<Status> {
             .unwrap_or(true)
     };
     let claude_enabled = enabled_for("claude-code");
+    let enabled_for_scope = config
+        .as_ref()
+        .map(|c| !c.disabled_scopes.iter().any(|s| s == "shared"))
+        .unwrap_or(true);
     let installed = CLAUDE_CODE.detect(&home);
     let (sessions, plans, bytes) =
         if installed { light_counts(&home, sync_plugins) } else { (0, 0, 0) };
@@ -275,6 +283,16 @@ pub fn status(paths: &Paths) -> Result<Status> {
         disabled_scopes: config.as_ref().map(|c| c.disabled_scopes.clone()).unwrap_or_default(),
         claude_enabled,
         machine: engine::machine_name(),
+        shared_installed: home.join(".agents/skills").is_dir(),
+        shared_enabled: enabled_for_scope,
+        shared_skills: std::fs::read_dir(home.join(".agents/skills"))
+            .map(|rd| rd.flatten().filter(|e| e.path().is_dir()).count())
+            .unwrap_or(0),
+        shared_bytes: walkdir_files(&home.join(".agents/skills"), &[])
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum(),
         tools: {
             let (vs_sessions, vs_bytes, vs_projects, vs_last) = engine::vscode::light_counts();
             vec![
