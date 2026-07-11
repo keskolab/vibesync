@@ -224,8 +224,8 @@ function renderDone() {
   $("done-summary").innerHTML = `
     <div><span>Storage</span><b>${b.name}</b></div>
     <div><span>Encryption</span><b>${needsPassphrase() ? "Passphrase (age)" : "None (your folder)"}</b></div>
-    <div><span>Tools</span><b>Claude Code, Codex</b></div>
-    <div><span>This machine</span><b>MacBook&nbsp;Pro</b></div>`;
+    <div><span>Tools</span><b>${OB_TOOLS.filter((t) => t.on).map((t) => t.name).join(", ") || "None selected"}</b></div>
+    <div><span>This machine</span><b>${existing?.machine || ""}</b></div>`;
   const old = document.getElementById("switch-warning");
   if (old) old.remove();
   if (existing?.configured) {
@@ -303,7 +303,12 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   $("ob-next").addEventListener("click", () => {
     if (step === STEPS - 1) {
-      tauri?.event.emit("setup-complete", { store: buildStore(), passphrase: needsPassphrase() ? chosen.passphrase || null : null });
+      const claude = OB_TOOLS.find((t) => t.id === "claude-code");
+      tauri?.event.emit("setup-complete", {
+        store: buildStore(),
+        passphrase: needsPassphrase() ? chosen.passphrase || null : null,
+        claudeEnabled: claude ? !!claude.on : true,
+      });
       tauri?.core.invoke("close_onboarding");
       // reset so reopening from Settings starts fresh
       setTimeout(() => {

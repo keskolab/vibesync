@@ -130,6 +130,29 @@ async fn configure_default_store(app: tauri::AppHandle) -> Result<syncer::Status
     .map_err(|e| format!("{e:#}"))
 }
 
+/// Enable/disable syncing for a tool (consumed by sync_now and both UIs).
+#[tauri::command]
+async fn set_tool_enabled(
+    app: tauri::AppHandle,
+    id: String,
+    enabled: bool,
+) -> Result<syncer::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = syncer::paths(&app)?;
+        let mut cfg = syncer::load_config(&paths)?
+            .ok_or_else(|| anyhow::anyhow!("not configured yet"))?;
+        cfg.disabled_tools.retain(|t| t != &id);
+        if !enabled {
+            cfg.disabled_tools.push(id);
+        }
+        syncer::save_config(&paths, &cfg)?;
+        syncer::status(&paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
 /// Toggle the opt-in plugins scope (never on by default — can be large).
 #[tauri::command]
 async fn set_sync_plugins(app: tauri::AppHandle, enabled: bool) -> Result<syncer::Status, String> {
@@ -430,6 +453,7 @@ pub fn run() {
             configure_default_store,
             sync_now,
             set_sync_plugins,
+            set_tool_enabled,
             is_dev,
             get_settings,
             set_autostart,

@@ -24,6 +24,9 @@ pub struct AppConfig {
     /// Sync the Claude desktop app's sidebar registry (macOS).
     #[serde(default = "default_true")]
     pub sync_registry: bool,
+    /// Tool ids the user has switched off (e.g. "claude-code").
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -78,6 +81,7 @@ pub fn default_config() -> Result<AppConfig> {
         sync_plugins: false,
         autosync: false,
         sync_registry: true,
+        disabled_tools: Vec::new(),
     })
 }
 
@@ -100,6 +104,8 @@ pub struct Status {
     pub store_detail: Option<String>,
     pub last_sync_ms: Option<i64>,
     pub sync_plugins: bool,
+    pub claude_enabled: bool,
+    pub machine: String,
     pub tools: Vec<ToolStatus>,
 }
 
@@ -221,6 +227,10 @@ pub fn status(paths: &Paths) -> Result<Status> {
         .map(|d| d.as_millis() as i64);
 
     let sync_plugins = config.as_ref().map(|c| c.sync_plugins).unwrap_or(false);
+    let claude_enabled = config
+        .as_ref()
+        .map(|c| !c.disabled_tools.iter().any(|t| t == "claude-code"))
+        .unwrap_or(true);
     let installed = CLAUDE_CODE.detect(&home);
     let (sessions, plans, bytes) =
         if installed { light_counts(&home, sync_plugins) } else { (0, 0, 0) };
@@ -231,6 +241,8 @@ pub fn status(paths: &Paths) -> Result<Status> {
         store_detail,
         last_sync_ms,
         sync_plugins,
+        claude_enabled,
+        machine: engine::machine_name(),
         tools: vec![ToolStatus {
             id: CLAUDE_CODE.id,
             name: CLAUDE_CODE.name,
@@ -262,6 +274,10 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     let tok = engine::Tokenizer::from_env()?;
     let home = dirs::home_dir().context("no home dir")?;
 
+    if config.disabled_tools.iter().any(|t| t == "claude-code") {
+        // The only adapter is switched off; nothing to do.
+        return Ok(SyncOutcome::default());
+    }
     let include_plugins = config.sync_plugins;
     let mut state = engine::SyncState::load(&paths.state)?;
     // All config dirs: ~/.claude plus auto-detected ~/.claude-* profiles.
