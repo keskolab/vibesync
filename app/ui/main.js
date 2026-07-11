@@ -167,6 +167,17 @@ function openTool(t) {
     { value: t.projects, label: t.projects === 1 ? "project" : "projects" },
     { value: fmtMB(t.bytes), label: "MB local" },
   ]);
+  const extra = $("tool-counts-extra");
+  if (t.id === "claude-code") {
+    extra.style.display = "";
+    statCards(extra, [
+      { value: t.plans, label: t.plans === 1 ? "plan" : "plans" },
+      { value: t.agents, label: t.agents === 1 ? "agent" : "agents" },
+      { value: t.skills, label: t.skills === 1 ? "skill" : "skills" },
+    ]);
+  } else {
+    extra.style.display = "none";
+  }
   const ul = $("tool-scopes");
   ul.innerHTML = "";
   const offScopes = status.disabledScopes || [];
@@ -198,6 +209,7 @@ function openTool(t) {
     ul.appendChild(li);
   }
   $("tool-storage").innerHTML = `
+    <div><span>Last activity</span><b>${t.lastActivityMs ? syncStamp(t.lastActivityMs) : "—"}</b></div>
     <div><span>Store</span><b>${status.storeDesc || "—"}</b></div>
     <div><span>Adapter</span><b>${t.id} v1</b></div>`;
   goTo(1);

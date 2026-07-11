@@ -100,6 +100,9 @@ pub struct ToolStatus {
     pub plans: usize,
     pub projects: usize,
     pub bytes: u64,
+    pub agents: usize,
+    pub skills: usize,
+    pub last_activity_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -248,6 +251,19 @@ pub fn status(paths: &Paths) -> Result<Status> {
     let claude_projects = std::fs::read_dir(home.join(".claude/projects"))
         .map(|rd| rd.flatten().filter(|e| e.path().is_dir()).count())
         .unwrap_or(0);
+    let count_files = |rel: &str| {
+        walkdir_files(&home.join(rel), &[]).len()
+    };
+    let claude_agents = count_files(".claude/agents");
+    let claude_skills = count_files(".claude/skills");
+    let newest = |rel: &str, ext: Option<&str>| -> Option<i64> {
+        walkdir_files(&home.join(rel), &[])
+            .into_iter()
+            .filter(|p| ext.is_none() || p.extension().and_then(|e| e.to_str()) == ext)
+            .filter_map(|p| engine::scanner::mtime_ms(&p).ok())
+            .max()
+    };
+    let claude_last = newest(".claude/projects", Some("jsonl"));
 
     Ok(Status {
         configured: config.is_some(),
@@ -260,7 +276,7 @@ pub fn status(paths: &Paths) -> Result<Status> {
         claude_enabled,
         machine: engine::machine_name(),
         tools: {
-            let (vs_sessions, vs_bytes, vs_projects) = engine::vscode::light_counts();
+            let (vs_sessions, vs_bytes, vs_projects, vs_last) = engine::vscode::light_counts();
             vec![
                 ToolStatus {
                     id: CLAUDE_CODE.id,
@@ -271,6 +287,9 @@ pub fn status(paths: &Paths) -> Result<Status> {
                     plans,
                     projects: claude_projects,
                     bytes,
+                    agents: claude_agents,
+                    skills: claude_skills,
+                    last_activity_ms: claude_last,
                 },
                 ToolStatus {
                     id: "vscode",
@@ -281,6 +300,9 @@ pub fn status(paths: &Paths) -> Result<Status> {
                     plans: 0,
                     projects: vs_projects,
                     bytes: vs_bytes,
+                    agents: 0,
+                    skills: 0,
+                    last_activity_ms: vs_last,
                 },
             ]
         },

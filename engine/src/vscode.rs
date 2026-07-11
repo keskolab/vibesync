@@ -369,11 +369,13 @@ fn merge_chat_index(ws_dir: &Path, sessions: &[(String, i64)]) -> Result<usize> 
     Ok(added)
 }
 
-/// Cheap counts for the UI: (chat files, bytes, workspaces with chats).
-pub fn light_counts() -> (usize, u64, usize) {
+/// Cheap counts for the UI: (chat files, bytes, workspaces with chats,
+/// newest chat mtime).
+pub fn light_counts() -> (usize, u64, usize, Option<i64>) {
     let mut n = 0usize;
     let mut bytes = 0u64;
     let mut projects = 0usize;
+    let mut last: Option<i64> = None;
     for root in storage_roots() {
         let Ok(dirs) = std::fs::read_dir(&root) else { continue };
         for ws in dirs.flatten() {
@@ -385,6 +387,9 @@ pub fn light_counts() -> (usize, u64, usize) {
                 if matches!(p.extension().and_then(|e| e.to_str()), Some("json") | Some("jsonl")) {
                     here += 1;
                     bytes += f.metadata().map(|m| m.len()).unwrap_or(0);
+                    if let Ok(m) = crate::scanner::mtime_ms(&p) {
+                        last = Some(last.map_or(m, |l: i64| l.max(m)));
+                    }
                 }
             }
             if here > 0 {
@@ -393,7 +398,7 @@ pub fn light_counts() -> (usize, u64, usize) {
             n += here;
         }
     }
-    (n, bytes, projects)
+    (n, bytes, projects, last)
 }
 
 #[cfg(test)]
