@@ -97,6 +97,11 @@ html.win #popover {
   overflow-x: hidden;
   max-height: 100%;
 }
+/* Page children keep natural height; excess scrolls. Without this, flex
+   shrink silently compresses spacers/cards when the page hits its cap. */
+.page > * {
+  flex-shrink: 0;
+}
 .page::-webkit-scrollbar {
   width: 3px;
 }
