@@ -385,6 +385,52 @@ header {
 .tname {
   white-space: nowrap;
 }
+/* section label with a trailing help icon */
+.section-label.label-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.help-tip {
+  position: relative;
+  display: inline-flex;
+  outline: none;
+}
+.help-tip svg {
+  width: 12px;
+  height: 12px;
+  fill: var(--text-3);
+}
+.help-tip:hover svg,
+.help-tip:focus svg {
+  fill: var(--text-2);
+}
+/* Tooltip bubble: dark in both themes; resets the label's uppercase. */
+.tip-bubble {
+  position: absolute;
+  left: -10px;
+  top: 18px;
+  width: 232px;
+  background: rgba(44, 44, 50, 0.98);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.45;
+  letter-spacing: 0;
+  text-transform: none;
+  padding: 8px 10px;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+  z-index: 30;
+}
+.help-tip:hover .tip-bubble,
+.help-tip:focus .tip-bubble {
+  opacity: 1;
+}
+
 /* de-emphasized parenthetical after a card title */
 .name-note {
   font-weight: 400;

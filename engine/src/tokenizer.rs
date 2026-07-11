@@ -26,7 +26,9 @@ pub struct Tokenizer {
     /// first so nested clones match innermost. Git roots outrank `${HOME}` —
     /// a repo identity is portable across machines whose homes differ AND
     /// whose repo locations differ, which `${HOME}` alone can't express.
-    git_roots: Vec<(String, String, String)>,
+    /// Fourth field: usable for expansion (current root) vs tokenize-only
+    /// alias (a former root after a folder move/rename).
+    git_roots: Vec<(String, String, String, bool)>,
     /// User-configured project mappings: (name, plain root, encoded root),
     /// longest root first. Outrank git roots — an explicit mapping is intent.
     proj_roots: Vec<(String, String, String)>,
@@ -76,10 +78,16 @@ impl Tokenizer {
         self.git_roots = map
             .roots
             .iter()
-            .map(|(id, root)| {
+            .map(|(id, root)| (id, root, true))
+            .chain(
+                map.aliases
+                    .iter()
+                    .flat_map(|(id, olds)| olds.iter().map(move |r| (id, r, false))),
+            )
+            .map(|(id, root, current)| {
                 let root = root.trim_end_matches(['/', '\\']).to_string();
                 let encoded = encode_cwd(&root);
-                (id.clone(), root, encoded)
+                (id.clone(), root, encoded, current)
             })
             .collect();
         // Longest plain root first (encode_cwd is length-preserving, so this
@@ -125,7 +133,7 @@ impl Tokenizer {
                 }
             }
         }
-        for (id, root, _) in &self.git_roots {
+        for (id, root, _, _) in &self.git_roots {
             if let Some(rest) = self.strip(path, root) {
                 if rest.is_empty() {
                     return git_token(id);
@@ -157,7 +165,7 @@ impl Tokenizer {
             return path.to_string();
         }
         if let Some((id, rest)) = parse_git_token(path) {
-            if let Some((_, root, _)) = self.git_roots.iter().find(|(i, _, _)| *i == id) {
+            if let Some((_, root, _, _)) = self.git_roots.iter().find(|(i, _, _, cur)| *i == id && *cur) {
                 return format!("{root}{rest}");
             }
             return path.to_string();
@@ -182,7 +190,7 @@ impl Tokenizer {
                 }
             }
         }
-        for (id, _, eroot) in &self.git_roots {
+        for (id, _, eroot, _) in &self.git_roots {
             if let Some(rest) = self.strip(s, eroot) {
                 if rest.is_empty() {
                     return git_token(id);
@@ -214,7 +222,7 @@ impl Tokenizer {
             return s.to_string();
         }
         if let Some((id, rest)) = parse_git_token(s) {
-            if let Some((_, _, eroot)) = self.git_roots.iter().find(|(i, _, _)| *i == id) {
+            if let Some((_, _, eroot, _)) = self.git_roots.iter().find(|(i, _, _, cur)| *i == id && *cur) {
                 return format!("{eroot}{rest}");
             }
             return s.to_string();
@@ -358,6 +366,21 @@ mod tests {
         let tok = m.tokenize_encoded("-Users-you-Development-7-rust-vibesync-app");
         assert_eq!(tok, "${GIT:github.com:johnkesko:vibesync}-app");
         assert_eq!(w.expand_encoded(&tok), "C--Temp-vibesync-app");
+    }
+
+    #[test]
+    fn moved_repo_old_dirs_keep_canonical_keys() {
+        let mut map = crate::gitmap::GitMap::default();
+        map.roots.insert("github.com/o/r".into(), "/Users/u/new-spot".into());
+        map.aliases.insert("github.com/o/r".into(), vec!["/Users/u/old-spot".into()]);
+        let t = Tokenizer::with_case_sensitivity("/Users/u", false).with_gitmap(&map);
+        // Old transcript dirs (named after the pre-move path) still produce
+        // the canonical token...
+        assert_eq!(t.tokenize_plain("/Users/u/old-spot/x"), "${GIT:github.com:o:r}/x");
+        assert_eq!(t.tokenize_encoded("-Users-u-old-spot-x"), "${GIT:github.com:o:r}-x");
+        // ...while expansion always targets the current location.
+        assert_eq!(t.expand_plain("${GIT:github.com:o:r}/x"), "/Users/u/new-spot/x");
+        assert_eq!(t.expand_encoded("${GIT:github.com:o:r}-x"), "-Users-u-new-spot-x");
     }
 
     #[test]
