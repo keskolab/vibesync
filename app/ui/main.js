@@ -67,6 +67,10 @@ function setPending(pending) {
     $("status-text").textContent = "Not set up";
     $("substatus").textContent = "Waiting for setup";
   }
+  const setStore = $("set-store");
+  if (setStore && pending) setStore.textContent = "Not set up";
+  const changeBtn = $("change-store");
+  if (changeBtn) changeBtn.textContent = pending ? "Set up storage\u2026" : "Change storage\u2026";
   fitWindow();
 }
 

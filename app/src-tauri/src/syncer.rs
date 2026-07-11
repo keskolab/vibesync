@@ -183,7 +183,7 @@ pub fn status(paths: &Paths) -> Result<Status> {
     let home = dirs::home_dir().context("no home dir")?;
     let config = load_config(paths)?;
     // Short, human description for the status line; the full detail goes in
-    // the tooltip. Users think "my code-sync bucket on R2", not endpoints.
+    // the tooltip. Users think "my bucket on R2", not endpoints.
     let store_desc = config.as_ref().map(|c| match &c.store {
         engine::StoreConfig::Folder { path, encrypted } => {
             // Show the last few path components — enough to recognize the
