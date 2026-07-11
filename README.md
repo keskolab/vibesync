@@ -81,9 +81,60 @@ The app appears in your menu bar. Click it, open the Setup Assistant, choose whe
 | Nothing is ever lost | Sync never deletes anything; conflicting files are backed up, deleted sessions never resurrect | Done |
 | Auto-sync | Background sync every 15 minutes, plus launch at login | Done |
 | Setup assistant | Guided first-run: pick storage, test the connection, done | Done |
-| Claude desktop sidebar | Synced sessions appear in the Claude desktop app's session list | In progress |
-| More tools | Codex, VS Code Copilot Chat, Zed, OpenCode, Copilot CLI | Planned |
-| Windows build | Same app, same store, mixed Mac + Windows fleets (WSL included) | Planned |
+| Claude desktop sidebar | Synced sessions appear in the Claude desktop app's session list | Done |
+| VS Code Copilot Chat | Chat history syncs per project folder and appears in the Chat panel | Done |
+| Codex | Session transcripts sync; every machine's session list shows all of them | Done |
+| Zed | Agent threads sync between machines (best with Zed closed) | Done |
+| OpenCode | Session records sync as an archive; in-app visibility being verified | Done |
+| Global skills | `~/.agents/skills` ([Agent Skills spec](https://agentskills.io)) shared across all tools and machines | Done |
+| Windows build | Same app, same store, mixed Mac + Windows fleets | Done |
+| More tools | Copilot CLI, others on request | Planned |
+
+#### Every file VibeSync touches
+
+Transparency matters when a tool reads your AI sessions. This is the complete list — nothing else is read or written. `~` is your home folder (`C:\Users\<you>` on Windows).
+
+**Your AI tools' data (only for tools that are installed and switched on):**
+
+| Tool | Files | What VibeSync does |
+|---|---|---|
+| Claude Code | `~/.claude/projects/` (sessions, transcripts, memory) | Syncs |
+| Claude Code | `~/.claude/plans/`, `~/.claude/tasks/`, `~/.claude/agents/`, `~/.claude/skills/`, `~/.claude/rules/` | Syncs |
+| Claude Code | `~/.claude/history.jsonl`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.claude/CLAUDE.md` | Syncs |
+| Claude Code | `~/.claude/plugins/` | Syncs only if you opt in; caches never |
+| Claude Code | `~/.claude-<profile>/` (extra accounts) | Same as above, per profile |
+| Claude Code | `~/.claude.json` | Adds/heals sidebar entries for synced sessions (App sidebar toggle) |
+| VS Code | `.../Code/User/workspaceStorage/<id>/chatSessions/` ¹ | Syncs Copilot chats per project |
+| VS Code | `.../Code/User/workspaceStorage/<id>/state.vscdb` ¹ | Updates one key (the chat index) so synced chats show in the Chat panel |
+| Codex | `~/.codex/sessions/` | Syncs |
+| Codex | `~/.codex/session_index.jsonl` | Merges so every machine lists all sessions |
+| OpenCode | `~/.local/share/opencode/storage/` | Syncs |
+| OpenCode | `~/.local/share/opencode/opencode.db` | Read-only, for the stats shown in the app — never written |
+| Zed | `.../Zed/threads/threads.db` ² | Syncs thread rows (newest wins) |
+| All tools | `~/.agents/skills/` | Syncs global skills ([Agent Skills spec](https://agentskills.io)) |
+
+¹ macOS: `~/Library/Application Support/Code/User/workspaceStorage/`, Windows: `%APPDATA%\Code\User\workspaceStorage\`.
+² macOS: `~/Library/Application Support/Zed/`, Windows: `%APPDATA%\Zed\` or `%LOCALAPPDATA%\Zed\`.
+
+**VibeSync's own files** (macOS: `~/Library/Application Support/com.keskolabs.vibesync/`, Windows: `%APPDATA%\com.keskolabs.vibesync\`):
+
+| File | What it holds |
+|---|---|
+| `config.json` | Your settings, storage location, and credentials/passphrase. Stays on this machine — never uploaded |
+| `state.json` | Fingerprints of already-synced files, so only changes transfer |
+| `new_items.json` | The unseen "+N new" counts shown on each app's card |
+| `applied_registry.json` | Which sidebar entries VibeSync added, so it can clean up only its own |
+
+**Inside your storage location** (everything under `v1/files/`, each file paired with a small `.meta` sidecar; encrypted before upload on cloud backends):
+
+| Folder | Contents |
+|---|---|
+| `claude/` | Claude Code files, mirroring the folders above (`claude/registry/` holds sidebar entries, `claude/profiles/` extra accounts) |
+| `vscode/ws/` | VS Code Copilot chats, one folder per project |
+| `codex/sessions/`, `codex/index/` | Codex transcripts and each machine's session index |
+| `opencode/storage/` | OpenCode session records |
+| `zed/threads/` | Zed agent threads |
+| `shared/skills/` | Global skills |
 
 ##### License & contributions
 
