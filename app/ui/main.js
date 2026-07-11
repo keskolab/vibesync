@@ -152,7 +152,7 @@ function renderAll() {
     sl.style.display = "";
     sl.innerHTML = `<li>
       <svg class="row-icon" viewBox="0 0 16 16"><path d="M8 1l1.8 3.6L14 5.2l-3 2.9.7 4.1L8 10.3l-3.7 1.9.7-4.1-3-2.9 4.2-.6L8 1z"/></svg>
-      <div class="tlabel">Global skills<span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"} · ${fmtMB(status.sharedBytes)} MB · all AI tools</span></div>
+      <div class="tlabel">Global skills<span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"} · ${fmtMB(status.sharedBytes)} MB<br>~/.agents/skills — shared by all AI tools</span></div>
       <label class="switch"><input type="checkbox" ${status.sharedEnabled ? "checked" : ""} /><span class="knob"></span></label>`;
     sl.querySelector("label.switch").addEventListener("click", (e) => e.stopPropagation());
     sl.querySelector("input").addEventListener("change", async (e) => {
@@ -301,7 +301,6 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   // Settings toggles: launch at login + autosync.
   invoke("get_settings").then((s) => {
-    $("opt-shared").checked = status ? status.sharedEnabled : true;
     $("opt-autostart").checked = s.autostart;
     $("opt-autosync").checked = s.autosync;
     autosyncOn = s.autosync;
@@ -309,11 +308,6 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
   $("opt-autostart").addEventListener("change", (e) =>
     invoke("set_autostart", { enabled: e.target.checked }).catch(() => (e.target.checked = !e.target.checked))
-  );
-  $("opt-shared").addEventListener("change", (e) =>
-    invoke("set_scope_enabled", { scope: "shared", enabled: e.target.checked })
-      .then((st) => { status = st; renderAll(); })
-      .catch(() => (e.target.checked = !e.target.checked))
   );
   $("opt-autosync").addEventListener("change", (e) =>
     invoke("set_autosync", { enabled: e.target.checked })
