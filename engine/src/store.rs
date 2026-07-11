@@ -35,6 +35,12 @@ pub trait SyncStore: Send + Sync {
     fn put(&self, logical: &str, plain: &[u8], meta: &RemoteMeta) -> Result<()>;
     fn get(&self, logical: &str) -> Result<Option<(Vec<u8>, RemoteMeta)>>;
     fn list(&self) -> Result<Vec<(String, RemoteMeta)>>;
+    /// Cheap credentials/reachability check — a single request, no
+    /// enumeration (list() fetches per-object metadata and scales with store
+    /// size). Returns whether the store already holds sync data.
+    fn probe(&self) -> Result<bool> {
+        Ok(!self.list()?.is_empty())
+    }
 }
 
 // ---------------------------------------------------------------- folder
@@ -104,6 +110,19 @@ impl SyncStore for FolderStore {
             .decode(&encoded)
             .with_context(|| format!("decode {}", data_path.display()))?;
         Ok(Some((plain, meta)))
+    }
+
+    fn probe(&self) -> Result<bool> {
+        let root = self.files_root();
+        if !root.exists() {
+            // Reachable but never synced to — verify we can actually write here.
+            std::fs::create_dir_all(&root)?;
+            return Ok(false);
+        }
+        Ok(walkdir::WalkDir::new(&root)
+            .into_iter()
+            .flatten()
+            .any(|e| e.file_type().is_file()))
     }
 
     fn list(&self) -> Result<Vec<(String, RemoteMeta)>> {
@@ -247,6 +266,23 @@ impl SyncStore for S3Store {
         };
         let plain = self.codec.decode(&encoded).with_context(|| format!("decode {logical}"))?;
         Ok(Some((plain, meta)))
+    }
+
+    fn probe(&self) -> Result<bool> {
+        use rusty_s3::S3Action;
+        let mut action = self.bucket.list_objects_v2(Some(&self.credentials));
+        action.query_mut().insert("prefix", "v1/files/");
+        action.query_mut().insert("max-keys", "1");
+        let url = action.sign(SIGN_TTL);
+        let text = self
+            .agent
+            .get(url.as_str())
+            .call()
+            .map_err(|e| clean_s3_err("list", e))?
+            .into_string()?;
+        let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&text)
+            .context("parse LIST response")?;
+        Ok(!parsed.contents.is_empty())
     }
 
     fn list(&self) -> Result<Vec<(String, RemoteMeta)>> {
@@ -437,6 +473,17 @@ impl SyncStore for AzureSasStore {
             return Ok(None);
         };
         Ok(Some((self.codec.decode(&encoded)?, meta)))
+    }
+
+    fn probe(&self) -> Result<bool> {
+        let mut u = self.base.clone();
+        u.query_pairs_mut()
+            .append_pair("restype", "container")
+            .append_pair("comp", "list")
+            .append_pair("prefix", "v1/files/")
+            .append_pair("maxresults", "1");
+        let xml = self.agent.get(u.as_str()).call().context("LIST blobs")?.into_string()?;
+        Ok(xml.contains("<Name>"))
     }
 
     fn list(&self) -> Result<Vec<(String, RemoteMeta)>> {

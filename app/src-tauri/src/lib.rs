@@ -273,10 +273,10 @@ async fn pick_folder(app: tauri::AppHandle) -> Option<String> {
 async fn test_store(
     store: vibesync_engine::StoreConfig,
     passphrase: Option<String>,
-) -> Result<usize, String> {
+) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let s = vibesync_engine::open_store(&store, passphrase.as_deref())?;
-        Ok::<usize, anyhow::Error>(s.list()?.len())
+        Ok::<bool, anyhow::Error>(s.probe()?)
     })
     .await
     .map_err(|e| e.to_string())?

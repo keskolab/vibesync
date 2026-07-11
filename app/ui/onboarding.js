@@ -187,8 +187,9 @@ function renderConfigure() {
     if (!store) { r.textContent = "Fill in all fields first"; r.style.color = "var(--destructive)"; r.classList.add("show"); return; }
     r.textContent = "Testing\u2026"; r.style.color = "var(--text-2)"; r.classList.add("show");
     try {
-      const n = await tauri?.core.invoke("test_store", { store, passphrase: chosen.passphrase || "test" });
-      r.textContent = `\u2713 Connected \u2014 ${n} objects in store`; r.style.color = "var(--ok)";
+      const hasData = await tauri?.core.invoke("test_store", { store, passphrase: chosen.passphrase || "test" });
+      r.textContent = hasData ? "\u2713 Connected \u2014 existing sync data found" : "\u2713 Connected \u2014 empty store, ready for first sync";
+      r.style.color = "var(--ok)";
     } catch (e) {
       r.textContent = `\u2717 ${String(e).slice(0, 120)}`; r.style.color = "var(--destructive)";
     }
