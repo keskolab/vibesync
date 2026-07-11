@@ -147,6 +147,10 @@ header {
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-2);
+}
+/* The 2x2 grid applies ONLY to the main page's status area — other
+   .substatus uses (tool detail header) are plain single-line text. */
+#substatus {
   display: grid;
   grid-template-columns: 1fr 1fr;
   column-gap: 10px;
