@@ -31,7 +31,7 @@ pub struct RemoteMeta {
     pub source: String,
 }
 
-pub trait SyncStore {
+pub trait SyncStore: Send + Sync {
     fn put(&self, logical: &str, plain: &[u8], meta: &RemoteMeta) -> Result<()>;
     fn get(&self, logical: &str) -> Result<Option<(Vec<u8>, RemoteMeta)>>;
     fn list(&self) -> Result<Vec<(String, RemoteMeta)>>;
@@ -262,16 +262,16 @@ impl SyncStore for S3Store {
                 None => break,
             }
         }
-        // Fetch sidecar metas (fine at hundreds-of-files scale; a manifest
-        // object can batch this later if it ever gets slow).
-        let mut result = Vec::with_capacity(out.len());
-        for logical in out {
-            let Some(meta_bytes) = self.get_bytes(&self.key(&logical, META_SUFFIX))? else {
-                continue;
-            };
-            let meta: RemoteMeta = serde_json::from_slice(&meta_bytes)?;
-            result.push((logical, meta));
-        }
+        // Fetch sidecar metas in parallel — serially this dominates sync time.
+        use rayon::prelude::*;
+        let mut result: Vec<(String, RemoteMeta)> = out
+            .par_iter()
+            .filter_map(|logical| {
+                let meta_bytes = self.get_bytes(&self.key(logical, META_SUFFIX)).ok()??;
+                let meta: RemoteMeta = serde_json::from_slice(&meta_bytes).ok()?;
+                Some((logical.clone(), meta))
+            })
+            .collect();
         result.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(result)
     }
@@ -446,12 +446,16 @@ impl SyncStore for AzureSasStore {
                 break;
             }
         }
-        let mut out = Vec::with_capacity(names.len());
-        for logical in names {
-            if let Some(meta_bytes) = self.get_bytes(&format!("v1/files/{logical}{META_SUFFIX}"))? {
-                out.push((logical, serde_json::from_slice(&meta_bytes)?));
-            }
-        }
+        use rayon::prelude::*;
+        let mut out: Vec<(String, RemoteMeta)> = names
+            .par_iter()
+            .filter_map(|logical| {
+                let meta_bytes = self
+                    .get_bytes(&format!("v1/files/{logical}{META_SUFFIX}"))
+                    .ok()??;
+                Some((logical.clone(), serde_json::from_slice(&meta_bytes).ok()?))
+            })
+            .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
     }

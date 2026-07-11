@@ -50,40 +50,60 @@ impl Codec for GzipCodec {
     }
 }
 
-/// gzip → age (scrypt passphrase). The same passphrase on every machine.
+/// gzip → age. The passphrase is stretched (scrypt) into an X25519 key
+/// ONCE when the codec is built; every file is then encrypted against that
+/// key with cheap public-key operations. Same passphrase on every machine
+/// derives the same key. Old objects encrypted in age's per-file passphrase
+/// mode still decrypt via a fallback path.
 pub struct AgeCodec {
     passphrase: String,
-    /// scrypt work factor (log2). age's default is used in production;
-    /// tests lower it to stay fast.
-    work_factor: u8,
+    identity: age::x25519::Identity,
+    recipient: age::x25519::Recipient,
 }
 
 impl AgeCodec {
     pub fn new(passphrase: impl Into<String>) -> Self {
-        Self { passphrase: passphrase.into(), work_factor: 18 }
+        let passphrase = passphrase.into();
+        let identity = derive_identity(&passphrase);
+        let recipient = identity.to_public();
+        Self { passphrase, identity, recipient }
     }
 
     #[doc(hidden)]
-    pub fn with_work_factor(passphrase: impl Into<String>, work_factor: u8) -> Self {
-        Self { passphrase: passphrase.into(), work_factor }
+    pub fn with_work_factor(passphrase: impl Into<String>, _work_factor: u8) -> Self {
+        Self::new(passphrase)
     }
+}
 
-    fn secret(&self) -> age::secrecy::SecretString {
-        age::secrecy::SecretString::from(self.passphrase.clone())
-    }
+/// passphrase -> scrypt(fixed salt) -> 32 bytes -> bech32 AGE-SECRET-KEY.
+/// Deterministic so every machine derives the same key.
+fn derive_identity(passphrase: &str) -> age::x25519::Identity {
+    use bech32::{ToBase32, Variant};
+    let mut key = [0u8; 32];
+    let params = scrypt::Params::new(17, 8, 1, 32).expect("scrypt params");
+    scrypt::scrypt(passphrase.as_bytes(), b"codesync-age-v1", &params, &mut key)
+        .expect("scrypt");
+    let encoded = bech32::encode("age-secret-key-", key.to_base32(), Variant::Bech32)
+        .expect("bech32");
+    encoded.to_uppercase().parse().expect("valid derived age identity")
 }
 
 impl Codec for AgeCodec {
     fn encode(&self, plain: &[u8]) -> Result<Vec<u8>> {
         let compressed = GzipCodec::compress(plain)?;
-        let mut recipient = age::scrypt::Recipient::new(self.secret());
-        recipient.set_work_factor(self.work_factor);
-        age::encrypt(&recipient, &compressed).context("age encrypt")
+        age::encrypt(&self.recipient, &compressed).context("age encrypt")
     }
 
     fn decode(&self, stored: &[u8]) -> Result<Vec<u8>> {
-        let identity = age::scrypt::Identity::new(self.secret());
-        let compressed = age::decrypt(&identity, stored).context("age decrypt")?;
+        let compressed = match age::decrypt(&self.identity, stored) {
+            Ok(c) => c,
+            Err(_) => {
+                // Legacy objects: age passphrase (scrypt) mode.
+                let secret = age::secrecy::SecretString::from(self.passphrase.clone());
+                age::decrypt(&age::scrypt::Identity::new(secret), stored)
+                    .context("age decrypt (both key modes failed)")?
+            }
+        };
         GzipCodec::decompress(&compressed)
     }
 

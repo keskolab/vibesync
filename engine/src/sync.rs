@@ -33,38 +33,52 @@ pub fn push(
     store: &dyn SyncStore,
     source: &str,
 ) -> Result<Report> {
+    use rayon::prelude::*;
     let mut report = Report::default();
-    for entry in entries {
-        let known = state.files.get(&entry.logical);
-        if let Some(st) = known {
-            if st.hash == entry.hash && !st.deleted_locally {
-                report.unchanged += 1;
-                continue;
+    let todo: Vec<&FileEntry> = entries
+        .iter()
+        .filter(|e| {
+            match state.files.get(&e.logical) {
+                Some(st) if st.hash == e.hash && !st.deleted_locally => {
+                    report.unchanged += 1;
+                    false
+                }
+                _ => true,
             }
-        }
-        let data = std::fs::read(&entry.abs)
-            .with_context(|| format!("read {}", entry.abs.display()))?;
-        // The file may have changed between scan and read; hash what we send.
-        let hash = hash_bytes(&data);
-        store.put(
-            &entry.logical,
-            &data,
-            &RemoteMeta {
-                hash: hash.clone(),
-                mtime_ms: entry.mtime_ms,
-                size: data.len() as u64,
-                source: source.to_string(),
-            },
-        )?;
-        state.files.insert(
-            entry.logical.clone(),
-            FileState {
-                hash,
-                mtime_ms: entry.mtime_ms,
-                size: data.len() as u64,
-                deleted_locally: false,
-            },
-        );
+        })
+        .collect();
+    // Encrypt + upload in parallel; state is updated afterwards, serially.
+    let results: Vec<Result<(String, FileState)>> = todo
+        .par_iter()
+        .map(|entry| {
+            let data = std::fs::read(&entry.abs)
+                .with_context(|| format!("read {}", entry.abs.display()))?;
+            // The file may have changed between scan and read; hash what we send.
+            let hash = hash_bytes(&data);
+            store.put(
+                &entry.logical,
+                &data,
+                &RemoteMeta {
+                    hash: hash.clone(),
+                    mtime_ms: entry.mtime_ms,
+                    size: data.len() as u64,
+                    source: source.to_string(),
+                },
+            )?;
+            Ok((
+                entry.logical.clone(),
+                FileState {
+                    hash,
+                    mtime_ms: entry.mtime_ms,
+                    size: data.len() as u64,
+                    deleted_locally: false,
+                },
+            ))
+        })
+        .collect();
+    for r in results {
+        let (logical, st) = r?;
+        state.files.insert(logical, st);
         report.pushed += 1;
     }
     Ok(report)

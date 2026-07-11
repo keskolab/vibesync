@@ -29,22 +29,40 @@ AI coding tools keep their sessions on the machine where they happened. Vendors 
 | More tools | Codex, VS Code Copilot Chat, Zed, OpenCode, Copilot CLI | 🔜 Planned |
 | Windows build | Same app, same store, mixed Mac + Windows fleets (WSL included) | 🔜 Planned |
 
-## How syncing works with any number of computers
+## How syncing works:
 
-**The big picture:** you pick one place to keep your data — a folder you already sync, or a cloud bucket you own. Every computer running Code Sync talks to that same place: each one sends in whatever is new on its side, and takes out whatever it's missing. The computers never talk to each other directly, and there is no account or server from us — that one shared place is the whole system.
+**The Big Picture:** 
+- Works with any amount of computers
+- You pick one place to keep your data — a folder you already sync (icloud, dropbox, google drive etc) or a cloud bucket you own (S3, R2, Azore Blob Storage etc).  
+- Every computer running Code Sync talks to that same place: each one sends whatever is new on its side and sync back whatever it's missing. 
+- The computers never talk to each other directly and there is no account or server in the middle by this app.
 
-**About the passphrase (cloud storage only):** when your data lives in a cloud bucket, it is locked (encrypted) on your computer *before* it is uploaded, and the passphrase you choose during setup is the key. All your computers must use the same passphrase — that's how each one can unlock what the others uploaded. The cloud provider only ever holds locked files it cannot read. The passphrase never leaves your computers and we never see it — which also means nobody can recover your data if you lose it, so write it down somewhere safe. (Data in a folder you own — USB disk, iCloud Drive — is compressed but not locked.)
+**Passphrase (R2, S3, Azure only):** 
+- When your data lives in a cloud bucket, it is locked (encrypted) on your computer ***before*** it is uploaded.   
+- The passphrase you choose during setup is the private key to that data.  
+- All your computers must use the same passphrase — that is how each one can unlock what your other computers have uploaded. 
+- The cloud provider only holds encrypted files it cannot read. 
+- The passphrase never leaves your computers and this app never see it — which also means nobody can recover your data if you lose it, so write it down if you need to. 
 
 **Step by step:**
 
-1. Computer A looks through your sessions and sends anything new to your storage.
-2. Computer B (and C, and D…) does the same — and also downloads anything it doesn't have yet.
-3. Every session has its own unique ID, so files from different computers can never overwrite each other. The storage simply ends up holding everything, and every computer catches up to that full set.
-4. File paths are fixed up for each computer: a session saved under `/Users/anna/dev/app` on a Mac shows up in the right place for `C:\Users\anna\dev\app` on a PC.
-5. If the same session changed on two computers, the newer version wins — and the older one is kept right next to it as a backup file. Nothing is ever thrown away silently.
-6. When a tool cleans up old sessions (Claude Code deletes them after about 30 days), your storage still keeps them forever — and sync is smart enough not to push them back onto a computer that already cleaned them up. Your storage becomes a permanent history.
+1. Start with any computer, for example computer A.
+2. Computer A looks through all your sessions and sends anything new to the selected storage you have chosen.
+3. Computer B (and C, and D…) does the same — and also downloads anything it doesn't have yet.
+4. Computer A now recognizes Computer B + C + D... have uploaded new things, so it will download the new things (every 15 min if you setup ```Settings -> AutoSync```).
+5. Done.
 
-Adding another computer is just: install Code Sync, point it at the same place (and enter the same passphrase if you use cloud storage), press Sync. Everything arrives.
+**Details:**
+
+- Every session has its own unique ID, so files from different computers can never overwrite each other. The storage simply ends up holding everything and every computer catches up to that.
+
+- File paths are fixed up for each computer: a session saved under `/Users/anna/dev/app` on a macOS shows up in the right place for `C:\Users\anna\dev\app` on a PC.
+
+- If the same session changed on two computers, the newer version wins — and the older one is kept right next to it as a backup file. Nothing is ever thrown away silently.
+
+- When a tool cleans up old sessions (Claude Code deletes them after about 30 days), your storage still keeps them forever — and code sync is smart enough not to push them back onto a computer that already cleaned them up. Your storage becomes a permanent history.
+
+- Adding another computer is just: install Code Sync, point it at the same place (and enter the same passphrase if you use cloud storage) and press Sync.
 
 ## Getting started (development builds)
 
