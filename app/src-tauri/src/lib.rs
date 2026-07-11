@@ -337,21 +337,68 @@ struct SettingsState {
     autostart: bool,
     autosync: bool,
     autosync_interval_mins: u64,
+    project_mappings: std::collections::BTreeMap<String, String>,
 }
 
 #[tauri::command]
 fn get_settings(app: tauri::AppHandle) -> SettingsState {
     use tauri_plugin_autostart::ManagerExt;
-    let interval = syncer::paths(&app)
+    let cfg = syncer::paths(&app)
         .ok()
-        .and_then(|p| syncer::load_config(&p).ok().flatten())
-        .map(|c| c.autosync_interval_mins)
-        .unwrap_or(AUTOSYNC_INTERVAL_SECS / 60);
+        .and_then(|p| syncer::load_config(&p).ok().flatten());
     SettingsState {
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         autosync: AUTOSYNC.load(Ordering::Relaxed),
-        autosync_interval_mins: interval,
+        autosync_interval_mins: cfg
+            .as_ref()
+            .map(|c| c.autosync_interval_mins)
+            .unwrap_or(AUTOSYNC_INTERVAL_SECS / 60),
+        project_mappings: cfg.map(|c| c.project_mappings).unwrap_or_default(),
     }
+}
+
+/// Minutes between background syncs. The worker re-reads the config every
+/// loop, so this applies without a restart.
+#[tauri::command]
+fn set_autosync_interval(app: tauri::AppHandle, mins: u64) -> Result<(), String> {
+    let mins = mins.clamp(1, 24 * 60);
+    let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let mut cfg = syncer::load_config(&paths)
+        .map_err(|e| e.to_string())?
+        .ok_or("VibeSync is not configured yet")?;
+    cfg.autosync_interval_mins = mins;
+    syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())
+}
+
+/// Add or update a manual project mapping (fleet name -> local folder).
+#[tauri::command]
+fn set_project_mapping(app: tauri::AppHandle, name: String, path: String) -> Result<SettingsState, String> {
+    let name = name.trim().to_string();
+    if !vibesync_engine::gitmap::valid_project_name(&name) {
+        return Err("Project names: letters, digits, dot, dash, underscore (max 64).".into());
+    }
+    let path = path.trim().trim_end_matches(['/', '\\']).to_string();
+    if !std::path::Path::new(&path).is_dir() {
+        return Err(format!("Folder does not exist: {path}"));
+    }
+    let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let mut cfg = syncer::load_config(&paths)
+        .map_err(|e| e.to_string())?
+        .ok_or("VibeSync is not configured yet")?;
+    cfg.project_mappings.insert(name, path);
+    syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())?;
+    Ok(get_settings(app))
+}
+
+#[tauri::command]
+fn remove_project_mapping(app: tauri::AppHandle, name: String) -> Result<SettingsState, String> {
+    let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let mut cfg = syncer::load_config(&paths)
+        .map_err(|e| e.to_string())?
+        .ok_or("VibeSync is not configured yet")?;
+    cfg.project_mappings.remove(&name);
+    syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())?;
+    Ok(get_settings(app))
 }
 
 #[tauri::command]
@@ -647,6 +694,9 @@ pub fn run() {
             get_settings,
             set_autostart,
             set_autosync,
+            set_autosync_interval,
+            set_project_mapping,
+            remove_project_mapping,
             set_store,
             pick_folder,
             test_store

@@ -12,7 +12,7 @@
 pub const HOME_TOKEN: &str = "${HOME}";
 pub const EHOME_TOKEN: &str = "${EHOME}";
 
-use crate::gitmap::{git_token, parse_git_token, GitMap};
+use crate::gitmap::{git_token, parse_git_token, parse_proj_token, proj_token, GitMap};
 
 #[derive(Debug, Clone)]
 pub struct Tokenizer {
@@ -27,6 +27,9 @@ pub struct Tokenizer {
     /// a repo identity is portable across machines whose homes differ AND
     /// whose repo locations differ, which `${HOME}` alone can't express.
     git_roots: Vec<(String, String, String)>,
+    /// User-configured project mappings: (name, plain root, encoded root),
+    /// longest root first. Outrank git roots — an explicit mapping is intent.
+    proj_roots: Vec<(String, String, String)>,
 }
 
 /// Claude Code's cwd encoding: every non-alphanumeric byte becomes '-'.
@@ -44,7 +47,27 @@ impl Tokenizer {
     pub fn with_case_sensitivity(home: &str, case_insensitive: bool) -> Self {
         let home = home.trim_end_matches(['/', '\\']).to_string();
         let encoded_home = encode_cwd(&home);
-        Self { home, encoded_home, case_insensitive, git_roots: Vec::new() }
+        Self { home, encoded_home, case_insensitive, git_roots: Vec::new(), proj_roots: Vec::new() }
+    }
+
+    /// Attach user-configured project mappings (fleet name -> local folder);
+    /// they take priority over git identities and `${HOME}` in both
+    /// directions. Invalid names are skipped.
+    pub fn with_manual_projects(
+        mut self,
+        map: &std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        self.proj_roots = map
+            .iter()
+            .filter(|(name, _)| crate::gitmap::valid_project_name(name))
+            .map(|(name, root)| {
+                let root = root.trim_end_matches(['/', '\\']).to_string();
+                let encoded = encode_cwd(&root);
+                (name.clone(), root, encoded)
+            })
+            .collect();
+        self.proj_roots.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+        self
     }
 
     /// Attach known git repo roots; their identities then take priority over
@@ -92,6 +115,16 @@ impl Tokenizer {
     /// a known repo (tail separators canonicalized to `/`), else
     /// `/Users/alice/x` → `${HOME}/x` (boundary-aware; non-matching unchanged).
     pub fn tokenize_plain(&self, path: &str) -> String {
+        for (name, root, _) in &self.proj_roots {
+            if let Some(rest) = self.strip(path, root) {
+                if rest.is_empty() {
+                    return proj_token(name);
+                }
+                if rest.starts_with('/') || rest.starts_with('\\') {
+                    return format!("{}{}", proj_token(name), rest.replace('\\', "/"));
+                }
+            }
+        }
         for (id, root, _) in &self.git_roots {
             if let Some(rest) = self.strip(path, root) {
                 if rest.is_empty() {
@@ -117,6 +150,12 @@ impl Tokenizer {
     /// the repo is unknown here — callers park/skip such paths);
     /// `${HOME}/x` → `/Users/alice/x`.
     pub fn expand_plain(&self, path: &str) -> String {
+        if let Some((name, rest)) = parse_proj_token(path) {
+            if let Some((_, root, _)) = self.proj_roots.iter().find(|(n, _, _)| n == name) {
+                return format!("{root}{rest}");
+            }
+            return path.to_string();
+        }
         if let Some((id, rest)) = parse_git_token(path) {
             if let Some((_, root, _)) = self.git_roots.iter().find(|(i, _, _)| *i == id) {
                 return format!("{root}{rest}");
@@ -133,6 +172,16 @@ impl Tokenizer {
     /// with a known repo root's encoding, else
     /// `-Users-alice-dev-proj` → `${EHOME}-dev-proj` (boundary-aware).
     pub fn tokenize_encoded(&self, s: &str) -> String {
+        for (name, _, eroot) in &self.proj_roots {
+            if let Some(rest) = self.strip(s, eroot) {
+                if rest.is_empty() {
+                    return proj_token(name);
+                }
+                if rest.starts_with('-') {
+                    return format!("{}{}", proj_token(name), rest);
+                }
+            }
+        }
         for (id, _, eroot) in &self.git_roots {
             if let Some(rest) = self.strip(s, eroot) {
                 if rest.is_empty() {
@@ -158,6 +207,12 @@ impl Tokenizer {
     /// left untouched when the repo is unknown here);
     /// `${EHOME}-dev-proj` → `-Users-alice-dev-proj`.
     pub fn expand_encoded(&self, s: &str) -> String {
+        if let Some((name, rest)) = parse_proj_token(s) {
+            if let Some((_, _, eroot)) = self.proj_roots.iter().find(|(n, _, _)| n == name) {
+                return format!("{eroot}{rest}");
+            }
+            return s.to_string();
+        }
         if let Some((id, rest)) = parse_git_token(s) {
             if let Some((_, _, eroot)) = self.git_roots.iter().find(|(i, _, _)| *i == id) {
                 return format!("{eroot}{rest}");
@@ -312,6 +367,45 @@ mod tests {
         assert_eq!(w.expand_plain(foreign), foreign);
         let foreign_enc = "${GIT:github.com:someone:other-repo}-x";
         assert_eq!(w.expand_encoded(foreign_enc), foreign_enc);
+    }
+
+    #[test]
+    fn manual_project_outranks_git_and_home() {
+        let (w, m) = fleet();
+        let mut manual_w = std::collections::BTreeMap::new();
+        manual_w.insert("vibesync".to_string(), "C:\\Temp\\vibesync".to_string());
+        let w = w.with_manual_projects(&manual_w);
+        let mut manual_m = std::collections::BTreeMap::new();
+        manual_m.insert(
+            "vibesync".to_string(),
+            "/Users/you/Development/7_rust/vibesync".to_string(),
+        );
+        let m = m.with_manual_projects(&manual_m);
+
+        // Manual wins over the git identity for the same folder.
+        let tok = w.tokenize_plain("C:\\Temp\\vibesync\\engine");
+        assert_eq!(tok, "${PROJ:vibesync}/engine");
+        assert_eq!(
+            m.expand_plain(&tok),
+            "/Users/you/Development/7_rust/vibesync/engine"
+        );
+        // Encoded form, canonical both ways.
+        let etok = w.tokenize_encoded("C--Temp-vibesync-engine");
+        assert_eq!(etok, "${PROJ:vibesync}-engine");
+        assert_eq!(
+            m.expand_encoded(&etok),
+            "-Users-you-Development-7-rust-vibesync-engine"
+        );
+        assert_eq!(m.tokenize_encoded(&m.expand_encoded(&etok)), etok);
+        // Unmapped machines leave the token alone (parking semantics).
+        let plain_w_only = "${PROJ:only-on-w}/x";
+        assert_eq!(m.expand_plain(plain_w_only), plain_w_only);
+        // Invalid names are ignored entirely.
+        let mut bad = std::collections::BTreeMap::new();
+        bad.insert("has/slash".to_string(), "C:\\X".to_string());
+        bad.insert(String::new(), "C:\\Y".to_string());
+        let t = Tokenizer::with_case_sensitivity("C:\\Users\\u", true).with_manual_projects(&bad);
+        assert_eq!(t.tokenize_plain("C:\\X\\a"), "C:\\X\\a");
     }
 
     #[test]
