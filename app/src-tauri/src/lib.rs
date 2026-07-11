@@ -459,10 +459,14 @@ fn show_popover(app: tauri::AppHandle) {
 /// hide/show cycles (and can deny focus), which let other apps draw over the
 /// open popover — so re-assert always-on-top on every show.
 fn present_popover(win: &tauri::WebviewWindow) {
+    use tauri::Emitter;
     place_popover(win);
     let _ = win.show();
     let _ = win.set_always_on_top(true);
     let _ = win.set_focus();
+    // Hidden webviews can be suspended (macOS), missing autosync events —
+    // so every show triggers a status re-fetch instead of trusting them.
+    let _ = win.emit("popover-shown", ());
 }
 
 /// Procedurally drawn template icon (black + alpha) matching the Material

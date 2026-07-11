@@ -355,6 +355,10 @@ window.addEventListener("DOMContentLoaded", async () => {
     $("progress-bar").style.width = `${Math.round((done / total) * 100)}%`;
   });
 
+  // Every open re-fetches status: events fired while the window was hidden
+  // (autosync finishing, badges arriving) may never have been delivered.
+  tauri?.event.listen("popover-shown", () => refreshStatus().catch(() => {}));
+
   // Background autosync: mirror the tray's busy state inside the popover.
   tauri?.event.listen("autosync-start", () => setBusy(true, "Syncing\u2026"));
   tauri?.event.listen("autosync-done", () => {
