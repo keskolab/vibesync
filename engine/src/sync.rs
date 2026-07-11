@@ -71,17 +71,19 @@ pub fn push(
 }
 
 /// Download store entries this machine doesn't have (or has older versions of).
+/// `include_optional` gates opt-in roots (e.g. plugins) on the pull side too.
 pub fn pull(
     adapter: &Adapter,
     home: &Path,
     tok: &Tokenizer,
     state: &mut SyncState,
     store: &dyn SyncStore,
+    include_optional: bool,
 ) -> Result<Report> {
     let mut report = Report::default();
     for (logical, meta) in store.list()? {
-        let Some(abs) = adapter.resolve(&logical, home, tok) else {
-            continue; // not this adapter's namespace
+        let Some(abs) = adapter.resolve(&logical, home, tok, include_optional) else {
+            continue; // not this adapter's namespace (or opted out)
         };
         if let Some(st) = state.files.get(&logical) {
             if st.deleted_locally {

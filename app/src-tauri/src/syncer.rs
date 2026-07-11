@@ -15,6 +15,9 @@ pub struct AppConfig {
     /// before anything ships.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<String>,
+    /// Plugins can be large — never synced unless the user opts in.
+    #[serde(default)]
+    pub sync_plugins: bool,
 }
 
 pub struct Paths {
@@ -52,6 +55,7 @@ pub fn default_config() -> Result<AppConfig> {
             encrypted: false,
         },
         passphrase: None,
+        sync_plugins: false,
     })
 }
 
@@ -72,15 +76,20 @@ pub struct Status {
     pub configured: bool,
     pub store_desc: Option<String>,
     pub last_sync_ms: Option<i64>,
+    pub sync_plugins: bool,
     pub tools: Vec<ToolStatus>,
 }
 
 /// Light scan: counts and sizes only — no hashing, safe on every popover open.
-fn light_counts(home: &PathBuf) -> (usize, usize, u64) {
+fn light_counts(home: &PathBuf, include_plugins: bool) -> (usize, usize, u64) {
     let mut sessions = 0usize;
     let mut plans = 0usize;
     let mut bytes = 0u64;
-    for root in CLAUDE_CODE.roots {
+    let roots = CLAUDE_CODE
+        .roots
+        .iter()
+        .chain(if include_plugins { CLAUDE_CODE.optional_roots.iter() } else { [].iter() });
+    for root in roots {
         let mut abs = home.clone();
         for comp in root.home_rel.split('/') {
             abs.push(comp);
@@ -88,12 +97,19 @@ fn light_counts(home: &PathBuf) -> (usize, usize, u64) {
         if !abs.exists() {
             continue;
         }
-        for entry in walkdir_files(&abs) {
-            let ext_ok = entry
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| root.exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
-                .unwrap_or(false);
+        if root.is_file {
+            if let Ok(meta) = std::fs::metadata(&abs) {
+                bytes += meta.len();
+            }
+            continue;
+        }
+        for entry in walkdir_files(&abs, root.exclude_dirs) {
+            let ext_ok = root.exts.is_empty()
+                || entry
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| root.exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
+                    .unwrap_or(false);
             if !ext_ok {
                 continue;
             }
@@ -102,14 +118,19 @@ fn light_counts(home: &PathBuf) -> (usize, usize, u64) {
             }
             match root.logical_prefix {
                 "plans" => plans += 1,
-                _ => sessions += 1,
+                "projects" => {
+                    if entry.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                        sessions += 1;
+                    }
+                }
+                _ => {}
             }
         }
     }
     (sessions, plans, bytes)
 }
 
-fn walkdir_files(root: &PathBuf) -> Vec<PathBuf> {
+fn walkdir_files(root: &PathBuf, exclude_dirs: &[&str]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
@@ -117,7 +138,16 @@ fn walkdir_files(root: &PathBuf) -> Vec<PathBuf> {
         for entry in read.flatten() {
             let path = entry.path();
             match entry.file_type() {
-                Ok(t) if t.is_dir() => stack.push(path),
+                Ok(t) if t.is_dir() => {
+                    let skip = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| exclude_dirs.iter().any(|x| x.eq_ignore_ascii_case(n)))
+                        .unwrap_or(false);
+                    if !skip {
+                        stack.push(path);
+                    }
+                }
                 Ok(t) if t.is_file() => out.push(path),
                 _ => {}
             }
@@ -143,14 +173,16 @@ pub fn status(paths: &Paths) -> Result<Status> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64);
 
+    let sync_plugins = config.as_ref().map(|c| c.sync_plugins).unwrap_or(false);
     let installed = CLAUDE_CODE.detect(&home);
     let (sessions, plans, bytes) =
-        if installed { light_counts(&home) } else { (0, 0, 0) };
+        if installed { light_counts(&home, sync_plugins) } else { (0, 0, 0) };
 
     Ok(Status {
         configured: config.is_some(),
         store_desc,
         last_sync_ms,
+        sync_plugins,
         tools: vec![ToolStatus {
             id: CLAUDE_CODE.id,
             name: CLAUDE_CODE.name,
@@ -178,13 +210,16 @@ pub fn sync_now(paths: &Paths) -> Result<SyncOutcome> {
     let tok = engine::Tokenizer::from_env()?;
     let home = dirs::home_dir().context("no home dir")?;
 
+    let include_plugins = config.sync_plugins;
     let mut state = engine::SyncState::load(&paths.state)?;
-    let entries = CLAUDE_CODE.scan(&home, &tok)?;
-    state.mark_deletions("projects", &entries);
-    state.mark_deletions("plans", &entries);
+    let entries = CLAUDE_CODE.scan(&home, &tok, include_plugins)?;
+    for prefix in CLAUDE_CODE.logical_prefixes(include_plugins) {
+        state.mark_deletions(prefix, &entries);
+    }
 
     let push = engine::sync::push(&entries, &mut state, store.as_ref(), &engine::machine_name())?;
-    let pull = engine::sync::pull(&CLAUDE_CODE, &home, &tok, &mut state, store.as_ref())?;
+    let pull =
+        engine::sync::pull(&CLAUDE_CODE, &home, &tok, &mut state, store.as_ref(), include_plugins)?;
     state.save(&paths.state)?;
 
     Ok(SyncOutcome {

@@ -55,6 +55,28 @@ async fn configure_default_store(app: tauri::AppHandle) -> Result<syncer::Status
     .map_err(|e| format!("{e:#}"))
 }
 
+/// Toggle the opt-in plugins scope (never on by default — can be large).
+#[tauri::command]
+async fn set_sync_plugins(app: tauri::AppHandle, enabled: bool) -> Result<syncer::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = syncer::paths(&app)?;
+        let mut cfg = syncer::load_config(&paths)?
+            .ok_or_else(|| anyhow::anyhow!("not configured yet"))?;
+        cfg.sync_plugins = enabled;
+        syncer::save_config(&paths, &cfg)?;
+        syncer::status(&paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// Dev-only UI affordances (e.g. "Replay first launch") key off this.
+#[tauri::command]
+fn is_dev() -> bool {
+    cfg!(debug_assertions)
+}
+
 #[tauri::command]
 async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -173,7 +195,9 @@ pub fn run() {
             engine_version,
             get_status,
             configure_default_store,
-            sync_now
+            sync_now,
+            set_sync_plugins,
+            is_dev
         ])
         .setup(|app| {
             // Menu bar app: no Dock icon.

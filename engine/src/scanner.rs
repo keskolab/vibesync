@@ -51,30 +51,54 @@ pub fn mtime_ms(path: &Path) -> Result<i64> {
     Ok(mtime.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0))
 }
 
-/// Scan `abs_root` recursively for files with one of `exts`, producing entries
-/// whose logical paths start with `logical_prefix` and have every path
-/// component tokenized (so encoded-home directory names become portable).
+/// Scan `abs_root` recursively for matching files, producing entries whose
+/// logical paths start with `logical_prefix` and have every path component
+/// tokenized (so encoded-home directory names become portable).
+///
+/// `exts` empty = all files. `exclude_dirs` are directory names skipped
+/// anywhere under the root. A root that is a single file yields one entry.
 pub fn scan_root(
     abs_root: &Path,
     logical_prefix: &str,
     tok: &Tokenizer,
     exts: &[&str],
+    exclude_dirs: &[&str],
 ) -> Result<Vec<FileEntry>> {
     let mut out = Vec::new();
     if !abs_root.exists() {
         return Ok(out);
     }
-    for entry in walkdir::WalkDir::new(abs_root).follow_links(false) {
+    if abs_root.is_file() {
+        let meta = std::fs::metadata(abs_root)?;
+        let name = abs_root.file_name().unwrap_or_default().to_string_lossy();
+        out.push(FileEntry {
+            logical: format!("{logical_prefix}/{name}"),
+            abs: abs_root.to_path_buf(),
+            size: meta.len(),
+            mtime_ms: mtime_ms(abs_root)?,
+            hash: hash_file(abs_root)?,
+        });
+        return Ok(out);
+    }
+    let walker = walkdir::WalkDir::new(abs_root).follow_links(false).into_iter();
+    for entry in walker.filter_entry(|e| {
+        !(e.file_type().is_dir()
+            && e.file_name()
+                .to_str()
+                .map(|n| exclude_dirs.iter().any(|x| x.eq_ignore_ascii_case(n)))
+                .unwrap_or(false))
+    }) {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;
         }
         let path = entry.path();
-        let ext_ok = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
-            .unwrap_or(false);
+        let ext_ok = exts.is_empty()
+            || path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
+                .unwrap_or(false);
         if !ext_ok {
             continue;
         }

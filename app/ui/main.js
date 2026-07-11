@@ -128,15 +128,24 @@ function openTool(t) {
   const ul = $("tool-scopes");
   ul.innerHTML = "";
   for (const s of [
-    { name: "Sessions", sub: "CLI transcripts", on: true },
-    { name: "Plans", sub: "Plan documents", on: true },
-    { name: "App sidebar", sub: "Coming in the registry milestone", on: false },
+    { name: "Sessions & memory", sub: "Transcripts, subagents, auto-memory", on: true, locked: true },
+    { name: "Plans, tasks & history", sub: "Plans, tasks, command history", on: true, locked: true },
+    { name: "Agents, skills & settings", sub: "Custom agents, skills, rules, CLAUDE.md", on: true, locked: true },
+    { name: "Plugins", sub: "Can be large — off by default", on: status.syncPlugins, locked: false, id: "scope-plugins" },
+    { name: "App sidebar", sub: "Coming in the registry milestone", on: false, locked: true },
   ]) {
     const li = document.createElement("li");
     li.innerHTML = `
       <div class="tlabel">${s.name}<span class="tsub">${s.sub}</span></div>
-      <label class="switch"><input type="checkbox" ${s.on ? "checked" : ""} disabled /><span class="knob"></span></label>`;
+      <label class="switch"><input type="checkbox" ${s.on ? "checked" : ""} ${s.locked ? "disabled" : ""} ${s.id ? `id="${s.id}"` : ""} /><span class="knob"></span></label>`;
     ul.appendChild(li);
+  }
+  const plugins = ul.querySelector("#scope-plugins");
+  if (plugins) {
+    plugins.addEventListener("change", async (e) => {
+      status = await invoke("set_sync_plugins", { enabled: e.target.checked });
+      renderAll();
+    });
   }
   $("tool-storage").innerHTML = `
     <div><span>Local size</span><b>${fmtMB(t.bytes)} MB</b></div>
@@ -186,6 +195,11 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   setPending(!isSetup());
   $("open-setup").addEventListener("click", () => invoke("show_onboarding"));
+
+  // "Replay first launch" is a development tool only.
+  invoke("is_dev").then((dev) => {
+    if (!dev) $("reset-firstrun").style.display = "none";
+  });
 
   if (isSetup()) {
     try {

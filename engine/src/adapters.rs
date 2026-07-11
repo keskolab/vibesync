@@ -1,10 +1,4 @@
 //! Tool adapters: where each AI coding tool keeps its session data.
-//!
-//! v1 ships Claude Code; Codex, OpenCode, and VS Code Copilot Chat follow.
-//! Paths are home-relative and per-OS where they differ. Adapters whose
-//! storage needs more than path globs (Claude's desktop registry, VS Code's
-//! workspace-hash dirs) add dedicated logic in later milestones — this
-//! descriptor covers the plain file-sync part.
 
 use std::path::Path;
 
@@ -15,12 +9,16 @@ use crate::tokenizer::Tokenizer;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RootSpec {
-    /// Home-relative root, `/`-separated (joined per-OS at runtime).
+    /// Home-relative root, `/`-separated. May point at a single file.
     pub home_rel: &'static str,
     /// First component of the logical path for files under this root.
     pub logical_prefix: &'static str,
-    /// File extensions to include (case-insensitive).
+    /// File extensions to include (case-insensitive). Empty = all files.
     pub exts: &'static [&'static str],
+    /// Directory names skipped anywhere under this root (e.g. plugin caches).
+    pub exclude_dirs: &'static [&'static str],
+    /// True when `home_rel` names a single file rather than a directory.
+    pub is_file: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -28,21 +26,44 @@ pub struct Adapter {
     pub id: &'static str,
     pub name: &'static str,
     pub roots: &'static [RootSpec],
+    /// Opt-in roots (potentially large); synced only when the user enables
+    /// them — e.g. Claude plugins.
+    pub optional_roots: &'static [RootSpec],
+}
+
+const fn root(home_rel: &'static str, logical_prefix: &'static str, exts: &'static [&'static str]) -> RootSpec {
+    RootSpec { home_rel, logical_prefix, exts, exclude_dirs: &[], is_file: false }
+}
+
+const fn file_root(home_rel: &'static str, logical_prefix: &'static str) -> RootSpec {
+    RootSpec { home_rel, logical_prefix, exts: &[], exclude_dirs: &[], is_file: true }
 }
 
 pub const CLAUDE_CODE: Adapter = Adapter {
     id: "claude-code",
     name: "Claude Code",
     roots: &[
+        // Sessions, subagent transcripts, and auto-memory.
+        root(".claude/projects", "projects", &["jsonl", "md"]),
+        root(".claude/plans", "plans", &["md"]),
+        root(".claude/tasks", "tasks", &[]),
+        root(".claude/agents", "agents", &[]),
+        root(".claude/skills", "skills", &[]),
+        root(".claude/rules", "rules", &[]),
+        file_root(".claude/history.jsonl", "meta"),
+        file_root(".claude/settings.json", "meta"),
+        file_root(".claude/settings.local.json", "meta"),
+        file_root(".claude/CLAUDE.md", "meta"),
+    ],
+    optional_roots: &[
+        // Plugins can be huge; never synced by default. The cache is
+        // re-downloadable and excluded even when the user opts in.
         RootSpec {
-            home_rel: ".claude/projects",
-            logical_prefix: "projects",
-            exts: &["jsonl"],
-        },
-        RootSpec {
-            home_rel: ".claude/plans",
-            logical_prefix: "plans",
-            exts: &["md"],
+            home_rel: ".claude/plugins",
+            logical_prefix: "plugins",
+            exts: &[],
+            exclude_dirs: &["cache"],
+            is_file: false,
         },
     ],
 };
@@ -53,27 +74,55 @@ impl Adapter {
         self.roots.iter().any(|r| join_home(home, r.home_rel).exists())
     }
 
-    pub fn scan(&self, home: &Path, tok: &Tokenizer) -> Result<Vec<FileEntry>> {
+    fn active_roots(&self, include_optional: bool) -> impl Iterator<Item = &'static RootSpec> {
+        self.roots
+            .iter()
+            .chain(if include_optional { self.optional_roots.iter() } else { [].iter() })
+    }
+
+    pub fn scan(&self, home: &Path, tok: &Tokenizer, include_optional: bool) -> Result<Vec<FileEntry>> {
         let mut out = Vec::new();
-        for root in self.roots {
+        for root in self.active_roots(include_optional) {
             let abs = join_home(home, root.home_rel);
-            out.extend(scan_root(&abs, root.logical_prefix, tok, root.exts)?);
+            out.extend(scan_root(&abs, root.logical_prefix, tok, root.exts, root.exclude_dirs)?);
         }
         Ok(out)
     }
 
+    /// Logical prefixes to consider for deletion-marking after a scan.
+    pub fn logical_prefixes(&self, include_optional: bool) -> Vec<&'static str> {
+        let mut v: Vec<&'static str> =
+            self.active_roots(include_optional).map(|r| r.logical_prefix).collect();
+        v.dedup();
+        v
+    }
+
     /// Map a logical path back to an absolute path on this machine, expanding
     /// encoded-home components. Returns None if no root claims the prefix.
-    pub fn resolve(&self, logical: &str, home: &Path, tok: &Tokenizer) -> Option<std::path::PathBuf> {
-        for root in self.roots {
+    pub fn resolve(
+        &self,
+        logical: &str,
+        home: &Path,
+        tok: &Tokenizer,
+        include_optional: bool,
+    ) -> Option<std::path::PathBuf> {
+        for root in self.active_roots(include_optional) {
             let prefix = format!("{}/", root.logical_prefix);
-            if let Some(rest) = logical.strip_prefix(&prefix) {
-                let mut abs = join_home(home, root.home_rel);
-                for comp in rest.split('/') {
-                    abs.push(tok.expand_encoded(comp));
+            let Some(rest) = logical.strip_prefix(&prefix) else { continue };
+            let abs = join_home(home, root.home_rel);
+            if root.is_file {
+                // Logical is "<prefix>/<filename>"; must match this root's file.
+                let fname = root.home_rel.rsplit('/').next().unwrap_or_default();
+                if rest == fname {
+                    return Some(abs);
                 }
-                return Some(abs);
+                continue;
             }
+            let mut abs = abs;
+            for comp in rest.split('/') {
+                abs.push(tok.expand_encoded(comp));
+            }
+            return Some(abs);
         }
         None
     }

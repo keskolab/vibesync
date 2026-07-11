@@ -41,7 +41,7 @@ impl Machine {
     }
 
     fn scan(&self) -> Vec<codesync_engine::FileEntry> {
-        CLAUDE_CODE.scan(&self.home, &self.tok).unwrap()
+        CLAUDE_CODE.scan(&self.home, &self.tok, false).unwrap()
     }
 }
 
@@ -72,7 +72,7 @@ fn two_machine_roundtrip() {
     assert_eq!(report.unchanged, 2);
 
     // Pull on B: files land under B's home with B's encoded paths.
-    let report = sync::pull(&CLAUDE_CODE, &b.home, &b.tok, &mut b.state, &store).unwrap();
+    let report = sync::pull(&CLAUDE_CODE, &b.home, &b.tok, &mut b.state, &store, false).unwrap();
     assert_eq!(report.pulled, 2);
     let restored = b.session_path("dev/proj", "11111111-aaaa");
     assert!(restored.exists(), "expected {}", restored.display());
@@ -82,7 +82,7 @@ fn two_machine_roundtrip() {
     );
 
     // Pull again: nothing to do.
-    let report = sync::pull(&CLAUDE_CODE, &b.home, &b.tok, &mut b.state, &store).unwrap();
+    let report = sync::pull(&CLAUDE_CODE, &b.home, &b.tok, &mut b.state, &store, false).unwrap();
     assert_eq!(report.pulled, 0);
     assert_eq!(report.unchanged, 2);
 }
@@ -102,7 +102,7 @@ fn deleted_sessions_are_not_resurrected() {
     assert_eq!(marked, 1);
 
     // Pull must NOT bring it back.
-    let report = sync::pull(&CLAUDE_CODE, &a.home, &a.tok, &mut a.state, &store).unwrap();
+    let report = sync::pull(&CLAUDE_CODE, &a.home, &a.tok, &mut a.state, &store, false).unwrap();
     assert_eq!(report.pulled, 0);
     assert_eq!(report.skipped_deleted, 1);
     assert!(!a.session_path("dev/proj", "11111111-aaaa").exists());
@@ -124,13 +124,13 @@ fn newer_local_content_is_never_clobbered() {
     let path_b = b.write_session("dev/proj", "11111111-aaaa", "newer local\n");
     filetime::set_file_mtime(&path_b, filetime::FileTime::from_unix_time(2_000_000, 0)).unwrap();
 
-    let report = sync::pull(&CLAUDE_CODE, &b.home, &b.tok, &mut b.state, &store).unwrap();
+    let report = sync::pull(&CLAUDE_CODE, &b.home, &b.tok, &mut b.state, &store, false).unwrap();
     assert_eq!(report.skipped_newer_local, 1);
     assert_eq!(std::fs::read_to_string(&path_b).unwrap(), "newer local\n");
 
     // Reverse case: B's file is older than the store's -> it is replaced, with a backup kept.
     filetime::set_file_mtime(&path_b, filetime::FileTime::from_unix_time(500_000, 0)).unwrap();
-    let report = sync::pull(&CLAUDE_CODE, &b.home, &b.tok, &mut b.state, &store).unwrap();
+    let report = sync::pull(&CLAUDE_CODE, &b.home, &b.tok, &mut b.state, &store, false).unwrap();
     assert_eq!(report.pulled, 1);
     assert_eq!(std::fs::read_to_string(&path_b).unwrap(), "old remote\n");
     let bak = path_b.with_extension("jsonl.codesync-bak");
@@ -144,4 +144,53 @@ fn adapter_detection() {
     assert!(!CLAUDE_CODE.detect(&a.home));
     a.write_session("dev/proj", "11111111-aaaa", "x\n");
     assert!(CLAUDE_CODE.detect(&a.home));
+}
+
+#[test]
+fn expanded_scopes_and_plugin_opt_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = Machine::new(tmp.path(), "machine_a");
+    let dot = a.home.join(".claude");
+    let w = |rel: &str, data: &str| {
+        let p = dot.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, data).unwrap();
+    };
+    w("CLAUDE.md", "global instructions");
+    w("settings.json", "{}");
+    w("history.jsonl", "{}\n");
+    w("agents/reviewer.md", "agent");
+    w("skills/deploy/SKILL.md", "skill");
+    w("rules/style.md", "rule");
+    w("tasks/t1.json", "{}");
+    w("plugins/installed_plugins.json", "{}");
+    w("plugins/cache/huge/blob.bin", "xxxxxxxx");
+
+    let tok = &a.tok;
+    let default_scan = CLAUDE_CODE.scan(&a.home, tok, false).unwrap();
+    let logicals: Vec<&str> = default_scan.iter().map(|e| e.logical.as_str()).collect();
+    for expected in [
+        "meta/CLAUDE.md",
+        "meta/settings.json",
+        "meta/history.jsonl",
+        "agents/reviewer.md",
+        "skills/deploy/SKILL.md",
+        "rules/style.md",
+        "tasks/t1.json",
+    ] {
+        assert!(logicals.contains(&expected), "missing {expected}: {logicals:?}");
+    }
+    // Plugins never sync by default.
+    assert!(!logicals.iter().any(|l| l.starts_with("plugins/")));
+
+    // Opt-in includes the manifest but NEVER the cache.
+    let with_plugins = CLAUDE_CODE.scan(&a.home, tok, true).unwrap();
+    let logicals: Vec<&str> = with_plugins.iter().map(|e| e.logical.as_str()).collect();
+    assert!(logicals.contains(&"plugins/installed_plugins.json"));
+    assert!(!logicals.iter().any(|l| l.contains("cache")), "cache leaked: {logicals:?}");
+
+    // File roots resolve back to the right absolute path on another machine.
+    let b = Machine::new(tmp.path(), "machine_b");
+    let abs = CLAUDE_CODE.resolve("meta/CLAUDE.md", &b.home, &b.tok, false).unwrap();
+    assert_eq!(abs, b.home.join(".claude").join("CLAUDE.md"));
 }
