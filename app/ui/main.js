@@ -91,6 +91,11 @@ function renderAll() {
   $("c-size").textContent = fmtMB(claude.bytes || 0);
   $("status-dot").className = "dot ok";
   $("status-text").textContent = "Synced";
+  const setStore = $("set-store");
+  if (setStore) {
+    setStore.textContent = status.storeDesc || "not set";
+    setStore.title = status.storeDetail || "";
+  }
   renderStatusLine();
 
   const ul = $("tool-list");
@@ -207,11 +212,6 @@ window.addEventListener("DOMContentLoaded", async () => {
   setPending(!isSetup());
   $("open-setup").addEventListener("click", () => invoke("show_onboarding"));
 
-  // "Replay first launch" is a development tool only.
-  invoke("is_dev").then((dev) => {
-    if (!dev) $("reset-firstrun").style.display = "none";
-  });
-
   // Real progress from the engine's chunked push.
   tauri?.event.listen("sync-progress", (e) => {
     const { done, total } = e.payload;
@@ -259,12 +259,6 @@ window.addEventListener("DOMContentLoaded", async () => {
     await runSync(true);
   });
 
-  $("reset-firstrun").addEventListener("click", async () => {
-    localStorage.removeItem("setupDone");
-    await tauri?.event.emit("first-run-reset").catch(() => {});
-    location.reload();
-  });
-
   $("hint-close").addEventListener("click", () => {
     $("hint").classList.add("hidden");
     setTimeout(fitWindow, 260);
@@ -277,12 +271,10 @@ window.addEventListener("DOMContentLoaded", async () => {
   $("back-tool").addEventListener("click", () => goTo(0));
   $("back-settings").addEventListener("click", () => goTo(0));
 
-  // Settings extras (cosmetic in M2)
-  $("onboarding").addEventListener("click", () => invoke("show_onboarding"));
-  $("grant").addEventListener("click", (e) => {
-    e.target.classList.remove("shake");
-    void e.target.offsetWidth;
-    e.target.classList.add("shake");
+  // Change storage: open the assistant directly at the storage step.
+  $("change-store").addEventListener("click", async () => {
+    await invoke("show_onboarding");
+    tauri?.event.emit("open-at-storage");
   });
 
   $("quit").addEventListener("click", () => invoke("quit_app"));

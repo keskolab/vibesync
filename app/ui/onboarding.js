@@ -263,6 +263,11 @@ function update() {
 
 window.addEventListener("DOMContentLoaded", () => {
   tauri?.core.invoke("get_status").then((s) => { existing = s; }).catch(() => {});
+  tauri?.event.listen("open-at-storage", () => {
+    tauri?.core.invoke("get_status").then((s) => { existing = s; }).catch(() => {});
+    step = 2;
+    update();
+  });
   renderTools();
   renderStorage();
   update();
