@@ -220,7 +220,8 @@ function renderAll() {
     sl.innerHTML = `<li>
       ${ICONS.shared}
       <div class="tlabel"><span class="tname">Global Skills <span class="name-note">(shared by all AI tools)</span></span><span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"}, ${fmtSizeStr(status.sharedBytes)}${newBadge(status.sharedNew, status.sharedNewMs)}<br>Path: ${SKILLS_PATH}</span></div>
-      <label class="switch"><input type="checkbox" ${status.sharedEnabled ? "checked" : ""} /><span class="knob"></span></label>`;
+      <label class="switch"><input type="checkbox" ${status.sharedEnabled ? "checked" : ""} /><span class="knob"></span></label>
+      <span class="chevron-spacer"></span>`;
     sl.querySelector("label.switch").addEventListener("click", (e) => e.stopPropagation());
     sl.querySelector("input").addEventListener("change", async (e) => {
       status = await invoke("set_scope_enabled", { scope: "shared", enabled: e.target.checked });

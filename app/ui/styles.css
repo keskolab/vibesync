@@ -359,6 +359,13 @@ header {
   flex-shrink: 0;
   margin-left: -2px;
 }
+/* Occupies exactly a chevron's box — rows without one (Global Skills) keep
+   their switch in the same column as the tool rows. */
+.chevron-spacer {
+  width: 11px;
+  flex-shrink: 0;
+  margin-left: -2px;
+}
 .toggles li.muted .row-icon,
 .toggles li.muted .tlabel {
   opacity: 0.45;
