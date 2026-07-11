@@ -99,6 +99,7 @@ fn detect_onboarding_tools() -> Vec<OnboardTool> {
         OnboardTool { id: "codex", name: "Codex", installed: vibesync_engine::codex::detect(&home), supported: true, sessions: count_jsonl(".codex/sessions") },
         OnboardTool { id: "opencode", name: "OpenCode", installed: vibesync_engine::opencode::detect(&home), supported: true, sessions: 0 },
         OnboardTool { id: "zed", name: "Zed", installed: vibesync_engine::zed::detect(), supported: true, sessions: 0 },
+        OnboardTool { id: "copilot", name: "Copilot CLI", installed: vibesync_engine::copilot::detect(&home), supported: true, sessions: 0 },
         OnboardTool { id: "vscode", name: "VS Code", installed: vibesync_engine::vscode::detect(), supported: true, sessions: vibesync_engine::vscode::light_counts().0 },
     ]
 }

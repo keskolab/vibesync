@@ -30,6 +30,9 @@ const ICONS = {
   // Zed: framed bold Z.
   zed:
     '<svg class="row-icon" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M3 1.5h10A1.5 1.5 0 0 1 14.5 3v10a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 13V3A1.5 1.5 0 0 1 3 1.5zm0 1.5v10h10V3H3zm2 1.7h6v1.5l-3.9 4.1H11v1.5H5v-1.5l3.9-4.1H5V4.7z"/></svg>',
+  // Copilot CLI: goggle visor with two eyes.
+  copilot:
+    '<svg class="row-icon" viewBox="0 0 16 16"><path d="M8 2.5c-2.9 0-5.2 1-5.6 2.9L2 8.1c-.6.2-1 .8-1 1.4v1.6c0 .3.1.5.3.7 1.6 1.3 4 2 6.7 2s5.1-.7 6.7-2c.2-.2.3-.4.3-.7V9.5c0-.6-.4-1.2-1-1.4l-.4-2.7C13.2 3.5 10.9 2.5 8 2.5zm-2.4 6c.5 0 .9.4.9.9v1.4c0 .5-.4.9-.9.9s-.9-.4-.9-.9V9.4c0-.5.4-.9.9-.9zm4.8 0c.5 0 .9.4.9.9v1.4c0 .5-.4.9-.9.9s-.9-.4-.9-.9V9.4c0-.5.4-.9.9-.9zM8 4c2.3 0 3.9.7 4.1 1.8.2 1 .1 1.6-.2 1.9-.6.5-2 .7-3.9.7s-3.3-.2-3.9-.7c-.3-.3-.4-.9-.2-1.9C4.1 4.7 5.7 4 8 4z"/></svg>',
   // OpenCode: open bracket-block.
   opencode:
     '<svg class="row-icon" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h9A1.5 1.5 0 0 1 14 3.5v9A1.5 1.5 0 0 1 12.5 14h-9A1.5 1.5 0 0 1 2 12.5v-9zm3.6 2.1L3.2 8l2.4 2.4.9-.9L4.9 8l1.6-1.5-.9-.9zM10 5.6l-.9.9L10.7 8 9.1 9.5l.9.9L12.4 8 10 5.6z"/></svg>',
@@ -269,6 +272,9 @@ function openTool(t) {
     ],
     zed: [
       { tool: "zed", name: "Agent threads", sub: "Zed AI threads (sync while Zed is closed)", on: t.enabled },
+    ],
+    copilot: [
+      { tool: "copilot", name: "CLI sessions", sub: "Standalone copilot sessions (VS Code chats sync via VS Code)", on: t.enabled },
     ],
   };
   for (const s of SCOPES[t.id] || []) {

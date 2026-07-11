@@ -6,6 +6,7 @@ pub mod codec;
 pub mod codex;
 pub mod opencode;
 pub mod config;
+pub mod copilot;
 pub mod registry;
 pub mod scanner;
 pub mod state;

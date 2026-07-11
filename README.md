@@ -88,7 +88,8 @@ The app appears in your menu bar. Click it, open the Setup Assistant, choose whe
 | OpenCode | Session records sync as an archive; in-app visibility being verified | Done |
 | Global skills | `~/.agents/skills` ([Agent Skills spec](https://agentskills.io)) shared across all tools and machines | Done |
 | Windows build | Same app, same store, mixed Mac + Windows fleets | Done |
-| More tools | Copilot CLI, others on request | Planned |
+| Copilot CLI | Standalone `copilot` sessions follow you between machines | Done |
+| More tools | Others on request | Planned |
 
 #### Every file VibeSync touches
 
@@ -111,6 +112,8 @@ Transparency matters when a tool reads your AI sessions. This is the complete li
 | OpenCode | `~/.local/share/opencode/storage/` | Syncs |
 | OpenCode | `~/.local/share/opencode/opencode.db` | Read-only, for the stats shown in the app — never written |
 | Zed | `.../Zed/threads/threads.db` ² | Syncs thread rows (newest wins) |
+| Copilot CLI | `~/.copilot/session-state/` | Syncs |
+| Copilot CLI | `~/.copilot/config.json`, `settings.json`, `logs/` | Never touched — local auth/trust settings stay local |
 | All tools | `~/.agents/skills/` | Syncs global skills ([Agent Skills spec](https://agentskills.io)) |
 
 macOS: `~/Library/Application Support/Code/User/workspaceStorage/`
@@ -140,6 +143,7 @@ Everything under `v1/files/`, each file paired with a small `.meta` sidecar; enc
 | `codex/sessions/`, `codex/index/` | Codex transcripts and each machine's session index |
 | `opencode/storage/` | OpenCode session records |
 | `zed/threads/` | Zed agent threads |
+| `copilot/session-state/` | Copilot CLI sessions |
 | `shared/skills/` | Global skills |
 
 ##### License & contributions
