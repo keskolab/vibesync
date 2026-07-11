@@ -91,6 +91,12 @@ async fn set_store(
         codesync_engine::open_store(&store, passphrase.as_deref())?;
         let paths = syncer::paths(&app)?;
         let mut cfg = syncer::load_config(&paths)?.unwrap_or(syncer::default_config()?);
+        // A different store means the sync state (what's already uploaded,
+        // what was seen) belongs to the OLD store — reset it so the next
+        // sync pushes everything to the new one.
+        if serde_json::to_string(&cfg.store).ok() != serde_json::to_string(&store).ok() {
+            let _ = std::fs::remove_file(&paths.state);
+        }
         cfg.store = store;
         cfg.passphrase = passphrase;
         syncer::save_config(&paths, &cfg)?;
