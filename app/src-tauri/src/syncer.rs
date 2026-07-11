@@ -712,6 +712,13 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         }
     }
     if zed_on {
+        // Zed rows are pushed here, not via the generic entry scan — its scan
+        // yields db rows, not files. This call was missing entirely: no
+        // machine ever published a thread, so the store's zed/ namespace
+        // stayed empty fleet-wide.
+        if let Ok(n) = engine::zed::push(&home, &mut state, store.as_ref(), &engine::machine_name()) {
+            push.pushed += n;
+        }
         if let Ok(r) = engine::zed::apply(&home, &mut state, store.as_ref(), &listing, &tick) {
             *new_by_tool.entry("zed").or_default() += r.applied;
             pull.pulled += r.applied;
@@ -759,7 +766,21 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
 
     let (registry_pushed, registry_applied, registry_ghosts, registry_healed) =
         if config.sync_registry && claude_on {
-            sync_registry(paths, store.as_ref(), &tok, &mut state, &listing).unwrap_or((0, 0, 0, 0))
+            // Registry sync is best-effort — a failure must not fail the whole
+            // sync — but it has to leave a trace: silently mapping errors to
+            // zeros made a real Windows failure indistinguishable from
+            // "nothing to do".
+            let err_path = paths.config.parent().unwrap().join("registry_last_error.txt");
+            match sync_registry(paths, store.as_ref(), &tok, &mut state, &listing) {
+                Ok(r) => {
+                    let _ = std::fs::remove_file(&err_path);
+                    r
+                }
+                Err(e) => {
+                    let _ = std::fs::write(&err_path, format!("{e:#}"));
+                    (0, 0, 0, 0)
+                }
+            }
         } else {
             (0, 0, 0, 0)
         };
@@ -812,15 +833,42 @@ pub fn scope_of(logical: &str) -> Option<&'static str> {
 
 // ---------------------------------------------------------------- registry
 
-/// Locate the Claude desktop app's session registry dir (macOS):
-/// ~/Library/Application Support/Claude/claude-code-sessions/<org>/<user>/
+/// Locate the Claude desktop app's session registry dir:
+/// - macOS:   ~/Library/Application Support/Claude/claude-code-sessions/<org>/<user>/
+/// - Windows: %APPDATA%\Claude\claude-code-sessions\<org>\<user>\ for an
+///   unpackaged install — but the Store (MSIX) build virtualizes %APPDATA%
+///   into its package sandbox, invisible to outside processes, so also probe
+///   %LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\... (that
+///   physical path is exactly what the packaged app reads and writes).
 fn registry_dir() -> Option<PathBuf> {
-    if !cfg!(target_os = "macos") {
-        return None; // Windows location unknown until the app exists there
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(cfg) = dirs::config_dir() {
+        bases.push(cfg.join("Claude").join("claude-code-sessions"));
     }
-    let base = dirs::home_dir()?
-        .join("Library/Application Support/Claude/claude-code-sessions");
-    for org in std::fs::read_dir(&base).ok()?.flatten() {
+    #[cfg(windows)]
+    {
+        if let Some(local) = dirs::data_local_dir() {
+            if let Ok(pkgs) = std::fs::read_dir(local.join("Packages")) {
+                for p in pkgs.flatten() {
+                    if p.file_name().to_string_lossy().starts_with("Claude_") {
+                        bases.push(
+                            p.path()
+                                .join("LocalCache")
+                                .join("Roaming")
+                                .join("Claude")
+                                .join("claude-code-sessions"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    bases.iter().find_map(|b| first_org_user_dir(b))
+}
+
+/// First <org>/<user> directory two levels below `base`, if any.
+fn first_org_user_dir(base: &std::path::Path) -> Option<PathBuf> {
+    for org in std::fs::read_dir(base).ok()?.flatten() {
         if !org.path().is_dir() {
             continue;
         }
@@ -874,7 +922,16 @@ fn sync_registry(
     listing: &[(String, engine::RemoteMeta)],
 ) -> Result<(usize, usize, usize, usize)> {
     use engine::registry;
-    let Some(dir) = registry_dir() else { return Ok((0, 0, 0, 0)) };
+    let Some(dir) = registry_dir() else {
+        // Surface the miss instead of silently no-opping: on a machine where
+        // the desktop app IS installed, "dir not found" is a real bug.
+        let base = dirs::config_dir().map(|c| c.join("Claude").join("claude-code-sessions"));
+        anyhow::bail!(
+            "claude-code-sessions registry dir not found (base={:?}, exists={})",
+            base,
+            base.as_deref().map(|b| b.exists()).unwrap_or(false)
+        );
+    };
 
     // Session IDs we've written to the local registry from remote — lets us
     // safely remove ghost entries we created without ever touching the
@@ -961,6 +1018,7 @@ fn sync_registry(
         let Some((bytes, _)) = store.get(logical)? else { continue };
         let Ok(mut remote) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
         registry::expand_paths(&mut remote, tok);
+        registry::normalize_separators(&mut remote);
 
         let target = dir.join(format!("{sid}.json"));
 

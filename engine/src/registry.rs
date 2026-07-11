@@ -63,6 +63,26 @@ pub fn expand_paths(entry: &mut Value, tok: &Tokenizer) {
     map_paths(entry, &|s| tok.expand_plain(s));
 }
 
+/// Make each path field's separators self-consistent after cross-platform
+/// expansion: a `${HOME}`-tokenized entry keeps the origin machine's
+/// separators in its tail, so expanding on the other OS yields mixed
+/// separators (`C:\Users\x/dev/proj`). Native Windows entries use `\` and
+/// POSIX entries use `/`; the desktop app parses the registry unforgivingly,
+/// so match the native shape exactly. Drive-letter paths get `\`, absolute
+/// POSIX paths get `/`; anything else is left untouched.
+pub fn normalize_separators(entry: &mut Value) {
+    map_paths(entry, &|s| {
+        let bytes = s.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            s.replace('/', "\\")
+        } else if s.starts_with('/') {
+            s.replace('\\', "/")
+        } else {
+            s.to_string()
+        }
+    });
+}
+
 fn map_paths(entry: &mut Value, f: &dyn Fn(&str) -> String) {
     if let Some(obj) = entry.as_object_mut() {
         for key in PATH_FIELDS {
@@ -173,6 +193,22 @@ mod tests {
         assert_eq!(m["completedTurns"], 9); // max wins
         assert_eq!(m["lastActivityAt"], 2000);
         assert!(validate(&m).is_ok());
+    }
+
+    #[test]
+    fn normalize_separators_matches_native_shape() {
+        let mut e = entry("aaaa", 1000);
+        // Mac-tokenized tail expanded on Windows: mixed separators.
+        e["cwd"] = json!("C:\\Users\\you/Development/7-rust/vibesync");
+        // Windows-tokenized tail expanded on macOS.
+        e["originCwd"] = json!("/Users/you\\Temp\\vibesync");
+        normalize_separators(&mut e);
+        assert_eq!(e["cwd"], "C:\\Users\\you\\Development\\7-rust\\vibesync");
+        assert_eq!(e["originCwd"], "/Users/you/Temp/vibesync");
+        // Relative/other paths untouched.
+        e["planPath"] = json!("plans/foo.md");
+        normalize_separators(&mut e);
+        assert_eq!(e["planPath"], "plans/foo.md");
     }
 
     #[test]
