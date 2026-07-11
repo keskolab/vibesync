@@ -22,4 +22,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
 anyhow = "1"
+url = "2"
 codesync-engine = { path = "../../engine" }

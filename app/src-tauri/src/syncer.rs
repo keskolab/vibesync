@@ -170,6 +170,13 @@ pub fn status(paths: &Paths) -> Result<Status> {
         engine::StoreConfig::S3 { bucket, endpoint, .. } => {
             format!("Bucket: {bucket} @ {endpoint} (encrypted)")
         }
+        engine::StoreConfig::AzureSas { container_sas_url } => {
+            let host = url::Url::parse(container_sas_url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .unwrap_or_default();
+            format!("Azure: {host} (encrypted)")
+        }
     });
     let last_sync_ms = std::fs::metadata(&paths.state)
         .and_then(|m| m.modified())

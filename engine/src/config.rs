@@ -25,6 +25,8 @@ pub enum StoreConfig {
         /// Content is always encrypted on S3-class backends.
         secret_access_key: String,
     },
+    /// Azure Blob Storage via a container SAS URL. Always encrypted.
+    AzureSas { container_sas_url: String },
 }
 
 /// Build the store described by `config`. `passphrase` is required whenever
@@ -53,6 +55,9 @@ pub fn open_store(config: &StoreConfig, passphrase: Option<&str>) -> Result<Box<
                 codec_for(true)?,
             )?))
         }
+        StoreConfig::AzureSas { container_sas_url } => Ok(Box::new(
+            crate::store::AzureSasStore::new(container_sas_url, codec_for(true)?)?,
+        )),
     }
 }
 

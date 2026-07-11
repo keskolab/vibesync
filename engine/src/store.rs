@@ -334,3 +334,125 @@ mod tests {
             .any(|(l, _)| l == "codesync-selftest/a.jsonl"));
     }
 }
+
+// ---------------------------------------------------------------- azure
+
+/// Azure Blob Storage via a container SAS URL — the user pastes one string
+/// (`https://<acct>.blob.core.windows.net/<container>?sv=...&sig=...`), no
+/// account keys or signing code needed.
+pub struct AzureSasStore {
+    base: url::Url,
+    codec: Box<dyn Codec>,
+    agent: ureq::Agent,
+}
+
+impl AzureSasStore {
+    pub fn new(container_sas_url: &str, codec: Box<dyn Codec>) -> Result<Self> {
+        let base: url::Url = container_sas_url.parse().context("invalid Azure SAS URL")?;
+        if base.query().unwrap_or("").is_empty() {
+            anyhow::bail!("Azure URL is missing its SAS query (the part after '?')");
+        }
+        Ok(Self {
+            base,
+            codec,
+            agent: ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).build(),
+        })
+    }
+
+    fn blob_url(&self, key: &str) -> url::Url {
+        let mut u = self.base.clone();
+        {
+            let mut segs = u.path_segments_mut().expect("base URL");
+            for part in key.split('/') {
+                segs.push(part);
+            }
+        }
+        u
+    }
+
+    fn put_bytes(&self, key: &str, body: &[u8]) -> Result<()> {
+        self.agent
+            .put(self.blob_url(key).as_str())
+            .set("x-ms-blob-type", "BlockBlob")
+            .send_bytes(body)
+            .with_context(|| format!("PUT {key}"))?;
+        Ok(())
+    }
+
+    fn get_bytes(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        match self.agent.get(self.blob_url(key).as_str()).call() {
+            Ok(resp) => {
+                let mut buf = Vec::new();
+                resp.into_reader().read_to_end(&mut buf)?;
+                Ok(Some(buf))
+            }
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            Err(e) => Err(anyhow::Error::from(e)).with_context(|| format!("GET {key}")),
+        }
+    }
+}
+
+impl SyncStore for AzureSasStore {
+    fn put(&self, logical: &str, plain: &[u8], meta: &RemoteMeta) -> Result<()> {
+        let encoded = self.codec.encode(plain)?;
+        self.put_bytes(&format!("v1/files/{logical}{}", self.codec.suffix()), &encoded)?;
+        self.put_bytes(&format!("v1/files/{logical}{META_SUFFIX}"), &serde_json::to_vec(meta)?)?;
+        Ok(())
+    }
+
+    fn get(&self, logical: &str) -> Result<Option<(Vec<u8>, RemoteMeta)>> {
+        let Some(meta_bytes) = self.get_bytes(&format!("v1/files/{logical}{META_SUFFIX}"))? else {
+            return Ok(None);
+        };
+        let meta: RemoteMeta = serde_json::from_slice(&meta_bytes)?;
+        let Some(encoded) =
+            self.get_bytes(&format!("v1/files/{logical}{}", self.codec.suffix()))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((self.codec.decode(&encoded)?, meta)))
+    }
+
+    fn list(&self) -> Result<Vec<(String, RemoteMeta)>> {
+        let mut names = Vec::new();
+        let mut marker = String::new();
+        loop {
+            let mut u = self.base.clone();
+            u.query_pairs_mut()
+                .append_pair("restype", "container")
+                .append_pair("comp", "list")
+                .append_pair("prefix", "v1/files/");
+            if !marker.is_empty() {
+                u.query_pairs_mut().append_pair("marker", &marker);
+            }
+            let xml = self.agent.get(u.as_str()).call().context("LIST blobs")?.into_string()?;
+            // Minimal XML scrape: blob names inside <Name>...</Name>.
+            for part in xml.split("<Name>").skip(1) {
+                if let Some(name) = part.split("</Name>").next() {
+                    if let Some(base) = name.strip_suffix(META_SUFFIX) {
+                        if let Some(logical) = base.strip_prefix("v1/files/") {
+                            names.push(logical.to_string());
+                        }
+                    }
+                }
+            }
+            marker = xml
+                .split("<NextMarker>")
+                .nth(1)
+                .and_then(|s| s.split("</NextMarker>").next())
+                .unwrap_or("")
+                .to_string();
+            if marker.is_empty() {
+                break;
+            }
+        }
+        let mut out = Vec::with_capacity(names.len());
+        for logical in names {
+            if let Some(meta_bytes) = self.get_bytes(&format!("v1/files/{logical}{META_SUFFIX}"))? {
+                out.push((logical, serde_json::from_slice(&meta_bytes)?));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+}

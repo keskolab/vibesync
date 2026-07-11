@@ -16,6 +16,6 @@ pub use codec::{AgeCodec, Codec, GzipCodec};
 pub use config::{machine_name, open_store, StoreConfig};
 pub use scanner::FileEntry;
 pub use state::{FileState, SyncState};
-pub use store::{FolderStore, RemoteMeta, S3Store, SyncStore};
+pub use store::{AzureSasStore, FolderStore, RemoteMeta, S3Store, SyncStore};
 pub use sync::Report;
 pub use tokenizer::Tokenizer;

@@ -77,6 +77,30 @@ async fn set_sync_plugins(app: tauri::AppHandle, enabled: bool) -> Result<syncer
     .map_err(|e| format!("{e:#}"))
 }
 
+/// Set the sync store (folder path, S3/R2 credentials, or Azure SAS URL)
+/// plus optional encryption passphrase. The next milestone points the
+/// onboarding UI here.
+#[tauri::command]
+async fn set_store(
+    app: tauri::AppHandle,
+    store: codesync_engine::StoreConfig,
+    passphrase: Option<String>,
+) -> Result<syncer::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Validate before saving: refuse configs the engine can't open.
+        codesync_engine::open_store(&store, passphrase.as_deref())?;
+        let paths = syncer::paths(&app)?;
+        let mut cfg = syncer::load_config(&paths)?.unwrap_or(syncer::default_config()?);
+        cfg.store = store;
+        cfg.passphrase = passphrase;
+        syncer::save_config(&paths, &cfg)?;
+        syncer::status(&paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
 /// Dev-only UI affordances (e.g. "Replay first launch") key off this.
 #[tauri::command]
 fn is_dev() -> bool {
@@ -277,7 +301,8 @@ pub fn run() {
             is_dev,
             get_settings,
             set_autostart,
-            set_autosync
+            set_autosync,
+            set_store
         ])
         .setup(|app| {
             // Menu bar app: no Dock icon.
