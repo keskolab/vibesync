@@ -1,6 +1,7 @@
 /* Onboarding window — a regular titled window, solid background. */
 
 :root {
+  color-scheme: light dark; /* native widgets (select popups) follow theme */
   --win-bg: #f5f5f7;
   --input-bg: #fff;
   --input-border: rgba(0, 0, 0, 0.15);
@@ -290,6 +291,10 @@ body.onboarding .toggles {
   outline: none;
   user-select: text;
   -webkit-user-select: text;
+}
+.field select option {
+  background: var(--input-bg);
+  color: var(--text);
 }
 .field input:focus,
 .field select:focus {

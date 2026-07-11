@@ -57,7 +57,7 @@ const needsPassphrase = () => storage !== "folder";
 
 let OB_TOOLS = []; // filled by real detection at boot
 
-const STEPS = 7;
+const STEPS = 6;
 let step = 0;
 let storage = "folder";
 
@@ -283,10 +283,6 @@ function renderDots() {
   }
 }
 
-function accessComplete() {
-  return [...document.querySelectorAll(".grant-row[data-granted]")].every((r) => r.dataset.granted === "true");
-}
-
 // Nav-only refresh: safe to call on every keystroke — never rebuilds DOM
 // that the user is typing into.
 function refreshNav() {
@@ -296,8 +292,7 @@ function refreshNav() {
   next.textContent = step === 0 ? "Get Started" : step === STEPS - 1 ? (existing?.configured ? "Switch Storage & Sync" : "Start First Sync") : "Continue";
   next.disabled =
     (step === 3 && !buildStore()) ||
-    (step === 4 && needsPassphrase() && !passphraseValid()) ||
-    (step === 5 && !accessComplete());
+    (step === 4 && needsPassphrase() && !passphraseValid());
 }
 
 let renderedStep = -1;
@@ -311,7 +306,7 @@ function update() {
     renderedStep = step;
     if (step === 3) renderConfigure();
     if (step === 4) renderEncryption();
-    if (step === 6) renderDone();
+    if (step === 5) renderDone();
   }
   refreshNav();
 }
@@ -352,10 +347,6 @@ window.addEventListener("DOMContentLoaded", async () => {
       // reset so reopening from Settings starts fresh
       setTimeout(() => {
         step = 0;
-        document.querySelectorAll(".grant-row").forEach((r) => {
-          r.dataset.granted = "false";
-          r.querySelector(".grant-btn").textContent = "Grant…";
-        });
         update();
       }, 400);
       return;
@@ -368,11 +359,4 @@ window.addEventListener("DOMContentLoaded", async () => {
     update();
   });
 
-  document.querySelectorAll(".grant-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      btn.closest(".grant-row").dataset.granted = "true";
-      btn.textContent = "✓ Granted";
-      update();
-    });
-  });
 });
