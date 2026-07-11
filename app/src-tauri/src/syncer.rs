@@ -315,7 +315,11 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     if claude_on {
         for dir in &dirs {
             for prefix in CLAUDE_CODE.logical_prefixes(include_plugins) {
-                let p = if dir == ".claude" { prefix.to_string() } else { format!("profiles/{dir}/{prefix}") };
+                let p = if dir == ".claude" {
+                    format!("claude/{prefix}")
+                } else {
+                    format!("claude/profiles/{dir}/{prefix}")
+                };
                 state.mark_deletions(&p, &entries);
             }
         }
@@ -476,7 +480,7 @@ fn sync_registry(
 
     // PUSH: tokenized, validated entries into the registry/ namespace.
     let mut pushed = 0usize;
-    let scanned: Vec<String> = local.keys().map(|s| format!("registry/{s}.json")).collect();
+    let scanned: Vec<String> = local.keys().map(|s| format!("claude/registry/{s}.json")).collect();
     let home = dirs::home_dir().context("no home dir")?;
     for (sid, (entry, path)) in &local {
         if registry::validate(entry).is_err() {
@@ -489,7 +493,7 @@ fn sync_registry(
         registry::tokenize_paths(&mut out, tok);
         let bytes = serde_json::to_vec(&out)?;
         let hash = engine::scanner::hash_bytes(&bytes);
-        let logical = format!("registry/{sid}.json");
+        let logical = format!("claude/registry/{sid}.json");
         if state.files.get(&logical).map(|s| s.hash == hash).unwrap_or(false) {
             continue;
         }
@@ -508,7 +512,7 @@ fn sync_registry(
     // Locally deleted entries must not resurrect.
     let present: std::collections::BTreeSet<&str> = scanned.iter().map(|s| s.as_str()).collect();
     for (logical, st) in state.files.iter_mut() {
-        if logical.starts_with("registry/") && !st.deleted_locally && !present.contains(logical.as_str()) {
+        if logical.starts_with("claude/registry/") && !st.deleted_locally && !present.contains(logical.as_str()) {
             st.deleted_locally = true;
         }
     }
@@ -519,7 +523,7 @@ fn sync_registry(
     let mut healed = 0usize;
     let mut backed_up = false;
     for (logical, meta) in store.list()? {
-        let Some(sid) = logical.strip_prefix("registry/").and_then(|s| s.strip_suffix(".json")) else {
+        let Some(sid) = logical.strip_prefix("claude/registry/").and_then(|s| s.strip_suffix(".json")) else {
             continue;
         };
         if let Some(st) = state.files.get(&logical) {

@@ -59,7 +59,7 @@ fn two_machine_roundtrip() {
     let entries = a.scan();
     assert_eq!(entries.len(), 2);
     assert!(
-        entries.iter().all(|e| e.logical.starts_with("projects/${EHOME}-dev-")),
+        entries.iter().all(|e| e.logical.starts_with("claude/projects/${EHOME}-dev-")),
         "encoded home must be tokenized: {:?}",
         entries.iter().map(|e| &e.logical).collect::<Vec<_>>()
     );
@@ -98,7 +98,7 @@ fn deleted_sessions_are_not_resurrected() {
 
     // Simulate Claude Code's retention cleanup deleting the transcript.
     std::fs::remove_file(a.session_path("dev/proj", "11111111-aaaa")).unwrap();
-    let marked = a.state.mark_deletions("projects", &a.scan());
+    let marked = a.state.mark_deletions("claude/projects", &a.scan());
     assert_eq!(marked, 1);
 
     // Pull must NOT bring it back.
@@ -170,27 +170,27 @@ fn expanded_scopes_and_plugin_opt_in() {
     let default_scan = CLAUDE_CODE.scan(&a.home, tok, false).unwrap();
     let logicals: Vec<&str> = default_scan.iter().map(|e| e.logical.as_str()).collect();
     for expected in [
-        "meta/CLAUDE.md",
-        "meta/settings.json",
-        "meta/history.jsonl",
-        "agents/reviewer.md",
-        "skills/deploy/SKILL.md",
-        "rules/style.md",
-        "tasks/t1.json",
+        "claude/meta/CLAUDE.md",
+        "claude/meta/settings.json",
+        "claude/meta/history.jsonl",
+        "claude/agents/reviewer.md",
+        "claude/skills/deploy/SKILL.md",
+        "claude/rules/style.md",
+        "claude/tasks/t1.json",
     ] {
         assert!(logicals.contains(&expected), "missing {expected}: {logicals:?}");
     }
     // Plugins never sync by default.
-    assert!(!logicals.iter().any(|l| l.starts_with("plugins/")));
+    assert!(!logicals.iter().any(|l| l.starts_with("claude/plugins/")));
 
     // Opt-in includes the manifest but NEVER the cache.
     let with_plugins = CLAUDE_CODE.scan(&a.home, tok, true).unwrap();
     let logicals: Vec<&str> = with_plugins.iter().map(|e| e.logical.as_str()).collect();
-    assert!(logicals.contains(&"plugins/installed_plugins.json"));
+    assert!(logicals.contains(&"claude/plugins/installed_plugins.json"));
     assert!(!logicals.iter().any(|l| l.contains("cache")), "cache leaked: {logicals:?}");
 
     // File roots resolve back to the right absolute path on another machine.
     let b = Machine::new(tmp.path(), "machine_b");
-    let abs = CLAUDE_CODE.resolve("meta/CLAUDE.md", &b.home, &b.tok, false).unwrap();
+    let abs = CLAUDE_CODE.resolve("claude/meta/CLAUDE.md", &b.home, &b.tok, false).unwrap();
     assert_eq!(abs, b.home.join(".claude").join("CLAUDE.md"));
 }

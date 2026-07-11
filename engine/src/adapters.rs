@@ -94,16 +94,20 @@ impl Adapter {
         tok: &Tokenizer,
         include_optional: bool,
     ) -> Result<Vec<FileEntry>> {
-        let ns = if dir == ".claude" { String::new() } else { format!("profiles/{dir}/") };
+        // Everything belongs to the claude/ tool namespace; extra config
+        // dirs (multi-account) nest under claude/profiles/<dir>/.
+        let ns = if dir == ".claude" {
+            "claude/".to_string()
+        } else {
+            format!("claude/profiles/{dir}/")
+        };
         let mut out = Vec::new();
         for root in self.active_roots(include_optional) {
             let rel = root.home_rel.replacen(".claude", dir, 1);
             let abs = join_home(home, &rel);
             let mut entries = scan_root(&abs, root.logical_prefix, tok, root.exts, root.exclude_dirs)?;
-            if !ns.is_empty() {
-                for e in &mut entries {
-                    e.logical = format!("{ns}{}", e.logical);
-                }
+            for e in &mut entries {
+                e.logical = format!("{ns}{}", e.logical);
             }
             out.extend(entries);
         }
@@ -154,6 +158,7 @@ impl Adapter {
         tok: &Tokenizer,
         include_optional: bool,
     ) -> Option<std::path::PathBuf> {
+        let logical = logical.strip_prefix("claude/")?;
         let logical = if dir == ".claude" {
             if logical.starts_with("profiles/") {
                 return None; // profile namespace belongs to a non-default dir
