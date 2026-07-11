@@ -22,6 +22,7 @@ const BACKENDS = [
 
 // Collected inputs for the chosen backend.
 const chosen = { path: null, fields: {}, passphrase: "" };
+let existing = null; // current app status, if already configured
 
 function buildStore() {
   const f = chosen.fields;
@@ -201,6 +202,19 @@ function renderDone() {
     <div><span>Encryption</span><b>${needsPassphrase() ? "Passphrase (age)" : "None (your folder)"}</b></div>
     <div><span>Tools</span><b>Claude Code, Codex</b></div>
     <div><span>This machine</span><b>MacBook&nbsp;Pro</b></div>`;
+  const old = document.getElementById("switch-warning");
+  if (old) old.remove();
+  if (existing?.configured) {
+    const warn = document.createElement("p");
+    warn.id = "switch-warning";
+    warn.className = "inline-note";
+    warn.style.cssText = "margin-top:12px;max-width:330px;text-align:left;color:var(--text-2)";
+    warn.innerHTML = "\u26a0\ufe0e <b>You are changing where sessions are stored.</b> " +
+      "Everything will be uploaded again to the new location on the next sync " +
+      "(this can take a few minutes). Your old location is not touched \u2014 " +
+      "it keeps its archive until you delete it yourself.";
+    document.getElementById("done-summary").after(warn);
+  }
 }
 
 // ---------- navigation ----------
@@ -224,7 +238,7 @@ function update() {
   renderDots();
   $("ob-back").classList.toggle("hidden-btn", step === 0 || step === STEPS - 1);
   const next = $("ob-next");
-  next.textContent = step === 0 ? "Get Started" : step === STEPS - 1 ? "Start First Sync" : "Continue";
+  next.textContent = step === 0 ? "Get Started" : step === STEPS - 1 ? (existing?.configured ? "Switch Storage & Sync" : "Start First Sync") : "Continue";
   next.disabled = (step === 3 && !buildStore()) || (step === 5 && !accessComplete());
 
   if (step === 3) renderConfigure();
@@ -233,6 +247,7 @@ function update() {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  tauri?.core.invoke("get_status").then((s) => { existing = s; }).catch(() => {});
   renderTools();
   renderStorage();
   update();
