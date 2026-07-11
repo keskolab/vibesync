@@ -390,9 +390,11 @@ header {
   display: flex;
   align-items: center;
   gap: 5px;
+  /* Anchor for the tooltip bubble: the full-width row, NOT the icon — a
+     fixed-width bubble hung off the icon overflows the 320px window. */
+  position: relative;
 }
 .help-tip {
-  position: relative;
   display: inline-flex;
   outline: none;
 }
@@ -408,9 +410,9 @@ header {
 /* Tooltip bubble: dark in both themes; resets the label's uppercase. */
 .tip-bubble {
   position: absolute;
-  left: -10px;
-  top: 18px;
-  width: 232px;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
   background: rgba(44, 44, 50, 0.98);
   color: rgba(255, 255, 255, 0.92);
   font-size: 11px;
