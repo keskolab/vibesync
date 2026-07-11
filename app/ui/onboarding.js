@@ -2,6 +2,9 @@
 // iCloud skips credentials and passphrase; everything else routes through them.
 
 const tauri = window.__TAURI__;
+const IS_MAC = /Mac/i.test(navigator.platform || navigator.userAgent);
+const DEVICE = IS_MAC ? "Mac" : "PC";       // "this Mac" / "this PC"
+const DEVICES = IS_MAC ? "Macs" : "computers"; // "your Macs" / "your computers"
 const $ = (id) => document.getElementById(id);
 
 // ---------- data ----------
@@ -201,13 +204,13 @@ function renderEncryption() {
       </div>`;
   } else {
     $("enc-title").textContent = "Choose a passphrase";
-    $("enc-sub").textContent = `Everything is encrypted on this Mac before it reaches ${b.name}. ${b.name === "External disk / USB" ? "Anyone with the disk" : b.name} only ever sees ciphertext.`;
+    $("enc-sub").textContent = `Everything is encrypted on this ${DEVICE} before it reaches ${b.name}. ${b.name === "External disk / USB" ? "Anyone with the disk" : b.name} only ever sees ciphertext.`;
     body.innerHTML = `
       <div class="form">
         <div class="field"><label>Passphrase</label><input type="password" id="pp1" placeholder="At least 12 characters" /></div>
         <div class="strength"><div class="fill" id="pp-strength"></div></div>
         <div class="field"><label>Confirm passphrase</label><input type="password" id="pp2" /></div>
-        <p class="inline-note">You'll enter the same passphrase on each machine. It never leaves your Macs &mdash; if you lose it, the data can't be recovered.</p>
+        <p class="inline-note">You'll enter the same passphrase on each machine. It never leaves your ${DEVICES} \u2014 if you lose it, the data can't be recovered.</p>
       </div>`;
     body.querySelector("#pp1").addEventListener("input", (e) => {
       chosen.passphrase = e.target.value;
@@ -284,6 +287,12 @@ function update() {
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
+  const tt = $("tools-title");
+  if (tt) tt.textContent = `Found on this ${DEVICE}`;
+  const fr = $("feat-resume");
+  if (fr) fr.textContent = `Resume any session on any of your ${DEVICES}`;
+  const dl = $("done-lede");
+  if (dl) dl.textContent = `Ready for the first sync from this ${DEVICE}.`;
   tauri?.core.invoke("get_status").then((s) => { existing = s; }).catch(() => {});
   try {
     const detected = await tauri?.core.invoke("detect_onboarding_tools");

@@ -4,6 +4,8 @@
 const tauri = window.__TAURI__;
 const invoke = (cmd, args) => tauri.core.invoke(cmd, args);
 const $ = (id) => document.getElementById(id);
+const IS_MAC = /Mac/i.test(navigator.platform || navigator.userAgent);
+const DEVICE = IS_MAC ? "Mac" : "PC";
 
 const ICONS = {
   "claude-code": '<svg class="row-icon" viewBox="0 0 16 16"><path d="M8 1l1.6 4.2L14 6.8l-3.4 2.9 1 4.3L8 11.7 4.4 14l1-4.3L2 6.8l4.4-1.6z"/></svg>',
@@ -143,7 +145,7 @@ async function refreshStatus() {
 
 function openTool(t) {
   $("tool-title").textContent = t.name;
-  $("tool-substatus").textContent = `${t.sessions} sessions · ${t.plans} plans on this Mac`;
+  $("tool-substatus").textContent = `${t.sessions} sessions · ${t.plans} plans on this ${DEVICE}`;
   const ul = $("tool-scopes");
   ul.innerHTML = "";
   for (const s of [
