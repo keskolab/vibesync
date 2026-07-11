@@ -18,6 +18,43 @@ static AUTOSYNC: AtomicBool = AtomicBool::new(false);
 
 const AUTOSYNC_INTERVAL_SECS: u64 = 15 * 60;
 
+/// True while a sync runs — drives the tray spinner.
+static SYNCING: AtomicBool = AtomicBool::new(false);
+
+/// Spin the tray icon until SYNCING clears, then restore the resting glyph.
+fn start_tray_spinner(app: tauri::AppHandle) {
+    if SYNCING.swap(true, Ordering::SeqCst) {
+        return; // already spinning
+    }
+    std::thread::spawn(move || {
+        let mut angle = 0.0f32;
+        while SYNCING.load(Ordering::SeqCst) {
+            if let Some(tray) = app.tray_by_id("main-tray") {
+                let _ = tray.set_icon(Some(tray_icon_at(angle)));
+                let _ = tray.set_icon_as_template(true);
+            }
+            angle += std::f32::consts::TAU / 12.0;
+            std::thread::sleep(std::time::Duration::from_millis(90));
+        }
+        if let Some(tray) = app.tray_by_id("main-tray") {
+            let _ = tray.set_icon(Some(tray_icon()));
+            let _ = tray.set_icon_as_template(true);
+        }
+    });
+}
+
+/// Notify only when the sync actually moved something — silence is health.
+fn notify_outcome(app: &tauri::AppHandle, outcome: &syncer::SyncOutcome) {
+    use tauri_plugin_notification::NotificationExt;
+    let body = match (outcome.pushed, outcome.pulled) {
+        (0, 0) => return,
+        (p, 0) => format!("Sync complete — {p} file{} uploaded", if p == 1 { "" } else { "s" }),
+        (0, q) => format!("Sync complete — {q} file{} arrived", if q == 1 { "" } else { "s" }),
+        (p, q) => format!("Sync complete — {p} up, {q} down"),
+    };
+    let _ = app.notification().builder().title("Code Sync").body(body).show();
+}
+
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
@@ -144,10 +181,16 @@ async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> 
     tauri::async_runtime::spawn_blocking(move || {
         use tauri::Emitter;
         let paths = syncer::paths(&app)?;
+        start_tray_spinner(app.clone());
         let emitter = app.clone();
-        syncer::sync_now(&paths, move |done, total| {
+        let result = syncer::sync_now(&paths, move |done, total| {
             let _ = emitter.emit("sync-progress", serde_json::json!({ "done": done, "total": total }));
-        })
+        });
+        SYNCING.store(false, Ordering::SeqCst);
+        if let Ok(outcome) = &result {
+            notify_outcome(&app, outcome);
+        }
+        result
     })
     .await
     .map_err(|e| e.to_string())?
@@ -204,11 +247,22 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
             }
             last = std::time::Instant::now();
             if let Ok(paths) = syncer::paths(&app) {
-                match syncer::sync_now(&paths, |_, _| {}) {
+                start_tray_spinner(app.clone());
+                let result = syncer::sync_now(&paths, |_, _| {});
+                SYNCING.store(false, Ordering::SeqCst);
+                match result {
                     Ok(outcome) => {
+                        notify_outcome(&app, &outcome);
                         let _ = app.emit("autosync-done", serde_json::json!(outcome));
                     }
                     Err(e) => {
+                        use tauri_plugin_notification::NotificationExt;
+                        let _ = app
+                            .notification()
+                            .builder()
+                            .title("Code Sync")
+                            .body(format!("Sync failed: {e:#}"))
+                            .show();
                         let _ = app.emit("autosync-error", format!("{e:#}"));
                     }
                 }
@@ -250,6 +304,11 @@ fn show_popover(app: tauri::AppHandle) {
 /// "sync" glyph used in the onboarding logo, so the prototype needs no asset
 /// pipeline. Geometry in the icon's 24pt space, scaled up. 3x3 supersampled.
 fn tray_icon() -> Image<'static> {
+    tray_icon_at(0.0)
+}
+
+/// The same glyph rotated by `angle` radians — frames for the sync spinner.
+fn tray_icon_at(angle: f32) -> Image<'static> {
     const S: usize = 44;
     let scale = S as f32 / 24.0;
     let c = 12.0 * scale;
@@ -286,7 +345,12 @@ fn tray_icon() -> Image<'static> {
         in_tri((x, y))
     };
     // Second arrow is the first rotated 180 degrees around the center.
+    let (sin_a, cos_a) = (-angle).sin_cos();
     let inside = |x: f32, y: f32| -> bool {
+        // Rotate the sample point back by `angle` around the center.
+        let (dx, dy) = (x - c, y - c);
+        let x = c + dx * cos_a - dy * sin_a;
+        let y = c + dx * sin_a + dy * cos_a;
         inside_one(x, y) || inside_one(2.0 * c - x, 2.0 * c - y)
     };
 
@@ -316,6 +380,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
