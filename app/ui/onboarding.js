@@ -24,7 +24,12 @@ const BACKENDS = [
 ];
 
 // Collected inputs for the chosen backend.
-const chosen = { path: null, fields: {}, passphrase: "" };
+const chosen = { path: null, fields: {}, passphrase: "", confirm: "" };
+
+// Cloud storage is never unencrypted: 12+ chars, both fields matching.
+function passphraseValid() {
+  return chosen.passphrase.length >= 12 && chosen.passphrase === chosen.confirm;
+}
 let existing = null; // current app status, if already configured
 
 function buildStore() {
@@ -210,15 +215,37 @@ function renderEncryption() {
         <div class="field"><label>Passphrase</label><input type="password" id="pp1" placeholder="At least 12 characters" /></div>
         <div class="strength"><div class="fill" id="pp-strength"></div></div>
         <div class="field"><label>Confirm passphrase</label><input type="password" id="pp2" /></div>
+        <p class="inline-note" id="pp-note">Required \u2014 your data is always encrypted before it reaches ${b.name}.</p>
         <p class="inline-note">You'll enter the same passphrase on each machine. It never leaves your ${DEVICES} \u2014 if you lose it, the data can't be recovered.</p>
       </div>`;
-    body.querySelector("#pp1").addEventListener("input", (e) => {
-      chosen.passphrase = e.target.value;
-      const n = e.target.value.length;
+    const pp1 = body.querySelector("#pp1");
+    const pp2 = body.querySelector("#pp2");
+    pp1.value = chosen.passphrase;
+    pp2.value = chosen.confirm;
+    const note = body.querySelector("#pp-note");
+    const feedback = () => {
+      const n = chosen.passphrase.length;
       const f = body.querySelector("#pp-strength");
       f.style.width = Math.min(100, n * 7) + "%";
       f.style.background = n < 8 ? "var(--destructive)" : n < 14 ? "#ff9f0a" : "var(--ok)";
-    });
+      if (n === 0) {
+        note.textContent = `Required \u2014 your data is always encrypted before it reaches ${b.name}.`;
+        note.style.color = "";
+      } else if (n < 12) {
+        note.textContent = `${12 - n} more character${12 - n === 1 ? "" : "s"} needed.`;
+        note.style.color = "";
+      } else if (chosen.passphrase !== chosen.confirm) {
+        note.textContent = "Passphrases don't match yet.";
+        note.style.color = "var(--destructive)";
+      } else {
+        note.textContent = "\u2713 Passphrase set.";
+        note.style.color = "var(--ok)";
+      }
+      refreshNav();
+    };
+    pp1.addEventListener("input", (e) => { chosen.passphrase = e.target.value; feedback(); });
+    pp2.addEventListener("input", (e) => { chosen.confirm = e.target.value; feedback(); });
+    feedback();
   }
 }
 
@@ -267,7 +294,10 @@ function refreshNav() {
   $("ob-back").classList.toggle("hidden-btn", step === 0 || step === STEPS - 1);
   const next = $("ob-next");
   next.textContent = step === 0 ? "Get Started" : step === STEPS - 1 ? (existing?.configured ? "Switch Storage & Sync" : "Start First Sync") : "Continue";
-  next.disabled = (step === 3 && !buildStore()) || (step === 5 && !accessComplete());
+  next.disabled =
+    (step === 3 && !buildStore()) ||
+    (step === 4 && needsPassphrase() && !passphraseValid()) ||
+    (step === 5 && !accessComplete());
 }
 
 let renderedStep = -1;
