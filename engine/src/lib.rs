@@ -4,6 +4,7 @@
 pub mod adapters;
 pub mod codec;
 pub mod config;
+pub mod registry;
 pub mod scanner;
 pub mod state;
 pub mod store;

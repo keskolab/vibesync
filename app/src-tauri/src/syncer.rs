@@ -21,6 +21,13 @@ pub struct AppConfig {
     /// Background sync every ~15 minutes while the app runs.
     #[serde(default)]
     pub autosync: bool,
+    /// Sync the Claude desktop app's sidebar registry (macOS).
+    #[serde(default = "default_true")]
+    pub sync_registry: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub struct Paths {
@@ -60,6 +67,7 @@ pub fn default_config() -> Result<AppConfig> {
         passphrase: None,
         sync_plugins: false,
         autosync: false,
+        sync_registry: true,
     })
 }
 
@@ -210,6 +218,8 @@ pub fn status(paths: &Paths) -> Result<Status> {
 pub struct SyncOutcome {
     pub pushed: usize,
     pub pulled: usize,
+    pub registry_pushed: usize,
+    pub registry_applied: usize,
     pub skipped_newer_local: usize,
     pub skipped_deleted: usize,
     pub unchanged: usize,
@@ -264,11 +274,195 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize)) -> Result
     state.save(&paths.state)?;
     progress(total + 1, total + 1);
 
+    let (registry_pushed, registry_applied) = if config.sync_registry {
+        sync_registry(paths, store.as_ref(), &tok, &mut state)
+            .unwrap_or((0, 0))
+    } else {
+        (0, 0)
+    };
+    state.save(&paths.state)?;
+
     Ok(SyncOutcome {
         pushed: push.pushed,
         pulled: pull.pulled,
+        registry_pushed,
+        registry_applied,
         skipped_newer_local: pull.skipped_newer_local,
         skipped_deleted: pull.skipped_deleted,
         unchanged: push.unchanged + pull.unchanged,
     })
+}
+
+// ---------------------------------------------------------------- registry
+
+/// Locate the Claude desktop app's session registry dir (macOS):
+/// ~/Library/Application Support/Claude/claude-code-sessions/<org>/<user>/
+fn registry_dir() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None; // Windows location unknown until the app exists there
+    }
+    let base = dirs::home_dir()?
+        .join("Library/Application Support/Claude/claude-code-sessions");
+    for org in std::fs::read_dir(&base).ok()?.flatten() {
+        if !org.path().is_dir() {
+            continue;
+        }
+        for user in std::fs::read_dir(org.path()).ok()?.flatten() {
+            if user.path().is_dir() {
+                return Some(user.path());
+            }
+        }
+    }
+    None
+}
+
+/// Validated, atomic, compact, 0600 write — every rule Gate A taught us.
+fn write_registry_entry(path: &PathBuf, entry: &serde_json::Value) -> Result<()> {
+    engine::registry::validate(entry)?;
+    let bytes = serde_json::to_vec(entry)?; // compact, single line
+    let tmp = path.with_extension("codesync-tmp");
+    std::fs::write(&tmp, &bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Push local sidebar entries to the store and apply remote ones locally.
+/// The registry is the highest-blast-radius surface in the product: one
+/// malformed write blanks the user's entire session list, so every entry is
+/// validated before it touches disk, and the first-ever write is preceded by
+/// a full backup of the directory.
+fn sync_registry(
+    paths: &Paths,
+    store: &dyn engine::SyncStore,
+    tok: &engine::Tokenizer,
+    state: &mut engine::SyncState,
+) -> Result<(usize, usize)> {
+    use engine::registry;
+    let Some(dir) = registry_dir() else { return Ok((0, 0)) };
+
+    // Load all local entries.
+    let mut local: std::collections::HashMap<String, (serde_json::Value, PathBuf)> =
+        std::collections::HashMap::new();
+    let mut cli_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for e in std::fs::read_dir(&dir)?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("local_") || !name.ends_with(".json") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&std::fs::read(e.path())?) else {
+            continue;
+        };
+        if let Some(sid) = v.get("sessionId").and_then(|s| s.as_str()) {
+            if let Some(cli) = v.get("cliSessionId").and_then(|s| s.as_str()) {
+                cli_ids.insert(cli.to_string());
+            }
+            local.insert(sid.to_string(), (v, e.path()));
+        }
+    }
+
+    // PUSH: tokenized, validated entries into the registry/ namespace.
+    let mut pushed = 0usize;
+    let scanned: Vec<String> = local.keys().map(|s| format!("registry/{s}.json")).collect();
+    for (sid, (entry, path)) in &local {
+        if registry::validate(entry).is_err() {
+            continue; // never propagate a malformed entry
+        }
+        let mut out = entry.clone();
+        registry::tokenize_paths(&mut out, tok);
+        let bytes = serde_json::to_vec(&out)?;
+        let hash = engine::scanner::hash_bytes(&bytes);
+        let logical = format!("registry/{sid}.json");
+        if state.files.get(&logical).map(|s| s.hash == hash).unwrap_or(false) {
+            continue;
+        }
+        let mtime = engine::scanner::mtime_ms(path).unwrap_or(0);
+        store.put(
+            &logical,
+            &bytes,
+            &engine::RemoteMeta { hash: hash.clone(), mtime_ms: mtime, size: bytes.len() as u64, source: engine::machine_name() },
+        )?;
+        state.files.insert(
+            logical,
+            engine::FileState { hash, mtime_ms: mtime, size: bytes.len() as u64, deleted_locally: false },
+        );
+        pushed += 1;
+    }
+    // Locally deleted entries must not resurrect.
+    let present: std::collections::BTreeSet<&str> = scanned.iter().map(|s| s.as_str()).collect();
+    for (logical, st) in state.files.iter_mut() {
+        if logical.starts_with("registry/") && !st.deleted_locally && !present.contains(logical.as_str()) {
+            st.deleted_locally = true;
+        }
+    }
+
+    // PULL: apply remote entries.
+    let mut applied = 0usize;
+    let mut backed_up = false;
+    for (logical, meta) in store.list()? {
+        let Some(sid) = logical.strip_prefix("registry/").and_then(|s| s.strip_suffix(".json")) else {
+            continue;
+        };
+        if let Some(st) = state.files.get(&logical) {
+            if st.deleted_locally || st.hash == meta.hash {
+                continue;
+            }
+        }
+        let Some((bytes, _)) = store.get(&logical)? else { continue };
+        let Ok(mut remote) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+        registry::expand_paths(&mut remote, tok);
+
+        let target = dir.join(format!("{sid}.json"));
+        let final_entry = match local.get(sid) {
+            Some((local_entry, _)) => {
+                let merged = registry::merge(local_entry, &remote);
+                if &merged == local_entry {
+                    // Nothing new; just record the store hash.
+                    state.files.insert(
+                        logical.clone(),
+                        engine::FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
+                    );
+                    continue;
+                }
+                merged
+            }
+            None => {
+                // Brand-new entry: its cliSessionId must not collide with a
+                // different existing entry (Gate A: collisions silently drop
+                // BOTH entries from the sidebar).
+                if let Some(cli) = remote.get("cliSessionId").and_then(|s| s.as_str()) {
+                    if cli_ids.contains(cli) {
+                        continue;
+                    }
+                }
+                remote
+            }
+        };
+        // One-time safety net before the first write of this run.
+        if !backed_up {
+            let backup = paths.config.parent().unwrap().join("registry-backup");
+            let _ = std::fs::create_dir_all(&backup);
+            for (_, (_, p)) in &local {
+                if let Some(name) = p.file_name() {
+                    let _ = std::fs::copy(p, backup.join(name));
+                }
+            }
+            backed_up = true;
+        }
+        if write_registry_entry(&target, &final_entry).is_ok() {
+            if let Some(cli) = final_entry.get("cliSessionId").and_then(|s| s.as_str()) {
+                cli_ids.insert(cli.to_string());
+            }
+            state.files.insert(
+                logical.clone(),
+                engine::FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
+            );
+            applied += 1;
+        }
+    }
+    Ok((pushed, applied))
 }

@@ -136,7 +136,7 @@ function openTool(t) {
     { name: "Plans, tasks & history", sub: "Plans, tasks, command history", on: true, locked: true },
     { name: "Agents, skills & settings", sub: "Custom agents, skills, rules, CLAUDE.md", on: true, locked: true },
     { name: "Plugins", sub: "Can be large — off by default", on: status.syncPlugins, locked: false, id: "scope-plugins" },
-    { name: "App sidebar", sub: "Coming in the registry milestone", on: false, locked: true },
+    { name: "App sidebar", sub: "Claude desktop session list", on: true, locked: true },
   ]) {
     const li = document.createElement("li");
     li.innerHTML = `
@@ -179,7 +179,11 @@ async function runSync(firstRun) {
   try {
     const outcome = await invoke("sync_now");
     await refreshStatus();
-    if (outcome.pulled > 0) {
+    if (outcome.registryApplied > 0) {
+      $("hint").querySelector("span").textContent =
+        `${outcome.registryApplied} session${outcome.registryApplied === 1 ? "" : "s"} added to your Claude sidebar — restart the Claude app to see them.`;
+      $("hint").classList.remove("hidden");
+    } else if (outcome.pulled > 0) {
       $("hint").querySelector("span").textContent =
         `${outcome.pulled} session${outcome.pulled === 1 ? "" : "s"} pulled — available via claude --resume.`;
       $("hint").classList.remove("hidden");
