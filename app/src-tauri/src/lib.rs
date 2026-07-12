@@ -62,6 +62,15 @@ fn is_syncing() -> bool {
     SYNCING.load(Ordering::SeqCst)
 }
 
+/// Generic UI trace: the frontend reports every user action (command name +
+/// non-secret args). One line, any button — including future ones.
+#[tauri::command]
+fn log_ui(app: tauri::AppHandle, action: String) {
+    if let Ok(paths) = syncer::paths(&app) {
+        syncer::debug_log_event(&paths, &format!("ui: {action}"));
+    }
+}
+
 #[tauri::command]
 fn engine_version() -> &'static str {
     vibesync_engine::VERSION
@@ -182,7 +191,6 @@ async fn set_tool_enabled(
             cfg.disabled_tools.push(id.clone());
         }
         syncer::save_config(&paths, &cfg)?;
-        syncer::debug_log_event(&paths, &format!("settings: tool {id} switched {}", if enabled { "ON" } else { "OFF" }));
         syncer::status(&paths)
     })
     .await
@@ -213,7 +221,6 @@ async fn set_scope_enabled(
             }
         }
         syncer::save_config(&paths, &cfg)?;
-        syncer::debug_log_event(&paths, &format!("settings: scope {scope} switched {}", if enabled { "ON" } else { "OFF" }));
         syncer::status(&paths)
     })
     .await
@@ -318,7 +325,6 @@ async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> 
     tauri::async_runtime::spawn_blocking(move || {
         use tauri::Emitter;
         let paths = syncer::paths(&app)?;
-        syncer::debug_log_event(&paths, "manual sync requested");
         set_tray_busy(&app, true);
         let emitter = app.clone();
         let result = syncer::sync_now(&paths, move |done, total| {
@@ -385,9 +391,7 @@ fn set_autosync_interval(app: tauri::AppHandle, mins: u64) -> Result<(), String>
         .map_err(|e| e.to_string())?
         .ok_or("VibeSync is not configured yet")?;
     cfg.autosync_interval_mins = mins;
-    syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())?;
-    syncer::debug_log_event(&paths, &format!("settings: autosync interval -> {mins} min"));
-    Ok(())
+    syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())
 }
 
 /// Add or update a manual project mapping (fleet name -> local folder).
@@ -436,7 +440,6 @@ fn set_autosync(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
         cfg.autosync = enabled;
         syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())?;
     }
-    syncer::debug_log_event(&paths, &format!("settings: autosync switched {}", if enabled { "ON" } else { "OFF" }));
     Ok(())
 }
 
@@ -704,6 +707,7 @@ pub fn run() {
             detect_tools,
             detect_onboarding_tools,
             engine_version,
+            log_ui,
             updates::check_for_updates,
             updates::install_pending_update,
             is_syncing,
