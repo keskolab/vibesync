@@ -188,14 +188,7 @@ header {
   white-space: nowrap;
 }
 .head-right {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
   flex-shrink: 0;
-}
-.head-right .substatus {
-  margin-top: 0;
 }
 .substatus .kv-label {
   color: var(--text-3);

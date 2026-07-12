@@ -143,7 +143,6 @@ function setPending(pending) {
 	if (pending) {
 		$("status-dot").className = "dot";
 		$("status-text").textContent = "Not set up";
-		$("next-sync").textContent = "";
 		setSubText("Choose where your sessions live to start syncing");
 	}
 	const setStore = $("set-store");
@@ -239,11 +238,10 @@ function renderStatusLine() {
 		const label = uiBusy ? "now" : next <= Date.now() ? "soon" : fmtClock(next);
 		auto = `<span class="kv-label">Next sync:</span> ${label}`;
 	}
-	const html = `<span><span class="kv-label">Last sync:</span> ${when}</span><span class="loc-line"><span class="kv-label">Location:</span> ${loc}</span>`;
-	if ($("substatus").dataset.line !== html + auto) {
-		$("substatus").dataset.line = html + auto;
+	const html = `<span><span class="kv-label">Last sync:</span> ${when}</span>${auto ? `<span>${auto}</span>` : ""}<span class="loc-line"><span class="kv-label">Storage:</span> ${loc}</span>`;
+	if ($("substatus").dataset.line !== html) {
+		$("substatus").dataset.line = html;
 		$("substatus").innerHTML = html;
-		$("next-sync").innerHTML = auto;
 		$("substatus").title = status.storeDetail || "";
 		setTimeout(fitWindow, 50); // height changes with content
 	}
@@ -581,7 +579,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 	setPending(!isSetup());
 	invoke("engine_version")
 		.then((v) => {
-			$("version").textContent = `v${v}`;
+			$("version").textContent = `VibeSync – v${v}`;
 		})
 		.catch(() => {});
 	$("open-setup").addEventListener("click", () => invoke("show_onboarding"));
