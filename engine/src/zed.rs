@@ -183,6 +183,7 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
                 continue;
             }
         }
+        crate::dlog::debug(|| format!("zed: upserting thread {}", row.id));
         let data = hex_decode(&row.data_hex);
         let folder_paths = row.folder_paths.as_ref().map(|s| expand(s, &home_s));
         conn.execute(

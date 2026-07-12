@@ -392,6 +392,7 @@ pub fn db_apply(
                 continue;
             }
         }
+        crate::dlog::debug(|| format!("opencode: merging session {id} into opencode.db"));
         if let Some(project) = obj.get_mut("project").and_then(|p| p.as_object_mut()) {
             expand_field(project, "worktree", tok);
             insert_map(c, "project", project, false)?; // never clobber a local project row

@@ -104,16 +104,36 @@ pub fn ack_new(paths: &Paths, id: &str) -> Result<()> {
 /// Troubleshooting log: every line goes through mini-log (its format, and
 /// its LOG_LEVEL-gated console output for dev runs) and — when the Settings
 /// toggle is on — is appended to debug.log next to the config file.
-pub struct DebugLog(Option<std::sync::Mutex<std::fs::File>>);
+pub struct DebugLog(Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>);
 
 impl DebugLog {
     pub fn open(paths: &Paths, enabled: bool) -> Self {
         if !enabled {
+            engine::dlog::set_sink(None);
             return Self(None);
         }
         let p = debug_log_path(paths);
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(p).ok();
-        Self(file.map(std::sync::Mutex::new))
+        // Verbose traces grow fast under 15-minute autosync: rotate at 5 MB
+        // (previous trace survives as debug.log.old).
+        if std::fs::metadata(&p).map(|m| m.len() > 5 * 1024 * 1024).unwrap_or(false) {
+            let _ = std::fs::rename(&p, p.with_extension("log.old"));
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .ok()
+            .map(|f| std::sync::Arc::new(std::sync::Mutex::new(f)));
+        // The engine does the actual file/network work — hand it the same
+        // sink so its per-file trace lands in the same log, in order.
+        if let Some(f) = &file {
+            let sink = f.clone();
+            engine::dlog::set_sink(Some(Box::new(move |line: &str| {
+                use std::io::Write;
+                let _ = writeln!(sink.lock().unwrap(), "{line}");
+            })));
+        }
+        Self(file)
     }
 
     fn line(&self, level: mini_log::Level, msg: String) {
@@ -669,6 +689,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     let mut config = load_config(paths)?.context("VibeSync is not configured yet")?;
     let dlog = DebugLog::open(paths, config.debug_logging);
     dlog.info(format!("sync start — storage: {}", store_label(&config.store)));
+    dlog.info("step: unlocking credentials");
     resolve_secrets(&mut config)?;
     let cache_dir = paths.config.parent().map(|p| p.to_path_buf());
     let t = std::time::Instant::now();
@@ -724,6 +745,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // would create its data dirs and make the machine "become" an OpenCode/
     // Codex/... host it never was. Purge undetected tools from sync state so
     // installing the tool later re-pulls everything fresh.
+    dlog.info("step: detecting installed tools");
     let claude_inst = home.join(".claude").is_dir();
     let vscode_inst = engine::vscode::detect();
     let codex_inst = engine::codex::detect(&home);
@@ -750,6 +772,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     let copilot_on = on("copilot") && copilot_inst;
     // All config dirs: ~/.claude plus auto-detected ~/.claude-* profiles.
     let dirs = engine::adapters::Adapter::detect_config_dirs(&home);
+    dlog.info("step: scanning local files");
     let scan_t0 = std::time::Instant::now();
     let mut entries = Vec::new();
     let mut scan_mark = 0usize;
@@ -816,6 +839,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // ONE store listing for the whole sync — every pull below shares it.
     // (Each adapter used to list separately: 7+ full listings with per-object
     // meta fetches per sync.)
+    dlog.info("step: listing the store");
     let t = std::time::Instant::now();
     let listing = store.list()?;
     dlog.info(format!(
@@ -865,6 +889,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         .filter(|e| state.files.get(&e.logical).map(|st| st.hash != e.hash).unwrap_or(true))
         .map(|e| e.size)
         .sum();
+    dlog.info(format!("step: pushing changes ({:.1} MB to upload)", to_push_bytes as f64 / (1024.0 * 1024.0)));
     let push_t0 = std::time::Instant::now();
     for chunk in entries.chunks(10) {
         let r = engine::sync::push(chunk, &mut state, store.as_ref(), &machine)?;
@@ -886,6 +911,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             push.unchanged
         ));
     }
+    dlog.info("step: applying changes from other machines");
     let pull_t0 = std::time::Instant::now();
     let pulled_bytes = std::sync::atomic::AtomicU64::new(0);
     let mut pull = engine::Report::default();
@@ -1032,6 +1058,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             // sync — but it has to leave a trace: silently mapping errors to
             // zeros made a real Windows failure indistinguishable from
             // "nothing to do".
+            dlog.info("step: updating the Claude sidebar");
             let err_path = paths.config.parent().unwrap().join("registry_last_error.txt");
             let t = std::time::Instant::now();
             match sync_registry(paths, store.as_ref(), &tok, &mut state, &listing, &record_registry) {
@@ -1088,6 +1115,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         push.pushed,
         pull.pulled
     ));
+    engine::dlog::set_sink(None);
 
     Ok(SyncOutcome {
         pushed: push.pushed,
@@ -1455,10 +1483,18 @@ mod tests {
         assert!(lines[0].contains("] - INFO - hello world"), "{}", lines[0]);
         assert!(lines[1].contains("] - WARNING - watch out"), "{}", lines[1]);
         assert!(lines[2].contains("] - ERROR - boom"), "{}", lines[2]);
-        // Disabled sink writes nothing new.
+        // Engine trace lines route through the installed sink into the file.
+        engine::dlog::debug(|| "engine trace line".to_string());
+        let text = std::fs::read_to_string(debug_log_path(&paths)).unwrap();
+        assert!(text.lines().count() >= 4, "{text}");
+        assert!(text.contains("] - DEBUG - engine trace line"), "{text}");
+        drop(dlog);
+
+        // Disabled sink writes nothing new and uninstalls the engine sink.
         let off = DebugLog::open(&paths, false);
         off.info("should not appear");
+        engine::dlog::debug(|| "should not appear either".to_string());
         let text2 = std::fs::read_to_string(debug_log_path(&paths)).unwrap();
-        assert_eq!(text2.lines().count(), 3);
+        assert_eq!(text2.lines().count(), text.lines().count());
     }
 }

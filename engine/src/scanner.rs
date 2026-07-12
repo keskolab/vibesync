@@ -61,6 +61,9 @@ pub fn hash_file(path: &Path) -> Result<String> {
             return Ok(h.clone());
         }
     }
+    crate::dlog::debug(|| {
+        format!("reading {} ({} KB)", path.display(), key.1 / 1024)
+    });
     let t = std::time::Instant::now();
     let hash = hash_file_uncached(path)?;
     let ms = t.elapsed().as_millis() as u64;
@@ -74,10 +77,9 @@ pub fn hash_file(path: &Path) -> Result<String> {
         }
     }
     if ms > 500 {
-        mini_log::LogMessage::new(
-            mini_log::Level::Warning,
-            format!("slow file read/hash: {} took {ms} ms ({} KB)", path.display(), key.1 / 1024),
-        );
+        crate::dlog::warn(|| {
+            format!("slow file read/hash: {} took {ms} ms ({} KB)", path.display(), key.1 / 1024)
+        });
     }
     HASH_CACHE.lock().unwrap().insert(path.to_path_buf(), (key.0, key.1, hash.clone()));
     Ok(hash)
