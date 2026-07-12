@@ -736,7 +736,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // them so clones living at different paths per machine share one
     // ${GIT} identity, exactly like Claude sidebar cwds.
     if let Some(h) = dirs::home_dir() {
-        for dir in engine::opencode::local_dirs(&h) {
+        for dir in engine::opencode::local_dirs(&h).into_iter().chain(engine::codex::local_dirs(&h)) {
             if learned_cwds.insert(dir.to_string_lossy().into_owned()) {
                 gitmap_changed |= gitmap.learn(&dir);
             }
@@ -1377,7 +1377,9 @@ fn p_vscode(_: &std::path::Path) -> Vec<std::path::PathBuf> {
     engine::vscode::storage_roots()
 }
 fn p_codex(home: &std::path::Path) -> Vec<std::path::PathBuf> {
-    vec![home.join(".codex/sessions"), home.join(".codex/session_index.jsonl")]
+    let mut v = vec![home.join(".codex/sessions"), home.join(".codex/session_index.jsonl")];
+    v.push(engine::codex::state_db(home).unwrap_or_else(|| home.join(".codex/state_5.sqlite")));
+    v
 }
 fn p_opencode(home: &std::path::Path) -> Vec<std::path::PathBuf> {
     engine::opencode::probe_locations(home)
@@ -1442,8 +1444,10 @@ fn scan_shared(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engin
 }
 
 fn publish_codex(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
+    // Legacy index for old Codex builds, plus the thread-db export that
+    // modern builds (state_<N>.sqlite) actually list from.
     engine::codex::push_index(env.home, env.machine, state, env.store)?;
-    Ok(0)
+    engine::codex::db_push(env.home, env.tok, state, env.store, env.machine, env.listing)
 }
 fn publish_opencode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
     engine::opencode::db_push(env.home, env.tok, state, env.store, env.machine, env.listing)
@@ -1530,7 +1534,20 @@ fn apply_vscode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenRepo
     .into())
 }
 fn apply_codex(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
-    Ok(engine::codex::apply(env.home, state, env.store, env.listing, env.tick, env.record)?.into())
+    // File/index layer first so rollout files land before the thread-db
+    // merge checks for them; the layers stay independent like OpenCode's.
+    let mut g = GenReport::default();
+    match engine::codex::apply(env.home, state, env.store, env.listing, env.tick, env.record) {
+        Ok(f) => g.absorb(f),
+        Err(e) => g.errors.push(format!("file-layer apply failed: {e:#}")),
+    }
+    match engine::codex::db_apply(
+        env.home, env.tok, state, env.store, env.listing, env.tick, env.record,
+    ) {
+        Ok(d) => g.absorb(d),
+        Err(e) => g.errors.push(format!("thread-db apply failed: {e:#}")),
+    }
+    Ok(g)
 }
 fn apply_opencode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
     // The two layers are independent: a failure in one must not skip the

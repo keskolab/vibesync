@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::dbsync::{expand_field, insert_map, max_time_of, max_time_of_json, query_maps, tokenize_field};
 use crate::scanner::{hash_bytes, hash_file, mtime_ms, FileEntry};
 use crate::state::{FileState, SyncState};
 use crate::store::{RemoteMeta, SyncStore};
@@ -203,25 +204,7 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
 
 pub const DB_PREFIX: &str = "opencode/db";
 
-/// The max time_created/time_updated across a set of rows. A session's
-/// export version is this max over the session row AND every message/part —
-/// session.time_updated alone misses writes that only touch child rows (a
-/// late message, a streamed part finalizing), and those must still travel.
-fn max_time_of<'a>(rows: impl Iterator<Item = &'a serde_json::Map<String, serde_json::Value>>) -> i64 {
-    rows.flat_map(|r| {
-        ["time_created", "time_updated"]
-            .into_iter()
-            .filter_map(|k| r.get(k).and_then(|v| v.as_i64()))
-    })
-    .max()
-    .unwrap_or(0)
-}
 
-fn max_time_of_json(rows: Option<&serde_json::Value>) -> i64 {
-    max_time_of(
-        rows.and_then(|v| v.as_array()).into_iter().flatten().filter_map(|v| v.as_object()),
-    )
-}
 
 fn db_path(home: &Path) -> Option<PathBuf> {
     data_root(home).map(|r| r.join("opencode.db")).filter(|p| p.exists())
@@ -251,94 +234,11 @@ pub fn local_dirs(home: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// One row as column-name -> JSON value (NULL/INTEGER/REAL/TEXT only —
-/// OpenCode stores blobs as TEXT JSON).
-fn row_to_map(row: &rusqlite::Row, cols: &[String]) -> serde_json::Map<String, serde_json::Value> {
-    use rusqlite::types::ValueRef;
-    let mut m = serde_json::Map::new();
-    for (i, c) in cols.iter().enumerate() {
-        let v = match row.get_ref(i) {
-            Ok(ValueRef::Null) | Err(_) => serde_json::Value::Null,
-            Ok(ValueRef::Integer(n)) => serde_json::Value::from(n),
-            Ok(ValueRef::Real(f)) => serde_json::Value::from(f),
-            Ok(ValueRef::Text(t)) => serde_json::Value::from(String::from_utf8_lossy(t).into_owned()),
-            Ok(ValueRef::Blob(b)) => serde_json::Value::from(crate::scanner::hex(b)),
-        };
-        m.insert(c.clone(), v);
-    }
-    m
-}
 
-fn query_maps(
-    conn: &rusqlite::Connection,
-    sql: &str,
-    params: &[&dyn rusqlite::ToSql],
-) -> Result<Vec<serde_json::Map<String, serde_json::Value>>> {
-    let mut stmt = conn.prepare(sql)?;
-    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-    let mut rows = stmt.query(params)?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next()? {
-        out.push(row_to_map(row, &cols));
-    }
-    Ok(out)
-}
 
-/// Columns of a local table — inserts are filtered to these so an object
-/// from a newer OpenCode version can't fail the whole apply.
-fn table_cols(conn: &rusqlite::Connection, table: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let cols = stmt
-        .query_map([], |r| r.get::<_, String>(1))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(cols)
-}
 
-fn insert_map(
-    conn: &rusqlite::Connection,
-    table: &str,
-    map: &serde_json::Map<String, serde_json::Value>,
-    or_replace: bool,
-) -> Result<()> {
-    let local: Vec<String> = table_cols(conn, table)?;
-    let cols: Vec<&String> = local.iter().filter(|c| map.contains_key(*c)).collect();
-    if cols.is_empty() {
-        return Ok(());
-    }
-    let placeholders = (1..=cols.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
-    let names = cols.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(",");
-    let verb = if or_replace { "INSERT OR REPLACE" } else { "INSERT OR IGNORE" };
-    let sql = format!("{verb} INTO `{table}` ({names}) VALUES ({placeholders})");
-    let params: Vec<Box<dyn rusqlite::ToSql>> = cols
-        .iter()
-        .map(|c| -> Box<dyn rusqlite::ToSql> {
-            match &map[*c] {
-                serde_json::Value::Null => Box::new(rusqlite::types::Null),
-                serde_json::Value::Bool(b) => Box::new(*b as i64),
-                serde_json::Value::Number(n) if n.is_i64() => Box::new(n.as_i64().unwrap()),
-                serde_json::Value::Number(n) => Box::new(n.as_f64().unwrap_or(0.0)),
-                serde_json::Value::String(s) => Box::new(s.clone()),
-                other => Box::new(other.to_string()),
-            }
-        })
-        .collect();
-    conn.execute(&sql, rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())))?;
-    Ok(())
-}
 
-fn tokenize_field(m: &mut serde_json::Map<String, serde_json::Value>, key: &str, tok: &Tokenizer) {
-    if let Some(serde_json::Value::String(s)) = m.get(key) {
-        let t = tok.tokenize_plain(s);
-        m.insert(key.to_string(), serde_json::Value::String(t));
-    }
-}
 
-fn expand_field(m: &mut serde_json::Map<String, serde_json::Value>, key: &str, tok: &Tokenizer) {
-    if let Some(serde_json::Value::String(s)) = m.get(key) {
-        let e = tok.expand_plain(s);
-        m.insert(key.to_string(), serde_json::Value::String(e));
-    }
-}
 
 /// Export every db session as one store object, diffed against the store
 /// LISTING (not just local state) — a store that lost or never received an
