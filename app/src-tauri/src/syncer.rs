@@ -732,6 +732,16 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             }
         }
     }
+    // OpenCode anchors sessions to directories too — learn repo roots from
+    // them so clones living at different paths per machine share one
+    // ${GIT} identity, exactly like Claude sidebar cwds.
+    if let Some(h) = dirs::home_dir() {
+        for dir in engine::opencode::local_dirs(&h) {
+            if learned_cwds.insert(dir.to_string_lossy().into_owned()) {
+                gitmap_changed |= gitmap.learn(&dir);
+            }
+        }
+    }
     if gitmap_changed {
         let _ = gitmap.save(&gitmap_path);
     }

@@ -229,6 +229,30 @@ fn db_path(home: &Path) -> Option<PathBuf> {
     data_root(home).map(|r| r.join("opencode.db")).filter(|p| p.exists())
 }
 
+/// Every directory OpenCode data anchors to on this machine (session
+/// directories + project worktrees). Fed to the project map so repos used
+/// with OpenCode tokenize as ${GIT:...} and follow the repo across machines
+/// regardless of where each clone lives.
+pub fn local_dirs(home: &Path) -> Vec<PathBuf> {
+    let Some(db) = db_path(home) else { return vec![] };
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    ) else {
+        return vec![];
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(1500));
+    let mut out: Vec<PathBuf> = Vec::new();
+    for sql in ["SELECT DISTINCT directory FROM session", "SELECT DISTINCT worktree FROM project"] {
+        if let Ok(mut st) = conn.prepare(sql) {
+            if let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) {
+                out.extend(rows.flatten().map(PathBuf::from).filter(|p| p.is_dir()));
+            }
+        }
+    }
+    out
+}
+
 /// One row as column-name -> JSON value (NULL/INTEGER/REAL/TEXT only —
 /// OpenCode stores blobs as TEXT JSON).
 fn row_to_map(row: &rusqlite::Row, cols: &[String]) -> serde_json::Map<String, serde_json::Value> {
@@ -552,6 +576,7 @@ pub fn db_apply(
         ) else {
             continue;
         };
+        let ses_dir = session.get("directory").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let remote_eff = remote_ses_t
             .max(max_time_of_json(obj.get("messages")))
             .max(max_time_of_json(obj.get("parts")));
@@ -589,9 +614,36 @@ pub fn db_apply(
             }
         }
         crate::dlog::debug(|| format!("opencode db: merging session {id} into opencode.db"));
+        // OpenCode's project ids are repo-derived and identical across
+        // machines, but each machine clones the repo wherever it likes
+        // (live-verified 2026-07-12: two Macs, one repo, two paths, same
+        // id). When this project already exists here at a different
+        // worktree, a root-anchored session is relocated to the local clone
+        // so OpenCode lists it there.
+        let mut relocate: Option<String> = None;
         if let Some(project) = obj.get_mut("project").and_then(|p| p.as_object_mut()) {
             expand_field(project, "worktree", tok);
+            let pid = project.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let remote_worktree =
+                project.get("worktree").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if pid != "global" && !remote_worktree.is_empty() && ses_dir == remote_worktree {
+                if let Ok(lw) = c.query_row(
+                    "SELECT worktree FROM project WHERE id = ?1",
+                    [&pid],
+                    |r| r.get::<_, String>(0),
+                ) {
+                    if lw != ses_dir && Path::new(&lw).is_dir() {
+                        relocate = Some(lw);
+                    }
+                }
+            }
             insert_map(c, "project", project, false)?; // never clobber a local project row
+        }
+        if let Some(lw) = &relocate {
+            crate::dlog::debug(|| format!("opencode db: {id} relocated to local clone {lw}"));
+            if let Some(sm) = obj.get_mut("session").and_then(|v| v.as_object_mut()) {
+                sm.insert("directory".to_string(), serde_json::Value::String(lw.clone()));
+            }
         }
         let session = obj.get("session").and_then(|s| s.as_object()).unwrap();
         // Replace the session ROW only when the remote row itself is newer —
@@ -829,6 +881,54 @@ mod tests {
         let title: String =
             c.query_row("SELECT title FROM session WHERE id='ses1'", [], |r| r.get(0)).unwrap();
         assert_eq!(title, "local edit");
+    }
+
+    #[test]
+    fn session_relocates_to_local_clone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FolderStore::new(tmp.path().join("store"));
+        let a = tmp.path().join("a");
+        let db_a = make_db(&a);
+        std::fs::write(a.join(".local/share/opencode/auth.json"), "{}").unwrap();
+        {
+            let c = rusqlite::Connection::open(&db_a).unwrap();
+            c.execute_batch(
+                "INSERT INTO project VALUES ('prj9', '/Users/u/proj/app', 1, 1, '[]');
+                 INSERT INTO session VALUES ('ses9','prj9','t','/Users/u/proj/app','Repo session','1.0',100,200);
+                 INSERT INTO message VALUES ('m9','ses9',100,100,'{}');
+                 INSERT INTO part VALUES ('p9','m9','ses9',100,100,'{}');",
+            )
+            .unwrap();
+        }
+        let tok_a = Tokenizer::with_case_sensitivity("/Users/u", false);
+        let mut st_a = SyncState::default();
+        assert_eq!(db_push(&a, &tok_a, &mut st_a, &store, "a", &[]).unwrap(), 1);
+
+        // B cloned the same repo somewhere else: OpenCode's repo-derived
+        // project id matches, the path does not.
+        let b = tmp.path().join("b");
+        let db_b = make_db(&b);
+        std::fs::write(b.join(".local/share/opencode/auth.json"), "{}").unwrap();
+        let clone = tmp.path().join("bobclone");
+        std::fs::create_dir_all(&clone).unwrap();
+        let clone_s = clone.to_string_lossy().into_owned();
+        rusqlite::Connection::open(&db_b)
+            .unwrap()
+            .execute("INSERT INTO project VALUES ('prj9', ?1, 1, 1, '[]')", [&clone_s])
+            .unwrap();
+        let tok_b = Tokenizer::with_case_sensitivity("/home/bob", false);
+        let mut st_b = SyncState::default();
+        let r = db_apply(&b, &tok_b, &mut st_b, &store, &store.list().unwrap(), &|| {}, &|_| {})
+            .unwrap();
+        assert_eq!(r.applied, 1);
+        let c = rusqlite::Connection::open(&db_b).unwrap();
+        let dir: String =
+            c.query_row("SELECT directory FROM session WHERE id='ses9'", [], |r| r.get(0)).unwrap();
+        assert_eq!(dir, clone_s);
+        // The local project row keeps its own worktree.
+        let wt: String =
+            c.query_row("SELECT worktree FROM project WHERE id='prj9'", [], |r| r.get(0)).unwrap();
+        assert_eq!(wt, clone_s);
     }
 
     #[test]
