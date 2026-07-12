@@ -197,18 +197,6 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
             logical.clone(),
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
         );
-        // OpenCode scopes global-project sessions to their exact directory:
-        // a merged session stays invisible until that folder exists and is
-        // opened. Say so, or "synced but not visible" reads as a bug.
-        if let Some(d) = session.get("directory").and_then(|v| v.as_str()) {
-            if !Path::new(d).exists() {
-                awaiting_folder += 1;
-                let d = d.to_string();
-                crate::dlog::debug(|| {
-                    format!("opencode db: {id} merged — appears in OpenCode once {d} exists and is opened")
-                });
-            }
-        }
         on_pulled(logical);
         report.applied += 1;
     }
