@@ -762,6 +762,64 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         &dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default(),
         &engine::machine_name(),
     );
+    // Clone discovery: a freshly `git clone`d repo has no sessions yet, so
+    // nothing feeds it into the project map — and the sessions parked for it
+    // in the store would wait forever. When the atlas knows identities this
+    // machine hasn't mapped, probe the fleet's known locations (expanded
+    // against this home) and the siblings of every known local root; any
+    // directory whose own git origin matches a missing identity is learned
+    // on the spot, and its parked sessions land this very sync.
+    let missing: std::collections::HashSet<&str> = atlas
+        .keys()
+        .filter(|id| !gitmap.roots.contains_key(*id))
+        .map(|s| s.as_str())
+        .collect();
+    if !missing.is_empty() {
+        let home_s =
+            dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        for id in &missing {
+            for r in &atlas[*id] {
+                let p = r
+                    .strip_prefix("${HOME}")
+                    .map(|rest| format!("{home_s}{rest}"))
+                    .unwrap_or_else(|| r.clone());
+                candidates.push(std::path::PathBuf::from(p));
+            }
+        }
+        let parents: std::collections::HashSet<std::path::PathBuf> = gitmap
+            .roots
+            .values()
+            .filter_map(|r| std::path::Path::new(r).parent().map(|p| p.to_path_buf()))
+            .chain(candidates.iter().filter_map(|c| c.parent().map(|p| p.to_path_buf())))
+            .collect();
+        for parent in parents {
+            if let Ok(rd) = std::fs::read_dir(&parent) {
+                for e in rd.flatten() {
+                    if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        candidates.push(e.path());
+                    }
+                }
+            }
+        }
+        let mut discovered = false;
+        for c in candidates {
+            if !c.is_dir() {
+                continue;
+            }
+            // Only the directory ITSELF being a repo root counts — discover
+            // walks up, and a plain subfolder must not learn its enclosing
+            // repo here (that path isn't the clone root).
+            if let Some((root, id)) = engine::gitmap::discover(&c) {
+                if root == c && missing.contains(id.as_str()) {
+                    discovered |= gitmap.learn(&c);
+                }
+            }
+        }
+        if discovered {
+            let _ = gitmap.save(&gitmap_path);
+        }
+    }
     let tok = engine::Tokenizer::from_env()?
         .with_gitmap(&gitmap)
         .with_manual_projects(&config.project_mappings)
