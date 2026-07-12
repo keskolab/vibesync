@@ -653,10 +653,12 @@ pub fn db_apply(
                         && !crate::dbsync::foreign_shaped(remote_v, tok.home())
                         && !crate::gitmap::has_unresolved_token(remote_v)
                         && local_v != remote_v;
+                    // A local-shaped path beats a foreign or dead one even
+                    // when its folder is missing here — the local move-heal
+                    // pass then re-points it to wherever this machine keeps
+                    // a folder of that name.
                     if remote_ok
-                        && (crate::dbsync::foreign_shaped(local_v, tok.home())
-                            || (local_dead
-                                && Path::new(remote_v.strip_prefix("\\\\?\\").unwrap_or(remote_v)).exists()))
+                        && (crate::dbsync::foreign_shaped(local_v, tok.home()) || local_dead)
                     {
                         healed.push((*f, remote_v.to_string()));
                     }
