@@ -322,8 +322,9 @@ async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> 
             let _ = emitter.emit("sync-progress", serde_json::json!({ "done": done, "total": total }));
         });
         set_tray_busy(&app, false);
-        if let Ok(outcome) = &result {
-            notify_outcome(&app, outcome);
+        match &result {
+            Ok(outcome) => notify_outcome(&app, outcome),
+            Err(e) => syncer::debug_log_error(&paths, &format!("sync failed: {e:#}")),
         }
         result
     })
@@ -338,6 +339,7 @@ struct SettingsState {
     autostart: bool,
     autosync: bool,
     autosync_interval_mins: u64,
+    debug_logging: bool,
     project_mappings: std::collections::BTreeMap<String, String>,
 }
 
@@ -354,8 +356,20 @@ fn get_settings(app: tauri::AppHandle) -> SettingsState {
             .as_ref()
             .map(|c| c.autosync_interval_mins)
             .unwrap_or(AUTOSYNC_INTERVAL_SECS / 60),
+        debug_logging: cfg.as_ref().map(|c| c.debug_logging).unwrap_or(false),
         project_mappings: cfg.map(|c| c.project_mappings).unwrap_or_default(),
     }
+}
+
+/// Toggle debug.log (phase timings per sync) in the app data dir.
+#[tauri::command]
+fn set_debug_logging(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let mut cfg = syncer::load_config(&paths)
+        .map_err(|e| e.to_string())?
+        .ok_or("VibeSync is not configured yet")?;
+    cfg.debug_logging = enabled;
+    syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())
 }
 
 /// Minutes between background syncs. The worker re-reads the config every
@@ -478,6 +492,7 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
                     let _ = app.emit("autosync-done", serde_json::json!(outcome));
                 }
                 Ok(Err(e)) => {
+                    syncer::debug_log_error(&paths, &format!("autosync failed: {e:#}"));
                     use tauri_plugin_notification::NotificationExt;
                     let _ = app
                         .notification()
@@ -700,6 +715,7 @@ pub fn run() {
             set_autostart,
             set_autosync,
             set_autosync_interval,
+            set_debug_logging,
             set_project_mapping,
             remove_project_mapping,
             set_store,

@@ -26,6 +26,9 @@ pub struct AppConfig {
     /// Minutes between background syncs.
     #[serde(default = "default_interval_mins")]
     pub autosync_interval_mins: u64,
+    /// Write phase-by-phase timings to debug.log (Settings toggle).
+    #[serde(default)]
+    pub debug_logging: bool,
     /// Sync the Claude desktop app's sidebar registry (macOS).
     #[serde(default = "default_true")]
     pub sync_registry: bool,
@@ -96,6 +99,64 @@ pub fn ack_new(paths: &Paths, id: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Troubleshooting log: every line goes through mini-log (its format, and
+/// its LOG_LEVEL-gated console output for dev runs) and — when the Settings
+/// toggle is on — is appended to debug.log next to the config file.
+pub struct DebugLog(Option<std::sync::Mutex<std::fs::File>>);
+
+impl DebugLog {
+    pub fn open(paths: &Paths, enabled: bool) -> Self {
+        if !enabled {
+            return Self(None);
+        }
+        let p = debug_log_path(paths);
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(p).ok();
+        Self(file.map(std::sync::Mutex::new))
+    }
+
+    fn line(&self, level: mini_log::Level, msg: String) {
+        // Skip building the message entirely when nothing would receive it.
+        if self.0.is_none() && !mini_log::is_enabled(level) {
+            return;
+        }
+        let line = mini_log::LogMessage::new(level, msg); // env-gated console
+        if let Some(f) = &self.0 {
+            use std::io::Write;
+            let _ = writeln!(f.lock().unwrap(), "{line}");
+        }
+    }
+
+    pub fn info(&self, msg: impl Into<String>) {
+        self.line(mini_log::Level::Info, msg.into());
+    }
+    pub fn warn(&self, msg: impl Into<String>) {
+        self.line(mini_log::Level::Warning, msg.into());
+    }
+    pub fn error(&self, msg: impl Into<String>) {
+        self.line(mini_log::Level::Error, msg.into());
+    }
+}
+
+pub fn debug_log_path(paths: &Paths) -> std::path::PathBuf {
+    paths.config.parent().map(|p| p.join("debug.log")).unwrap_or_else(|| "debug.log".into())
+}
+
+/// For callers that see sync_now fail: record the error without needing the
+/// DebugLog instance that died with it.
+pub fn debug_log_error(paths: &Paths, msg: &str) {
+    let enabled = load_config(paths).ok().flatten().map(|c| c.debug_logging).unwrap_or(false);
+    DebugLog::open(paths, enabled).error(msg);
+}
+
+/// Short human label for the configured store ("which storage").
+fn store_label(store: &engine::StoreConfig) -> String {
+    match store {
+        engine::StoreConfig::Folder { path, .. } => format!("folder {path}"),
+        engine::StoreConfig::S3 { endpoint, bucket, .. } => format!("s3 {bucket} @ {endpoint}"),
+        engine::StoreConfig::AzureSas { .. } => "azure blob (SAS)".to_string(),
+    }
 }
 
 fn now_ms() -> i64 {
@@ -271,6 +332,7 @@ pub fn default_config() -> Result<AppConfig> {
         sync_plugins: false,
         autosync: false,
         autosync_interval_mins: default_interval_mins(),
+        debug_logging: false,
         sync_registry: true,
         disabled_tools: Vec::new(),
         disabled_scopes: Vec::new(),
@@ -602,11 +664,16 @@ pub struct SyncOutcome {
 /// `progress(done, total)` fires as push chunks complete; `total + 1` marks
 /// the pull phase, and the final call is `(total + 1, total + 1)`.
 pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) -> Result<SyncOutcome> {
+    let sync_t0 = std::time::Instant::now();
     let mut config = load_config(paths)?.context("VibeSync is not configured yet")?;
+    let dlog = DebugLog::open(paths, config.debug_logging);
+    dlog.info(format!("sync start — storage: {}", store_label(&config.store)));
     resolve_secrets(&mut config)?;
     let cache_dir = paths.config.parent().map(|p| p.to_path_buf());
+    let t = std::time::Instant::now();
     let store =
         engine::open_store_cached(&config.store, config.passphrase.as_deref(), cache_dir.as_deref())?;
+    dlog.info(format!("store opened in {} ms", t.elapsed().as_millis()));
     // Project identity mapping: learn `git origin -> local clone root` from
     // this machine's own sidebar entries, so the same repo cloned at
     // different paths on different machines still syncs as ONE project.
@@ -675,32 +742,48 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     let copilot_on = on("copilot") && copilot_inst;
     // All config dirs: ~/.claude plus auto-detected ~/.claude-* profiles.
     let dirs = engine::adapters::Adapter::detect_config_dirs(&home);
+    let scan_t0 = std::time::Instant::now();
     let mut entries = Vec::new();
+    let mut scan_mark = 0usize;
+    let scan_log = |dlog: &DebugLog, label: &str, entries: &Vec<engine::FileEntry>, mark: &mut usize| {
+        dlog.info(format!("scan {label}: {} files", entries.len() - *mark));
+        *mark = entries.len();
+    };
     if claude_on {
         for dir in &dirs {
             entries.extend(CLAUDE_CODE.scan_dir(&home, dir, &tok, include_plugins)?);
         }
     }
+    if dlog.0.is_some() || mini_log::is_enabled(mini_log::Level::Info) {
+        scan_log(&dlog, "claude", &entries, &mut scan_mark);
+    }
     if vscode_on {
         entries.extend(engine::vscode::scan(&home)?);
+    }
+    if dlog.0.is_some() || mini_log::is_enabled(mini_log::Level::Info) {
+        scan_log(&dlog, "vscode", &entries, &mut scan_mark);
     }
     if codex_on {
         entries.extend(engine::codex::scan(&home)?);
         state.mark_deletions(engine::codex::SESSIONS_PREFIX, &entries);
     }
+    scan_log(&dlog, "codex", &entries, &mut scan_mark);
     if opencode_on {
         entries.extend(engine::opencode::scan(&home)?);
         state.mark_deletions(engine::opencode::PREFIX, &entries);
     }
+    scan_log(&dlog, "opencode", &entries, &mut scan_mark);
     if copilot_on {
         entries.extend(engine::copilot::scan(&home)?);
         state.mark_deletions(engine::copilot::PREFIX, &entries);
     }
+    scan_log(&dlog, "copilot", &entries, &mut scan_mark);
     let shared_on = !config.disabled_scopes.iter().any(|s| s == "shared");
     if shared_on {
         entries.extend(engine::adapters::SHARED_SKILLS.scan(&home, &tok, false)?);
         state.mark_deletions("shared/skills", &entries);
     }
+    scan_log(&dlog, "shared skills", &entries, &mut scan_mark);
     // Per-scope switches: drop disabled scopes from the push set.
     let off: Vec<String> = config.disabled_scopes.clone();
     entries.retain(|e| scope_of(&e.logical).map(|s| !off.iter().any(|o| o == s)).unwrap_or(true));
@@ -723,7 +806,15 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // ONE store listing for the whole sync — every pull below shares it.
     // (Each adapter used to list separately: 7+ full listings with per-object
     // meta fetches per sync.)
+    let t = std::time::Instant::now();
     let listing = store.list()?;
+    dlog.info(format!(
+        "scanned {} local files in {} ms; store listing: {} objects in {} ms",
+        entries.len(),
+        scan_t0.elapsed().as_millis(),
+        listing.len(),
+        t.elapsed().as_millis()
+    ));
     // Unified progress space: pushed files + pull-side entries + registry.
     let total = entries.len() + listing.len() + 1;
     let done = std::sync::atomic::AtomicUsize::new(0);
@@ -741,6 +832,12 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // Chunked push so the UI gets real progress.
     let machine = engine::machine_name();
     let mut push = engine::Report::default();
+    let to_push_bytes: u64 = entries
+        .iter()
+        .filter(|e| state.files.get(&e.logical).map(|st| st.hash != e.hash).unwrap_or(true))
+        .map(|e| e.size)
+        .sum();
+    let push_t0 = std::time::Instant::now();
     for chunk in entries.chunks(10) {
         let r = engine::sync::push(chunk, &mut state, store.as_ref(), &machine)?;
         push.pushed += r.pushed;
@@ -749,11 +846,25 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         report_progress(d);
     }
 
+    {
+        let ms = push_t0.elapsed().as_millis().max(1);
+        let mbps = (to_push_bytes as f64 / (1024.0 * 1024.0)) / (ms as f64 / 1000.0);
+        dlog.info(format!(
+            "push: {} files ({:.1} MB) in {} ms — {:.1} MB/s up, {} unchanged",
+            push.pushed,
+            to_push_bytes as f64 / (1024.0 * 1024.0),
+            ms,
+            if push.pushed > 0 { mbps } else { 0.0 },
+            push.unchanged
+        ));
+    }
+    let pull_t0 = std::time::Instant::now();
+    let pulled_bytes = std::sync::atomic::AtomicU64::new(0);
     let mut pull = engine::Report::default();
     // Provenance: every pulled object's store meta names the machine that
     // uploaded it. Applies call record_pull(logical) on each real apply.
-    let source_of: std::collections::HashMap<&str, &str> =
-        listing.iter().map(|(l, m)| (l.as_str(), m.source.as_str())).collect();
+    let source_of: std::collections::HashMap<&str, (&str, u64)> =
+        listing.iter().map(|(l, m)| (l.as_str(), (m.source.as_str(), m.size))).collect();
     let this_machine = canon_machine(&engine::machine_name());
     let arrivals: std::sync::Mutex<
         std::collections::BTreeMap<&'static str, std::collections::BTreeMap<String, usize>>,
@@ -765,7 +876,8 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         Default::default();
     let record_pull = |logical: &str| {
         let Some(tool) = tool_of(logical) else { return };
-        let Some(src) = source_of.get(logical) else { return };
+        let Some((src, size)) = source_of.get(logical) else { return };
+        pulled_bytes.fetch_add(*size, std::sync::atomic::Ordering::Relaxed);
         let src = canon_machine(src);
         if src == this_machine {
             return; // own uploads are not arrivals
@@ -774,7 +886,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         *a.entry(tool).or_default().entry(src).or_default() += 1;
     };
     let record_registry = |logical: &str| {
-        let Some(src) = source_of.get(logical) else { return };
+        let Some((src, _)) = source_of.get(logical) else { return };
         let src = canon_machine(src);
         if src == this_machine {
             return;
@@ -802,6 +914,12 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             pull.pulled += r.applied;
             pull.unchanged += r.unchanged;
             pull.skipped_newer_local += r.skipped_newer_local;
+            if r.parked > 0 {
+                dlog.warn(format!(
+                    "opencode: {} sessions parked (project folder not on this machine yet)",
+                    r.parked
+                ));
+            }
         }
     }
     if copilot_on {
@@ -859,6 +977,25 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         pull.skipped_deleted += r.skipped_deleted;
         pull.unchanged += r.unchanged;
     }
+    {
+        let ms = pull_t0.elapsed().as_millis().max(1);
+        let down = pulled_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        let mbps = (down as f64 / (1024.0 * 1024.0)) / (ms as f64 / 1000.0);
+        dlog.info(format!(
+            "pull: {} files ({:.1} MB) in {} ms — {:.1} MB/s down, {} unchanged",
+            pull.pulled,
+            down as f64 / (1024.0 * 1024.0),
+            ms,
+            if pull.pulled > 0 { mbps } else { 0.0 },
+            pull.unchanged
+        ));
+        if pull.skipped_newer_local > 0 {
+            dlog.warn(format!(
+                "{} files were newer locally than in the store (kept local; store version skipped)",
+                pull.skipped_newer_local
+            ));
+        }
+    }
     state.save(&paths.state)?;
 
     let (registry_pushed, registry_applied, registry_ghosts, registry_healed) =
@@ -868,13 +1005,23 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             // zeros made a real Windows failure indistinguishable from
             // "nothing to do".
             let err_path = paths.config.parent().unwrap().join("registry_last_error.txt");
+            let t = std::time::Instant::now();
             match sync_registry(paths, store.as_ref(), &tok, &mut state, &listing, &record_registry) {
                 Ok(r) => {
                     let _ = std::fs::remove_file(&err_path);
+                    dlog.info(format!(
+                        "claude sidebar: {} pushed, {} applied, {} ghosts skipped, {} healed in {} ms",
+                        r.0,
+                        r.1,
+                        r.2,
+                        r.3,
+                        t.elapsed().as_millis()
+                    ));
                     r
                 }
                 Err(e) => {
                     let _ = std::fs::write(&err_path, format!("{e:#}"));
+                    dlog.error(format!("claude sidebar sync failed: {e:#}"));
                     (0, 0, 0, 0)
                 }
             }
@@ -906,6 +1053,13 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         }
     }
     let _ = save_ledger(paths, &ledger);
+
+    dlog.info(format!(
+        "sync done in {} ms — {} up, {} down",
+        sync_t0.elapsed().as_millis(),
+        push.pushed,
+        pull.pulled
+    ));
 
     Ok(SyncOutcome {
         pushed: push.pushed,
@@ -1250,4 +1404,33 @@ fn sync_registry(
     }
     let _ = std::fs::write(&applied_path, serde_json::to_vec(&applied).unwrap_or_default());
     Ok((pushed, applied_count, ghosts, healed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_log_writes_mini_log_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths =
+            Paths { config: tmp.path().join("config.json"), state: tmp.path().join("state.json") };
+        let dlog = DebugLog::open(&paths, true);
+        dlog.info("hello world");
+        dlog.warn("watch out");
+        dlog.error("boom");
+        let text = std::fs::read_to_string(debug_log_path(&paths)).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        // [<timestamp>] - LEVEL - message, e.g. [2026-05-30 - 09:30:42:10] - INFO - hello world
+        assert!(lines[0].starts_with('['), "{}", lines[0]);
+        assert!(lines[0].contains("] - INFO - hello world"), "{}", lines[0]);
+        assert!(lines[1].contains("] - WARNING - watch out"), "{}", lines[1]);
+        assert!(lines[2].contains("] - ERROR - boom"), "{}", lines[2]);
+        // Disabled sink writes nothing new.
+        let off = DebugLog::open(&paths, false);
+        off.info("should not appear");
+        let text2 = std::fs::read_to_string(debug_log_path(&paths)).unwrap();
+        assert_eq!(text2.lines().count(), 3);
+    }
 }

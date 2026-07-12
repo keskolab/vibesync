@@ -335,6 +335,10 @@ impl S3Store {
             match self.get_bytes(key) {
                 Ok(v) => return Ok(v),
                 Err(e) => {
+                    mini_log::LogMessage::new(
+                        mini_log::Level::Warning,
+                        format!("store fetch retry for {key}: {e}"),
+                    );
                     last = Some(e);
                     std::thread::sleep(delay);
                     delay *= 2;
@@ -439,6 +443,10 @@ impl SyncStore for S3Store {
             .partition(|(logical, etag)| {
                 cache.entries.get(logical).map(|(e, _)| e == etag).unwrap_or(false)
             });
+        mini_log::LogMessage::new(
+            mini_log::Level::Debug,
+            format!("s3 list: {} cached metas, {} to fetch", hits.len(), misses.len()),
+        );
         let mut result: Vec<(String, RemoteMeta)> = hits
             .iter()
             .map(|(logical, _)| (logical.clone(), cache.entries[logical].1.clone()))
@@ -589,6 +597,10 @@ impl AzureSasStore {
             match self.get_bytes(key) {
                 Ok(v) => return Ok(v),
                 Err(e) => {
+                    mini_log::LogMessage::new(
+                        mini_log::Level::Warning,
+                        format!("store fetch retry for {key}: {e}"),
+                    );
                     last = Some(e);
                     std::thread::sleep(delay);
                     delay *= 2;
