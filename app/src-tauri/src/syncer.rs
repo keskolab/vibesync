@@ -1721,8 +1721,21 @@ fn sync_registry(
     let home = dirs::home_dir().context("no home dir")?;
     let mut heals: Vec<(String, serde_json::Value)> = Vec::new();
     for (sid, (entry, _)) in &local {
+        // Eligible: entries we created (applied set), plus any entry whose
+        // cwd folder no longer exists — dead-path entries predate applied
+        // tracking or come from a local folder move, and re-pointing them to
+        // the project's current clone is precisely the heal (it is a
+        // re-point, never a delete; the transcript travels along). Entries
+        // whose folder still exists and aren't ours stay untouchable.
         if !applied.contains(sid.as_str()) {
-            continue;
+            let cwd_gone = entry
+                .get("cwd")
+                .and_then(|c| c.as_str())
+                .map(|c| !std::path::Path::new(c).exists())
+                .unwrap_or(false);
+            if !cwd_gone {
+                continue;
+            }
         }
         let mut cand = entry.clone();
         if !registry::canonicalize_entry(&mut cand, tok) {
