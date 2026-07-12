@@ -31,15 +31,54 @@ static HASH_CACHE: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (i64, u64, String)>>,
 > = std::sync::LazyLock::new(Default::default);
 
+/// Aggregated hashing work since the last take — lets the app's debug log
+/// separate "traversal was slow" from "reading/hashing files was slow"
+/// (the latter usually means antivirus on-access scanning).
+#[derive(Debug, Default, Clone)]
+pub struct HashStats {
+    pub files_hashed: u64,
+    pub bytes_hashed: u64,
+    pub hash_ms: u64,
+    pub cache_hits: u64,
+    /// Worst single file: (path, ms).
+    pub slowest: Option<(std::path::PathBuf, u64)>,
+}
+
+static HASH_STATS: std::sync::LazyLock<std::sync::Mutex<HashStats>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Return and reset the accumulated stats.
+pub fn take_hash_stats() -> HashStats {
+    std::mem::take(&mut HASH_STATS.lock().unwrap())
+}
+
 pub fn hash_file(path: &Path) -> Result<String> {
     let meta = std::fs::metadata(path)?;
     let key = (mtime_ms(path).unwrap_or(0), meta.len());
     if let Some((m, s, h)) = HASH_CACHE.lock().unwrap().get(path) {
         if (*m, *s) == key {
+            HASH_STATS.lock().unwrap().cache_hits += 1;
             return Ok(h.clone());
         }
     }
+    let t = std::time::Instant::now();
     let hash = hash_file_uncached(path)?;
+    let ms = t.elapsed().as_millis() as u64;
+    {
+        let mut st = HASH_STATS.lock().unwrap();
+        st.files_hashed += 1;
+        st.bytes_hashed += key.1;
+        st.hash_ms += ms;
+        if st.slowest.as_ref().map(|(_, m)| ms > *m).unwrap_or(true) {
+            st.slowest = Some((path.to_path_buf(), ms));
+        }
+    }
+    if ms > 500 {
+        mini_log::LogMessage::new(
+            mini_log::Level::Warning,
+            format!("slow file read/hash: {} took {ms} ms ({} KB)", path.display(), key.1 / 1024),
+        );
+    }
     HASH_CACHE.lock().unwrap().insert(path.to_path_buf(), (key.0, key.1, hash.clone()));
     Ok(hash)
 }
