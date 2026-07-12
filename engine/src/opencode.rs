@@ -162,15 +162,17 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
             continue;
         };
         on_file();
-        if let Some(st) = state.files.get(logical) {
-            if st.deleted_locally || st.hash == meta.hash {
-                report.unchanged += 1;
-                continue;
-            }
-        }
         let mut abs = base.clone();
         for c in rel.split('/') {
             abs.push(c);
+        }
+        if let Some(st) = state.files.get(logical) {
+            // State is trusted only while the file is really there — a
+            // synced-then-cleaned file must re-download, not skip forever.
+            if st.deleted_locally || (st.hash == meta.hash && abs.exists()) {
+                report.unchanged += 1;
+                continue;
+            }
         }
         if abs.exists() {
             if hash_file(&abs)? == meta.hash {
@@ -990,6 +992,13 @@ mod tests {
         std::fs::create_dir_all(b.join(".local/share/opencode/storage")).unwrap();
         let mut state_b = SyncState::default();
         let listing = store.list().unwrap();
+        let report = apply(&b, &mut state_b, &store, &listing, &|| {}, &|_| {}).unwrap();
+        assert_eq!(report.applied, 1);
+        assert!(b.join(".local/share/opencode/storage/session/ses_1.json").exists());
+
+        // A synced-then-deleted local file re-downloads instead of skipping
+        // forever on the strength of stale state.
+        std::fs::remove_file(b.join(".local/share/opencode/storage/session/ses_1.json")).unwrap();
         let report = apply(&b, &mut state_b, &store, &listing, &|| {}, &|_| {}).unwrap();
         assert_eq!(report.applied, 1);
         assert!(b.join(".local/share/opencode/storage/session/ses_1.json").exists());

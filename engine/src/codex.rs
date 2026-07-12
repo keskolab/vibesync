@@ -178,15 +178,17 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
         // Session files.
         let Some(rest) = logical.strip_prefix(&session_prefix) else { continue };
         on_file();
-        if let Some(st) = state.files.get(logical) {
-            if st.deleted_locally || st.hash == meta.hash {
-                report.unchanged += 1;
-                continue;
-            }
-        }
         let mut abs = sessions_root.clone();
         for c in rest.split('/') {
             abs.push(c);
+        }
+        if let Some(st) = state.files.get(logical) {
+            // State is trusted only while the file is really there — a
+            // synced-then-cleaned file must re-download, not skip forever.
+            if st.deleted_locally || (st.hash == meta.hash && abs.exists()) {
+                report.unchanged += 1;
+                continue;
+            }
         }
         if abs.exists() {
             if hash_file(&abs)? == meta.hash {
