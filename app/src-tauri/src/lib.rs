@@ -1,4 +1,5 @@
 mod syncer;
+mod updates;
 
 use tauri::{
     image::Image,
@@ -667,6 +668,8 @@ pub fn run() {
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updates::PendingUpdate::default())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -679,6 +682,8 @@ pub fn run() {
             detect_tools,
             detect_onboarding_tools,
             engine_version,
+            updates::check_for_updates,
+            updates::install_pending_update,
             is_syncing,
             get_status,
             configure_default_store,
@@ -755,6 +760,7 @@ pub fn run() {
                 }
             }
             spawn_autosync_worker(app.handle().clone());
+            tauri::async_runtime::spawn(updates::run_startup_update_check(app.handle().clone()));
 
             Ok(())
         })

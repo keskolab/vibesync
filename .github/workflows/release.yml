@@ -1,46 +1,83 @@
+# Release builds: push a tag like v0.2.0 and this publishes a DRAFT GitHub
+# release with installers for macOS (universal), Windows, and Linux, plus the
+# signed latest.json manifest the in-app updater consumes. Publish the draft
+# to ship it.
+#
+# Before tagging: bump the version in app/src-tauri/tauri.conf.json AND the
+# workspace Cargo.toml so the manifest version matches the tag.
+#
+# Required repo secret (already set): TAURI_SIGNING_PRIVATE_KEY.
+# Optional, for OS code signing when you have the certificates:
+#   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID  (macOS Developer ID + notarization)
+#   WINDOWS_CERTIFICATE, WINDOWS_CERTIFICATE_PASSWORD  (Windows Authenticode)
 name: Release
 
 on:
   push:
-    tags: ["v*"]
-
-env:
-  CARGO_TERM_COLOR: always
+    tags:
+      - 'v[0-9]+*'
 
 jobs:
-  build:
-    name: Build & release (${{ matrix.os }})
+  release:
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            args: --target universal-apple-darwin
-          - os: windows-latest
-            args: ""
-    runs-on: ${{ matrix.os }}
+          - platform: macos-latest
+            args: --target universal-apple-darwin --bundle all
+          - platform: ubuntu-22.04
+            args: --bundle all
+          - platform: windows-latest
+            args: --bundle all
+
+    runs-on: ${{ matrix.platform }}
+
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Add macOS universal targets
-        if: matrix.os == 'macos-latest'
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: 22
-      - run: cargo test -p vibesync-engine
-      - run: npm ci
+          node-version: lts/*
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install frontend dependencies
         working-directory: app
-      - uses: tauri-apps/tauri-action@v0
+        run: npm install
+
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           projectPath: app
           tagName: ${{ github.ref_name }}
-          releaseName: "VibeSync ${{ github.ref_name }}"
+          releaseName: VibeSync ${{ github.ref_name }}
+          releaseBody: See the assets below to download this version. `latest.json` is the auto-updater manifest.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
