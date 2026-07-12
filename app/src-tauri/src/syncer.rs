@@ -665,6 +665,7 @@ pub struct SyncOutcome {
 /// the pull phase, and the final call is `(total + 1, total + 1)`.
 pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) -> Result<SyncOutcome> {
     let sync_t0 = std::time::Instant::now();
+    let _ = engine::scanner::take_hash_stats(); // reset for this sync's report
     let mut config = load_config(paths)?.context("VibeSync is not configured yet")?;
     let dlog = DebugLog::open(paths, config.debug_logging);
     dlog.info(format!("sync start — storage: {}", store_label(&config.store)));
@@ -678,6 +679,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // this machine's own sidebar entries, so the same repo cloned at
     // different paths on different machines still syncs as ONE project.
     let gitmap_path = paths.config.parent().unwrap().join("git_roots.json");
+    let gitmap_t0 = std::time::Instant::now();
     let mut gitmap = engine::gitmap::GitMap::load(&gitmap_path);
     let mut gitmap_changed = false;
     if let Some(dir) = registry_dir() {
@@ -704,6 +706,12 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     if gitmap_changed {
         let _ = gitmap.save(&gitmap_path);
     }
+    dlog.info(format!(
+        "project map: {} git roots, {} manual mappings in {} ms",
+        gitmap.roots.len(),
+        config.project_mappings.len(),
+        gitmap_t0.elapsed().as_millis()
+    ));
     let tok = engine::Tokenizer::from_env()?
         .with_gitmap(&gitmap)
         .with_manual_projects(&config.project_mappings);
@@ -745,24 +753,26 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     let scan_t0 = std::time::Instant::now();
     let mut entries = Vec::new();
     let mut scan_mark = 0usize;
+    let scan_clock = std::cell::Cell::new(std::time::Instant::now());
     let scan_log = |dlog: &DebugLog, label: &str, entries: &Vec<engine::FileEntry>, mark: &mut usize| {
-        dlog.info(format!("scan {label}: {} files", entries.len() - *mark));
+        dlog.info(format!(
+            "scan {label}: {} files in {} ms",
+            entries.len() - *mark,
+            scan_clock.get().elapsed().as_millis()
+        ));
         *mark = entries.len();
+        scan_clock.set(std::time::Instant::now());
     };
     if claude_on {
         for dir in &dirs {
             entries.extend(CLAUDE_CODE.scan_dir(&home, dir, &tok, include_plugins)?);
         }
     }
-    if dlog.0.is_some() || mini_log::is_enabled(mini_log::Level::Info) {
-        scan_log(&dlog, "claude", &entries, &mut scan_mark);
-    }
+    scan_log(&dlog, "claude", &entries, &mut scan_mark);
     if vscode_on {
         entries.extend(engine::vscode::scan(&home)?);
     }
-    if dlog.0.is_some() || mini_log::is_enabled(mini_log::Level::Info) {
-        scan_log(&dlog, "vscode", &entries, &mut scan_mark);
-    }
+    scan_log(&dlog, "vscode", &entries, &mut scan_mark);
     if codex_on {
         entries.extend(engine::codex::scan(&home)?);
         state.mark_deletions(engine::codex::SESSIONS_PREFIX, &entries);
@@ -815,6 +825,24 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         listing.len(),
         t.elapsed().as_millis()
     ));
+    {
+        let hs = engine::scanner::take_hash_stats();
+        dlog.info(format!(
+            "hashing: {} files read ({:.1} MB) in {} ms, {} unchanged served from cache",
+            hs.files_hashed,
+            hs.bytes_hashed as f64 / (1024.0 * 1024.0),
+            hs.hash_ms,
+            hs.cache_hits
+        ));
+        if let Some((path, ms)) = hs.slowest {
+            if ms > 250 {
+                dlog.warn(format!(
+                    "slowest file: {} took {ms} ms — repeated slow reads usually mean antivirus is scanning every file VibeSync opens",
+                    path.display()
+                ));
+            }
+        }
+    }
     // Unified progress space: pushed files + pull-side entries + registry.
     let total = entries.len() + listing.len() + 1;
     let done = std::sync::atomic::AtomicUsize::new(0);
