@@ -461,14 +461,26 @@ pub fn db_push(
         let bytes = serde_json::to_vec(&obj)?;
         let hash = hash_bytes(&bytes);
         let logical = format!("{DB_PREFIX}/{id}.json");
+        // Two memories per thread, in separate state slots: the store
+        // version we've SEEN (main slot, written by apply) and our OWN
+        // canonical form (#own slot, written here). One slot for both
+        // brought the ping-pong back: apply's kept-branch recorded the
+        // OTHER machine's hash, erasing the memory that our bytes hadn't
+        // changed — machines on different Codex schema generations never
+        // serialize identically, so both sides re-exported forever.
+        let own_slot = format!("{logical}#own");
+        let own_prev = state.files.get(&own_slot).map(|s| s.hash == hash).unwrap_or(false)
+            || state.files.get(&logical).map(|s| s.hash == hash).unwrap_or(false);
+        state.files.insert(
+            own_slot,
+            FileState { hash: hash.clone(), mtime_ms: eff, size: 0, deleted_locally: false },
+        );
         if let Some((rhash, rmtime)) = remote.get(logical.as_str()) {
             // A strictly newer store copy always wins; at EQUAL version we
             // re-publish only when our own canonical bytes changed since we
-            // last pushed/recorded this thread (a heal, a mapping, an
-            // equal-time edit). That comparison is against OUR state — a
-            // deterministic local fact — so cross-machine serialization
-            // drift converges in one bounded hop instead of ping-ponging.
-            let own_prev = state.files.get(&logical).map(|s| s.hash == hash).unwrap_or(false);
+            // last pushed this thread (a heal, a mapping, an equal-time
+            // edit) — a deterministic local fact, so drift converges in one
+            // bounded hop instead of ping-ponging.
             if *rmtime > 0 && (*rhash == hash || *rmtime > eff || (*rmtime >= eff && own_prev)) {
                 unchanged += 1;
                 continue;
@@ -892,6 +904,16 @@ mod db_tests {
         // then settles. Bounded, not a ping-pong.
         c.execute("UPDATE threads SET title='renamed locally' WHERE id='th1'", []).unwrap();
         assert_eq!(db_push(&b, &tok_b, &mut st_b, &store, "b", &store.list().unwrap()).unwrap(), 1);
+        assert_eq!(db_push(&b, &tok_b, &mut st_b, &store, "b", &store.list().unwrap()).unwrap(), 0);
+
+        // Settlement: A sees B's equal-version re-publication, keeps its
+        // own (same version), records what it saw — and NEITHER machine
+        // exports again. The #own slot preserves the no-change memory even
+        // after apply records the foreign hash.
+        assert_eq!(db_push(&a, &tok_a, &mut st_a, &store, "a", &store.list().unwrap()).unwrap(), 0);
+        let ra = db_apply(&a, &tok_a, &mut st_a, &store, &store.list().unwrap(), &|| {}, &|_| {}).unwrap();
+        assert_eq!(ra.applied, 0);
+        assert_eq!(db_push(&a, &tok_a, &mut st_a, &store, "a", &store.list().unwrap()).unwrap(), 0);
         assert_eq!(db_push(&b, &tok_b, &mut st_b, &store, "b", &store.list().unwrap()).unwrap(), 0);
 
         // Newer local thread: untouched by an older remote.
