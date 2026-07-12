@@ -34,11 +34,24 @@ fn root(home: &Path) -> PathBuf {
 /// logs). Pre-gating VibeSync versions created sessions/ + the index on
 /// machines without Codex — such residue must not read as an install.
 pub fn detect(home: &Path) -> bool {
-    let Ok(rd) = std::fs::read_dir(root(home)) else { return false };
-    rd.flatten().any(|e| {
+    let dir = root(home);
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        crate::dlog::debug(|| format!("detect codex: NOT installed ({} missing)", dir.display()));
+        return false;
+    };
+    let found = rd.flatten().any(|e| {
         let n = e.file_name();
         n != "sessions" && n != "session_index.jsonl"
-    })
+    });
+    crate::dlog::debug(|| {
+        format!(
+            "detect codex: {} ({} {})",
+            if found { "installed" } else { "NOT installed (only sync residue)" },
+            dir.display(),
+            if found { "has real install files" } else { "" }
+        )
+    });
+    found
 }
 
 /// Scan session files (index is handled separately on push/apply).

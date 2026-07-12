@@ -179,9 +179,10 @@ async fn set_tool_enabled(
             .ok_or_else(|| anyhow::anyhow!("not configured yet"))?;
         cfg.disabled_tools.retain(|t| t != &id);
         if !enabled {
-            cfg.disabled_tools.push(id);
+            cfg.disabled_tools.push(id.clone());
         }
         syncer::save_config(&paths, &cfg)?;
+        syncer::debug_log_event(&paths, &format!("settings: tool {id} switched {}", if enabled { "ON" } else { "OFF" }));
         syncer::status(&paths)
     })
     .await
@@ -207,11 +208,12 @@ async fn set_scope_enabled(
             _ => {
                 cfg.disabled_scopes.retain(|s| s != &scope);
                 if !enabled {
-                    cfg.disabled_scopes.push(scope);
+                    cfg.disabled_scopes.push(scope.clone());
                 }
             }
         }
         syncer::save_config(&paths, &cfg)?;
+        syncer::debug_log_event(&paths, &format!("settings: scope {scope} switched {}", if enabled { "ON" } else { "OFF" }));
         syncer::status(&paths)
     })
     .await
@@ -316,6 +318,7 @@ async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> 
     tauri::async_runtime::spawn_blocking(move || {
         use tauri::Emitter;
         let paths = syncer::paths(&app)?;
+        syncer::debug_log_event(&paths, "manual sync requested");
         set_tray_busy(&app, true);
         let emitter = app.clone();
         let result = syncer::sync_now(&paths, move |done, total| {
@@ -382,7 +385,9 @@ fn set_autosync_interval(app: tauri::AppHandle, mins: u64) -> Result<(), String>
         .map_err(|e| e.to_string())?
         .ok_or("VibeSync is not configured yet")?;
     cfg.autosync_interval_mins = mins;
-    syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())
+    syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())?;
+    syncer::debug_log_event(&paths, &format!("settings: autosync interval -> {mins} min"));
+    Ok(())
 }
 
 /// Add or update a manual project mapping (fleet name -> local folder).
@@ -431,6 +436,7 @@ fn set_autosync(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
         cfg.autosync = enabled;
         syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())?;
     }
+    syncer::debug_log_event(&paths, &format!("settings: autosync switched {}", if enabled { "ON" } else { "OFF" }));
     Ok(())
 }
 
@@ -472,6 +478,7 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
             if now_ms - last_ms < (interval_secs as i64) * 1000 {
                 continue;
             }
+            syncer::debug_log_event(&paths, "autosync: interval reached — starting sync");
             set_tray_busy(&app, true);
             // Tell an open popover the background sync started — the tray
             // icon alone isn't visible from inside the window.

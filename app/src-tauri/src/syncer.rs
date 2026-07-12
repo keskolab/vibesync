@@ -165,6 +165,12 @@ pub fn debug_log_path(paths: &Paths) -> std::path::PathBuf {
 
 /// For callers that see sync_now fail: record the error without needing the
 /// DebugLog instance that died with it.
+/// Settings changes are sync-relevant state: record them when logging is on.
+pub fn debug_log_event(paths: &Paths, msg: &str) {
+    let enabled = load_config(paths).ok().flatten().map(|c| c.debug_logging).unwrap_or(false);
+    DebugLog::open(paths, enabled).info(msg);
+}
+
 pub fn debug_log_error(paths: &Paths, msg: &str) {
     let enabled = load_config(paths).ok().flatten().map(|c| c.debug_logging).unwrap_or(false);
     DebugLog::open(paths, enabled).error(msg);
@@ -764,6 +770,29 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             state.files.retain(|k, _| !k.starts_with(prefix));
         }
     }
+    for (id, inst, enabled) in [
+        ("claude-code", claude_inst, on("claude-code")),
+        ("vscode", vscode_inst, on("vscode")),
+        ("codex", codex_inst, on("codex")),
+        ("opencode", opencode_inst, on("opencode")),
+        ("zed", zed_inst, on("zed")),
+        ("copilot", copilot_inst, on("copilot")),
+    ] {
+        dlog.info(format!(
+            "tool {id}: installed={} switch={}{}",
+            if inst { "yes" } else { "no" },
+            if enabled { "on" } else { "OFF" },
+            if inst && enabled { " -> syncing" } else { " -> skipped" }
+        ));
+    }
+    dlog.info(format!(
+        "settings: autosync={} every {} min, plugins={}, sidebar={}, disabled scopes={:?}",
+        if config.autosync { "on" } else { "off" },
+        config.autosync_interval_mins,
+        if config.sync_plugins { "on" } else { "off" },
+        if config.sync_registry { "on" } else { "off" },
+        config.disabled_scopes
+    ));
     let claude_on = on("claude-code") && claude_inst;
     let vscode_on = on("vscode") && vscode_inst;
     let codex_on = on("codex") && codex_inst;
@@ -948,39 +977,54 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         *registry_arrivals.lock().unwrap().entry(src).or_default() += 1;
     };
     if codex_on {
-        let r = engine::codex::push_index(&home, &engine::machine_name(), &mut state, store.as_ref());
-        let _ = r;
-        if let Ok(r) = engine::codex::apply(&home, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
-            pull.pulled += r.pulled;
-            pull.unchanged += r.unchanged;
-            pull.skipped_newer_local += r.skipped_newer_local;
+        if let Err(e) = engine::codex::push_index(&home, &engine::machine_name(), &mut state, store.as_ref()) {
+            dlog.error(format!("codex: publishing session index failed: {e:#}"));
+        }
+        match engine::codex::apply(&home, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
+            Err(e) => dlog.error(format!("codex: apply failed: {e:#}")),
+            Ok(r) => {
+                pull.pulled += r.pulled;
+                pull.unchanged += r.unchanged;
+                pull.skipped_newer_local += r.skipped_newer_local;
+            }
         }
     }
     if opencode_on {
-        if let Ok(r) = engine::opencode::apply(&home, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
-            pull.pulled += r.pulled;
-            pull.unchanged += r.unchanged;
-            pull.skipped_newer_local += r.skipped_newer_local;
+        match engine::opencode::apply(&home, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
+            Err(e) => dlog.error(format!("opencode: file-layer apply failed: {e:#}")),
+            Ok(r) => {
+                pull.pulled += r.pulled;
+                pull.unchanged += r.unchanged;
+                pull.skipped_newer_local += r.skipped_newer_local;
+            }
         }
         // db layer: modern OpenCode keeps sessions ONLY in opencode.db.
-        let _ = engine::opencode::db_push(&home, &tok, &mut state, store.as_ref(), &engine::machine_name());
-        if let Ok(r) = engine::opencode::db_apply(&home, &tok, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
-            pull.pulled += r.applied;
-            pull.unchanged += r.unchanged;
-            pull.skipped_newer_local += r.skipped_newer_local;
-            if r.parked > 0 {
-                dlog.warn(format!(
-                    "opencode: {} sessions parked (project folder not on this machine yet)",
-                    r.parked
-                ));
+        if let Err(e) = engine::opencode::db_push(&home, &tok, &mut state, store.as_ref(), &engine::machine_name()) {
+            dlog.error(format!("opencode: exporting sessions from opencode.db failed: {e:#}"));
+        }
+        match engine::opencode::db_apply(&home, &tok, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
+            Err(e) => dlog.error(format!("opencode: merging sessions into opencode.db failed: {e:#}")),
+            Ok(r) => {
+                pull.pulled += r.applied;
+                pull.unchanged += r.unchanged;
+                pull.skipped_newer_local += r.skipped_newer_local;
+                if r.parked > 0 {
+                    dlog.warn(format!(
+                        "opencode: {} sessions parked (project folder not on this machine yet)",
+                        r.parked
+                    ));
+                }
             }
         }
     }
     if copilot_on {
-        if let Ok(r) = engine::copilot::apply(&home, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
-            pull.pulled += r.pulled;
-            pull.unchanged += r.unchanged;
-            pull.skipped_newer_local += r.skipped_newer_local;
+        match engine::copilot::apply(&home, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
+            Err(e) => dlog.error(format!("copilot: apply failed: {e:#}")),
+            Ok(r) => {
+                pull.pulled += r.pulled;
+                pull.unchanged += r.unchanged;
+                pull.skipped_newer_local += r.skipped_newer_local;
+            }
         }
     }
     if zed_on {
@@ -988,13 +1032,17 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         // yields db rows, not files. This call was missing entirely: no
         // machine ever published a thread, so the store's zed/ namespace
         // stayed empty fleet-wide.
-        if let Ok(n) = engine::zed::push(&home, &mut state, store.as_ref(), &engine::machine_name()) {
-            push.pushed += n;
+        match engine::zed::push(&home, &mut state, store.as_ref(), &engine::machine_name()) {
+            Err(e) => dlog.error(format!("zed: publishing threads failed: {e:#}")),
+            Ok(n) => push.pushed += n,
         }
-        if let Ok(r) = engine::zed::apply(&home, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
-            pull.pulled += r.applied;
-            pull.unchanged += r.unchanged;
-            pull.skipped_newer_local += r.skipped_newer_local;
+        match engine::zed::apply(&home, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
+            Err(e) => dlog.error(format!("zed: merging threads failed: {e:#}")),
+            Ok(r) => {
+                pull.pulled += r.applied;
+                pull.unchanged += r.unchanged;
+                pull.skipped_newer_local += r.skipped_newer_local;
+            }
         }
     }
     if vscode_on {
@@ -1397,6 +1445,14 @@ fn sync_registry(
         // would be an unopenable sidebar item. Skip it — and if WE wrote it
         // on a previous sync, remove it (self-heal already-synced ghosts).
         if !transcript_exists(&remote, &home) {
+            engine::dlog::debug(|| {
+                format!(
+                    "sidebar: skipping {sid} — transcript not on this machine ({})",
+                    transcript_path(&remote, &home)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "unresolvable path".into())
+                )
+            });
             ghosts += 1;
             // We only ever wrote entries tracked in `applied`; a machine's own
             // native entries are never in that set, so this cannot delete them.
@@ -1426,6 +1482,9 @@ fn sync_registry(
                 // BOTH entries from the sidebar).
                 if let Some(cli) = remote.get("cliSessionId").and_then(|s| s.as_str()) {
                     if cli_ids.contains(cli) {
+                        engine::dlog::warn(|| {
+                            format!("sidebar: NOT applying {sid} — cliSessionId collision ({cli})")
+                        });
                         continue;
                     }
                 }
@@ -1454,8 +1513,9 @@ fn sync_registry(
                 logical.clone(),
                 engine::FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
             );
+            engine::dlog::debug(|| format!("sidebar: applied entry {sid}"));
             on_pulled(logical);
-        applied_count += 1;
+            applied_count += 1;
         }
     }
     let _ = std::fs::write(&applied_path, serde_json::to_vec(&applied).unwrap_or_default());

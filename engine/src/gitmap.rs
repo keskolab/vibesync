@@ -173,7 +173,12 @@ impl GitMap {
     /// — and the replaced root is kept as a tokenize-only alias so existing
     /// transcript dirs (named after the old path) keep their canonical keys.
     pub fn learn(&mut self, cwd: &Path) -> bool {
-        let Some((root, id)) = discover(cwd) else { return false };
+        let Some((root, id)) = discover(cwd) else {
+            crate::dlog::debug(|| {
+                format!("project map: {} is not in a git repo with an origin", cwd.display())
+            });
+            return false;
+        };
         let root = root.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
         match self.roots.get(&id) {
             Some(existing) if Path::new(existing).exists() => false,
@@ -186,6 +191,7 @@ impl GitMap {
                     }
                     aliases.retain(|a| *a != root);
                 }
+                crate::dlog::info(|| format!("project map: learned {id} -> {root}"));
                 self.roots.insert(id, root);
                 true
             }

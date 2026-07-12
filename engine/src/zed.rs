@@ -45,13 +45,21 @@ pub fn db_path() -> Option<PathBuf> {
 /// Installed = a Zed dir exists (threads.db only appears after first agent
 /// use, so don't require it).
 pub fn detect() -> bool {
-    if db_path().is_some() {
+    if let Some(db) = db_path() {
+        crate::dlog::debug(|| format!("detect zed: installed (threads db at {})", db.display()));
         return true;
     }
-    [dirs::config_dir(), dirs::data_dir(), dirs::data_local_dir()]
+    let found = [dirs::config_dir(), dirs::data_dir(), dirs::data_local_dir()]
         .into_iter()
         .flatten()
-        .any(|d| d.join("Zed").is_dir())
+        .any(|d| d.join("Zed").is_dir());
+    crate::dlog::debug(|| {
+        format!(
+            "detect zed: {}",
+            if found { "installed (Zed dir, no threads db yet)" } else { "NOT installed" }
+        )
+    });
+    found
 }
 
 #[derive(Debug, Serialize, Deserialize)]

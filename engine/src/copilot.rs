@@ -29,8 +29,20 @@ fn root(home: &Path) -> PathBuf {
 /// Installed = ~/.copilot holds something a real install writes (config,
 /// logs, settings). A dir with only session-state/ is sync residue.
 pub fn detect(home: &Path) -> bool {
-    let Ok(rd) = std::fs::read_dir(root(home)) else { return false };
-    rd.flatten().any(|e| e.file_name() != "session-state")
+    let dir = root(home);
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        crate::dlog::debug(|| format!("detect copilot: NOT installed ({} missing)", dir.display()));
+        return false;
+    };
+    let found = rd.flatten().any(|e| e.file_name() != "session-state");
+    crate::dlog::debug(|| {
+        format!(
+            "detect copilot: {} ({})",
+            if found { "installed" } else { "NOT installed (only sync residue)" },
+            dir.display()
+        )
+    });
+    found
 }
 
 pub fn scan(home: &Path) -> Result<Vec<FileEntry>> {
