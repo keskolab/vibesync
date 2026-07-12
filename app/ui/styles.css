@@ -447,13 +447,6 @@ header {
   opacity: 1;
 }
 
-/* de-emphasized parenthetical after a card title */
-.name-note {
-  font-weight: 400;
-  font-size: 10.5px;
-  color: var(--text-2);
-}
-
 /* "+N new" chip on a card whose tool received synced items */
 .badge-new {
   color: var(--accent);
