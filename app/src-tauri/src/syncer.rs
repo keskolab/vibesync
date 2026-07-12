@@ -1091,15 +1091,10 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         if !(*inst && *enabled) {
             continue;
         }
-        if let Some(publish) = t.publish {
-            match publish(&apply_env, &mut state) {
-                Ok(n) => push.pushed += n,
-                Err(e) => {
-                    dlog.error(format!("{}: publish failed: {e:#}", t.id));
-                    tool_errors.push(format!("{}: publish failed", t.id));
-                }
-            }
-        }
+        // Apply BEFORE publish: publish rewrites store objects and their
+        // state records, and the listing snapshot predates it — applying
+        // afterwards would read stale metas for objects we just replaced,
+        // clobber the fresh state, and re-export the same content forever.
         let t0 = std::time::Instant::now();
         match (t.apply)(&apply_env, &mut state) {
             Err(e) => {
@@ -1130,6 +1125,15 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
                 pull.unchanged += r.unchanged;
                 pull.skipped_newer_local += r.skipped_newer_local;
                 pull.skipped_deleted += r.skipped_deleted;
+            }
+        }
+        if let Some(publish) = t.publish {
+            match publish(&apply_env, &mut state) {
+                Ok(n) => push.pushed += n,
+                Err(e) => {
+                    dlog.error(format!("{}: publish failed: {e:#}", t.id));
+                    tool_errors.push(format!("{}: publish failed", t.id));
+                }
             }
         }
     }
