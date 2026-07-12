@@ -97,14 +97,49 @@ pub(crate) fn tokenize_field(
     }
 }
 
+/// A `${HOME}`-tokenized path keeps the ORIGIN machine's separators in its
+/// tail, so cross-OS expansion yields `/Users/x\.codex\...` — which then
+/// fails every exists() check even though the file is right there. Make the
+/// expanded value self-consistent with its own root shape.
+pub(crate) fn normalize_path_shape(s: &str) -> String {
+    let b = s.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        s.replace('/', "\\")
+    } else if s.starts_with('/') {
+        s.replace('\\', "/")
+    } else {
+        s.to_string()
+    }
+}
+
 pub(crate) fn expand_field(
     m: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
     tok: &Tokenizer,
 ) {
     if let Some(serde_json::Value::String(s)) = m.get(key) {
-        let e = tok.expand_plain(s);
+        let e = normalize_path_shape(&tok.expand_plain(s));
         m.insert(key.to_string(), serde_json::Value::String(e));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cross_os_expansion_normalizes_separators() {
+        let tok = Tokenizer::with_case_sensitivity("/Users/u", false);
+        let mut m = serde_json::Map::new();
+        // A Windows machine tokenized its rollout path with backslash tails.
+        m.insert(
+            "rollout_path".to_string(),
+            serde_json::Value::String("${HOME}\\.codex\\sessions\\r.jsonl".to_string()),
+        );
+        expand_field(&mut m, "rollout_path", &tok);
+        assert_eq!(m["rollout_path"], "/Users/u/.codex/sessions/r.jsonl");
+        // And the reverse shape for drive-letter paths.
+        assert_eq!(normalize_path_shape("C:\\Users\\w/dev/proj"), "C:\\Users\\w\\dev\\proj");
     }
 }
 
