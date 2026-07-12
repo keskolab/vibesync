@@ -487,7 +487,7 @@ pub fn db_apply(
         for f in THREAD_PATH_FIELDS {
             expand_field(t, f, tok);
         }
-        map_sandbox_paths(t, &|p| tok.expand_plain(p));
+        map_sandbox_paths(t, &|p| crate::dbsync::normalize_path_shape(&tok.expand_plain(p)));
         let parked = THREAD_PATH_FIELDS.iter().any(|k| {
             t.get(*k)
                 .and_then(|v| v.as_str())
@@ -511,14 +511,6 @@ pub fn db_apply(
             .and_then(|v| v.as_i64())
             .or_else(|| t.get("updated_at").and_then(|v| v.as_i64()).map(|s| s * 1000))
             .unwrap_or(0);
-        if !rollout.is_empty() && !Path::new(&rollout).exists() {
-            crate::dlog::debug(|| {
-                format!("codex db: {id} awaiting its rollout file ({rollout}) — retrying next sync")
-            });
-            report.parked += 1;
-            awaiting += 1;
-            continue;
-        }
         if conn.is_none() {
             let bak = db.with_extension("sqlite.vibesync-bak");
             if !bak.exists() {
@@ -540,6 +532,16 @@ pub fn db_apply(
                 );
                 continue;
             }
+        }
+        // Rollout gate AFTER the newer-local check, so an already-known
+        // thread doesn't re-download its export every sync while waiting.
+        if !rollout.is_empty() && !Path::new(&rollout).exists() {
+            crate::dlog::debug(|| {
+                format!("codex db: {id} awaiting its rollout file ({rollout}) — retrying next sync")
+            });
+            report.parked += 1;
+            awaiting += 1;
+            continue;
         }
         crate::dlog::debug(|| format!("codex db: merging thread {id}"));
         let local_row_t = local_row.as_ref().map(thread_eff).unwrap_or(0);
