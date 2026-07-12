@@ -315,7 +315,7 @@ function renderAll() {
 	if (status.sharedInstalled) {
 		sl.innerHTML = `<li class="tip-host">
       ${ICONS.shared}
-      <div class="tlabel"><span class="tname">Global Skills <span class="name-note">(used by all AI tools)</span><span class="help-tip" tabindex="0"><svg viewBox="0 0 16 16" aria-label="About global skills"><path d="M8 1.2a6.8 6.8 0 1 0 0 13.6A6.8 6.8 0 0 0 8 1.2zm0 1.5a5.3 5.3 0 1 1 0 10.6A5.3 5.3 0 0 1 8 2.7zm.1 2.1c-1.2 0-2.1.7-2.4 1.8l1.3.4c.1-.5.5-.9 1.1-.9.5 0 .9.3.9.8 0 .9-1.6 1-1.6 2.4v.3h1.4v-.2c0-.8 1.7-1 1.7-2.5 0-1.2-1-2.1-2.4-2.1zM8 11a.9.9 0 1 0 0 1.8A.9.9 0 0 0 8 11z"/></svg><span class="tip-bubble">Reusable skills every AI tool can read (the Agent Skills standard). VibeSync keeps this folder identical on all your computers. Location: ${SKILLS_PATH}</span></span></span><span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"}, ${fmtSizeStr(status.sharedBytes)}${newBadge(status.sharedNew, status.sharedNewMs, status.sharedNewSeen)}</span></div>
+      <div class="tlabel"><span class="tname">Global Skills <span class="help-tip" tabindex="0"><svg viewBox="0 0 16 16" aria-label="About global skills"><path d="M8 1.2a6.8 6.8 0 1 0 0 13.6A6.8 6.8 0 0 0 8 1.2zm0 1.5a5.3 5.3 0 1 1 0 10.6A5.3 5.3 0 0 1 8 2.7zm.1 2.1c-1.2 0-2.1.7-2.4 1.8l1.3.4c.1-.5.5-.9 1.1-.9.5 0 .9.3.9.8 0 .9-1.6 1-1.6 2.4v.3h1.4v-.2c0-.8 1.7-1 1.7-2.5 0-1.2-1-2.1-2.4-2.1zM8 11a.9.9 0 1 0 0 1.8A.9.9 0 0 0 8 11z"/></svg><span class="tip-bubble">Reusable skills every AI tool can read (the Agent Skills standard). VibeSync keeps this folder identical on all your computers. Location: ${SKILLS_PATH}</span></span></span><span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"}, ${fmtSizeStr(status.sharedBytes)}${newBadge(status.sharedNew, status.sharedNewMs, status.sharedNewSeen)}</span></div>
       <label class="switch"><input type="checkbox" ${status.sharedEnabled ? "checked" : ""} /><span class="knob"></span></label>
       <span class="chevron-spacer"></span>`;
 		sl.querySelector(".help-tip")?.addEventListener("click", (e) => e.stopPropagation());
@@ -342,7 +342,7 @@ function renderAll() {
 	} else {
 		sl.innerHTML = `<li class="muted">
       ${ICONS.shared}
-      <div class="tlabel"><span class="tname">Global Skills <span class="name-note">(used by all AI tools)</span></span><span class="tsub">No skills folder on this ${DEVICE} yet.<br>Path: ${SKILLS_PATH} — press Create to make it.</span></div>
+      <div class="tlabel"><span class="tname">Global Skills</span><span class="tsub">No skills folder on this ${DEVICE} yet.<br>Path: ${SKILLS_PATH} — press Create to make it.</span></div>
       <button class="row-btn" id="create-skills">Create</button>`;
 		sl.querySelector("#create-skills").addEventListener("click", async () => {
 			status = await invoke("create_skills_dir");
