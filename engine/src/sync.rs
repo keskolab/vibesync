@@ -24,6 +24,8 @@ pub struct Report {
     pub skipped_newer_local: usize,
     pub skipped_deleted: usize,
     pub unchanged: usize,
+    /// Entries waiting for a project/repo that isn't on this machine yet.
+    pub parked: usize,
 }
 
 /// Upload every scanned entry whose content the store doesn't have yet.
@@ -139,6 +141,7 @@ pub fn pull_dir(
             // Repo unknown on this machine: park in the store (state stays
             // untracked, so the entry is retried once the repo appears).
             crate::dlog::debug(|| format!("parked (project not on this machine): {logical}"));
+            report.parked += 1;
             on_file();
             continue;
         }

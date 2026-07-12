@@ -47,6 +47,44 @@ pub struct HashStats {
 static HASH_STATS: std::sync::LazyLock<std::sync::Mutex<HashStats>> =
     std::sync::LazyLock::new(Default::default);
 
+static HASH_CACHE_FILE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// Persist the hash cache across app launches: without this, every fresh
+/// process re-reads every file once (a 2-minute Defender-throttled ordeal on
+/// the Windows fleet). Loads existing entries on first call.
+pub fn set_hash_cache_file(path: std::path::PathBuf) {
+    let mut file = HASH_CACHE_FILE.lock().unwrap();
+    if file.as_ref() == Some(&path) {
+        return;
+    }
+    if let Ok(bytes) = std::fs::read(&path) {
+        if let Ok(entries) =
+            serde_json::from_slice::<Vec<(std::path::PathBuf, i64, u64, String)>>(&bytes)
+        {
+            let mut cache = HASH_CACHE.lock().unwrap();
+            for (p, m, sz, h) in entries {
+                cache.entry(p).or_insert((m, sz, h));
+            }
+        }
+    }
+    *file = Some(path);
+}
+
+/// Write the cache back (called at sync end). Entries for files that no
+/// longer exist are dropped so the file can't grow without bound.
+pub fn save_hash_cache() {
+    let Some(path) = HASH_CACHE_FILE.lock().unwrap().clone() else { return };
+    let cache = HASH_CACHE.lock().unwrap();
+    let entries: Vec<(&std::path::PathBuf, i64, u64, &String)> = cache
+        .iter()
+        .filter(|(p, _)| p.exists())
+        .map(|(p, (m, s, h))| (p, *m, *s, h))
+        .collect();
+    if let Ok(bytes) = serde_json::to_vec(&entries) {
+        let _ = std::fs::write(&path, bytes);
+    }
+}
+
 /// Return and reset the accumulated stats.
 pub fn take_hash_stats() -> HashStats {
     std::mem::take(&mut HASH_STATS.lock().unwrap())
