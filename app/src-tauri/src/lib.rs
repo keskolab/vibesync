@@ -378,7 +378,11 @@ fn set_debug_logging(app: tauri::AppHandle, enabled: bool) -> Result<(), String>
         .map_err(|e| e.to_string())?
         .ok_or("VibeSync is not configured yet")?;
     cfg.debug_logging = enabled;
-    syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())
+    syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())?;
+    if enabled {
+        syncer::debug_log_banner(&paths);
+    }
+    Ok(())
 }
 
 /// Minutes between background syncs. The worker re-reads the config every
@@ -785,6 +789,9 @@ pub fn run() {
                 if let Ok(Some(cfg)) = syncer::load_config(&paths) {
                     AUTOSYNC.store(cfg.autosync, Ordering::Relaxed);
                 }
+            }
+            if let Ok(paths) = syncer::paths(app.handle()) {
+                syncer::debug_log_banner(&paths);
             }
             spawn_autosync_worker(app.handle().clone());
             tauri::async_runtime::spawn(updates::run_startup_update_check(app.handle().clone()));

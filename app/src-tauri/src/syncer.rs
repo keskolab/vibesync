@@ -165,6 +165,28 @@ pub fn debug_log_path(paths: &Paths) -> std::path::PathBuf {
 
 /// For callers that see sync_now fail: record the error without needing the
 /// DebugLog instance that died with it.
+/// Visual delimiter marking a new logging session (app launch, or the
+/// moment the toggle turns on) — written raw, without the per-line prefix,
+/// so session boundaries jump out when scrolling a long log.
+pub fn debug_log_banner(paths: &Paths) {
+    let enabled = load_config(paths).ok().flatten().map(|c| c.debug_logging).unwrap_or(false);
+    if !enabled {
+        return;
+    }
+    let p = debug_log_path(paths);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        use std::io::Write;
+        let _ = writeln!(
+            f,
+            "======================================\nNew Session Started — {}\n{} ({}) — VibeSync v{}\n======================================",
+            mini_log::get_timestamp(),
+            engine::machine_name(),
+            std::env::consts::OS,
+            env!("CARGO_PKG_VERSION"),
+        );
+    }
+}
+
 /// Settings changes are sync-relevant state: record them when logging is on.
 pub fn debug_log_event(paths: &Paths, msg: &str) {
     let enabled = load_config(paths).ok().flatten().map(|c| c.debug_logging).unwrap_or(false);
