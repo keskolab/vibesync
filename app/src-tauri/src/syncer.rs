@@ -755,6 +755,13 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             if *enabled { "on" } else { "OFF" },
             if *inst && *enabled { " -> syncing" } else { " -> skipped" }
         ));
+        for p in (t.paths)(&home) {
+            dlog.info(format!(
+                "  location: {} ({})",
+                p.display(),
+                if p.exists() { "exists" } else { "missing" }
+            ));
+        }
     }
     dlog.info(format!(
         "settings: autosync={} every {} min, plugins={}, sidebar={}, disabled scopes={:?}",
@@ -1013,6 +1020,9 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             // zeros made a real Windows failure indistinguishable from
             // "nothing to do".
             dlog.info("step: updating the Claude sidebar");
+            if let Some(dir) = registry_dir() {
+                dlog.info(format!("  sidebar registry: {}", dir.display()));
+            }
             let err_path = paths.config.parent().unwrap().join("registry_last_error.txt");
             let t = std::time::Instant::now();
             match sync_registry(paths, store.as_ref(), &tok, &mut state, &listing, &record_registry) {
@@ -1146,6 +1156,18 @@ fn tool_of(logical: &str) -> Option<&'static str> {
     TOOL_PREFIXES.iter().find(|(p, _)| *p == ns).map(|(_, id)| *id)
 }
 
+impl From<engine::sync::ApplyReport> for GenReport {
+    fn from(r: engine::sync::ApplyReport) -> Self {
+        GenReport {
+            pulled: r.applied,
+            unchanged: r.unchanged,
+            skipped_newer_local: r.skipped_newer_local,
+            parked: r.parked,
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct GenReport {
     pulled: usize,
@@ -1157,6 +1179,15 @@ struct GenReport {
     /// (e.g. opencode file layer ok, db merge failed). Logged per line and
     /// counted toward the sync's overall failure.
     errors: Vec<String>,
+}
+
+impl GenReport {
+    fn absorb(&mut self, r: engine::sync::ApplyReport) {
+        self.pulled += r.applied;
+        self.unchanged += r.unchanged;
+        self.skipped_newer_local += r.skipped_newer_local;
+        self.parked += r.parked;
+    }
 }
 
 struct ScanEnv<'a> {
@@ -1189,9 +1220,34 @@ struct ToolRun {
     /// Enabled by a scope instead of a tool switch (shared skills).
     scope: Option<&'static str>,
     detect: fn(&std::path::Path) -> bool,
+    /// Every location this tool reads/writes — logged with existence at each
+    /// sync so "why isn't it detected on THIS machine" answers itself.
+    paths: fn(&std::path::Path) -> Vec<std::path::PathBuf>,
     scan: Option<fn(&ScanEnv, &mut engine::SyncState) -> Result<Vec<engine::FileEntry>>>,
     publish: Option<fn(&ApplyEnv, &mut engine::SyncState) -> Result<usize>>,
     apply: fn(&ApplyEnv, &mut engine::SyncState) -> Result<GenReport>,
+}
+
+fn p_claude(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    vec![home.join(".claude")]
+}
+fn p_vscode(_: &std::path::Path) -> Vec<std::path::PathBuf> {
+    engine::vscode::storage_roots()
+}
+fn p_codex(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    vec![home.join(".codex/sessions"), home.join(".codex/session_index.jsonl")]
+}
+fn p_opencode(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    engine::opencode::probe_locations(home)
+}
+fn p_copilot(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    vec![home.join(".copilot/session-state")]
+}
+fn p_zed(_: &std::path::Path) -> Vec<std::path::PathBuf> {
+    engine::zed::probe_locations()
+}
+fn p_shared(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    vec![home.join(".agents/skills")]
 }
 
 fn d_claude(home: &std::path::Path) -> bool {
@@ -1277,73 +1333,35 @@ fn apply_claude(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenRepo
     Ok(g)
 }
 fn apply_vscode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
-    let r = engine::vscode::apply(
-        env.store,
-        state,
-        env.home,
-        env.vscode_index,
-        env.listing,
-        env.tick,
-        env.record,
-    )?;
-    Ok(GenReport {
-        pulled: r.applied,
-        unchanged: r.unchanged,
-        skipped_newer_local: r.skipped_newer_local,
-        ..Default::default()
-    })
+    Ok(engine::vscode::apply(
+        env.store, state, env.home, env.vscode_index, env.listing, env.tick, env.record,
+    )?
+    .into())
 }
 fn apply_codex(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
-    let r = engine::codex::apply(env.home, state, env.store, env.listing, env.tick, env.record)?;
-    Ok(GenReport {
-        pulled: r.pulled,
-        unchanged: r.unchanged,
-        skipped_newer_local: r.skipped_newer_local,
-        ..Default::default()
-    })
+    Ok(engine::codex::apply(env.home, state, env.store, env.listing, env.tick, env.record)?.into())
 }
 fn apply_opencode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
     // The two layers are independent: a failure in one must not skip the
     // other or discard its counts.
     let mut g = GenReport::default();
     match engine::opencode::apply(env.home, state, env.store, env.listing, env.tick, env.record) {
-        Ok(f) => {
-            g.pulled += f.pulled;
-            g.unchanged += f.unchanged;
-            g.skipped_newer_local += f.skipped_newer_local;
-        }
+        Ok(f) => g.absorb(f),
         Err(e) => g.errors.push(format!("file-layer apply failed: {e:#}")),
     }
     match engine::opencode::db_apply(
         env.home, env.tok, state, env.store, env.listing, env.tick, env.record,
     ) {
-        Ok(d) => {
-            g.pulled += d.applied;
-            g.unchanged += d.unchanged;
-            g.skipped_newer_local += d.skipped_newer_local;
-            g.parked += d.parked;
-        }
+        Ok(d) => g.absorb(d),
         Err(e) => g.errors.push(format!("merging into opencode.db failed: {e:#}")),
     }
     Ok(g)
 }
 fn apply_copilot(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
-    let r = engine::copilot::apply(env.home, state, env.store, env.listing, env.tick, env.record)?;
-    Ok(GenReport {
-        pulled: r.pulled,
-        unchanged: r.unchanged,
-        skipped_newer_local: r.skipped_newer_local,
-        ..Default::default()
-    })
+    Ok(engine::copilot::apply(env.home, state, env.store, env.listing, env.tick, env.record)?.into())
 }
 fn apply_zed(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
-    let r = engine::zed::apply(env.home, state, env.store, env.listing, env.tick, env.record)?;
-    Ok(GenReport {
-        pulled: r.applied,
-        unchanged: r.unchanged,
-        skipped_newer_local: r.skipped_newer_local,
-        ..Default::default()
-    })
+    Ok(engine::zed::apply(env.home, state, env.store, env.listing, env.tick, env.record)?.into())
 }
 fn apply_shared(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
     let r = engine::sync::pull_dir(
@@ -1371,13 +1389,13 @@ fn apply_shared(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenRepo
 /// The one list the sync loop walks — scan order and apply order alike.
 fn tool_runs() -> Vec<ToolRun> {
     vec![
-        ToolRun { id: "claude-code", name: "Claude Code", purge_prefix: Some("claude/"), scope: None, detect: d_claude, scan: Some(scan_claude), publish: None, apply: apply_claude },
-        ToolRun { id: "vscode", name: "VS Code", purge_prefix: Some("vscode/"), scope: None, detect: d_vscode, scan: Some(scan_vscode), publish: None, apply: apply_vscode },
-        ToolRun { id: "codex", name: "Codex", purge_prefix: Some("codex/"), scope: None, detect: engine::codex::detect, scan: Some(scan_codex), publish: Some(publish_codex), apply: apply_codex },
-        ToolRun { id: "opencode", name: "OpenCode", purge_prefix: Some("opencode/"), scope: None, detect: engine::opencode::detect, scan: Some(scan_opencode), publish: Some(publish_opencode), apply: apply_opencode },
-        ToolRun { id: "copilot", name: "Copilot CLI", purge_prefix: Some("copilot/"), scope: None, detect: engine::copilot::detect, scan: Some(scan_copilot), publish: None, apply: apply_copilot },
-        ToolRun { id: "zed", name: "Zed", purge_prefix: Some("zed/"), scope: None, detect: d_zed, scan: None, publish: Some(publish_zed), apply: apply_zed },
-        ToolRun { id: "shared", name: "Global skills", purge_prefix: None, scope: Some("shared"), detect: d_always, scan: Some(scan_shared), publish: None, apply: apply_shared },
+        ToolRun { id: "claude-code", name: "Claude Code", purge_prefix: Some("claude/"), scope: None, detect: d_claude, paths: p_claude, scan: Some(scan_claude), publish: None, apply: apply_claude },
+        ToolRun { id: "vscode", name: "VS Code", purge_prefix: Some("vscode/"), scope: None, detect: d_vscode, paths: p_vscode, scan: Some(scan_vscode), publish: None, apply: apply_vscode },
+        ToolRun { id: "codex", name: "Codex", purge_prefix: Some("codex/"), scope: None, detect: engine::codex::detect, paths: p_codex, scan: Some(scan_codex), publish: Some(publish_codex), apply: apply_codex },
+        ToolRun { id: "opencode", name: "OpenCode", purge_prefix: Some("opencode/"), scope: None, detect: engine::opencode::detect, paths: p_opencode, scan: Some(scan_opencode), publish: Some(publish_opencode), apply: apply_opencode },
+        ToolRun { id: "copilot", name: "Copilot CLI", purge_prefix: Some("copilot/"), scope: None, detect: engine::copilot::detect, paths: p_copilot, scan: Some(scan_copilot), publish: None, apply: apply_copilot },
+        ToolRun { id: "zed", name: "Zed", purge_prefix: Some("zed/"), scope: None, detect: d_zed, paths: p_zed, scan: None, publish: Some(publish_zed), apply: apply_zed },
+        ToolRun { id: "shared", name: "Global skills", purge_prefix: None, scope: Some("shared"), detect: d_always, paths: p_shared, scan: Some(scan_shared), publish: None, apply: apply_shared },
     ]
 }
 

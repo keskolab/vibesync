@@ -167,16 +167,6 @@ fn local_workspace_map(roots: &[PathBuf], home: &str) -> HashMap<String, PathBuf
     map
 }
 
-#[derive(Debug, Default, PartialEq)]
-pub struct ApplyReport {
-    pub applied: usize,
-    pub parked: usize,
-    pub unchanged: usize,
-    pub skipped_newer_local: usize,
-    /// Sessions registered in a workspace's chat index (visible in the panel).
-    pub indexed: usize,
-}
-
 /// Apply `vscode/ws/...` store entries into matching local workspaces;
 /// park the rest. Same conflict rules as the generic pull.
 pub fn apply(
@@ -187,7 +177,7 @@ pub fn apply(
     listing: &[(String, RemoteMeta)],
     on_file: &dyn Fn(),
     on_pulled: &dyn Fn(&str),
-) -> Result<ApplyReport> {
+) -> Result<crate::sync::ApplyReport> {
     apply_roots_opts(&storage_roots(), store, state, home, merge_index, listing, on_file, on_pulled)
 }
 
@@ -196,7 +186,7 @@ pub fn apply_roots(
     store: &dyn SyncStore,
     state: &mut SyncState,
     home: &Path,
-) -> Result<ApplyReport> {
+) -> Result<crate::sync::ApplyReport> {
     let listing = store.list()?;
     apply_roots_opts(roots, store, state, home, true, &listing, &|| {}, &|_| {})
 }
@@ -210,8 +200,8 @@ pub fn apply_roots_opts(
     listing: &[(String, RemoteMeta)],
     on_file: &dyn Fn(),
     on_pulled: &dyn Fn(&str),
-) -> Result<ApplyReport> {
-    let mut report = ApplyReport::default();
+) -> Result<crate::sync::ApplyReport> {
+    let mut report = crate::sync::ApplyReport::default();
     let home = home_norm(home);
     let map = local_workspace_map(roots, &home);
     let prefix = format!("{LOGICAL_PREFIX}/");
@@ -292,7 +282,11 @@ pub fn apply_roots_opts(
     }
     for (ws_dir, sessions) in to_index.into_iter().filter(|_| merge_index) {
         match merge_chat_index(&ws_dir, &sessions) {
-            Ok(n) => report.indexed += n,
+            Ok(n) => {
+                if n > 0 {
+                    crate::dlog::debug(|| format!("vscode: {n} chats merged into the panel index"));
+                }
+            }
             Err(_) => {} // db locked or absent: files are placed; index next sync
         }
     }
@@ -479,7 +473,7 @@ mod tests {
         let mut state_b = SyncState::default();
         let report = apply_roots(&[b_root.clone()], &store, &mut state_b, &b_home).unwrap();
         assert_eq!(report.applied, 1);
-        assert_eq!(report.indexed, 1);
+
         let landed = ws_b.join("chatSessions/s1.jsonl");
         assert!(landed.exists());
         assert_eq!(std::fs::read_to_string(&landed).unwrap(), "{\"chat\":1}\n");

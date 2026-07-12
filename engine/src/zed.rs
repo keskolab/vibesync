@@ -44,6 +44,18 @@ pub fn db_path() -> Option<PathBuf> {
 
 /// Installed = a Zed dir exists (threads.db only appears after first agent
 /// use, so don't require it).
+/// Every location this adapter considers — for the transparency trace.
+pub fn probe_locations() -> Vec<PathBuf> {
+    if let Some(db) = db_path() {
+        return vec![db];
+    }
+    [dirs::config_dir(), dirs::data_dir(), dirs::data_local_dir()]
+        .into_iter()
+        .flatten()
+        .map(|d| d.join("Zed").join("threads").join("threads.db"))
+        .collect()
+}
+
 pub fn detect() -> bool {
     if let Some(db) = db_path() {
         crate::dlog::debug(|| format!("detect zed: installed (threads db at {})", db.display()));
@@ -150,15 +162,8 @@ pub fn push(home: &Path, state: &mut SyncState, store: &dyn SyncStore, machine: 
     Ok(pushed)
 }
 
-#[derive(Debug, Default, PartialEq)]
-pub struct ApplyReport {
-    pub applied: usize,
-    pub unchanged: usize,
-    pub skipped_newer_local: usize,
-}
-
-pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<ApplyReport> {
-    let mut report = ApplyReport::default();
+pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<crate::sync::ApplyReport> {
+    let mut report = crate::sync::ApplyReport::default();
     let Some(path) = db_path() else { return Ok(report) };
     let home_s = home.to_string_lossy().into_owned();
     let conn = rusqlite::Connection::open(&path)?;

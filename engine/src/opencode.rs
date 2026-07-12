@@ -42,6 +42,20 @@ fn data_root(home: &Path) -> Option<PathBuf> {
     cands.into_iter().find(|c| c.is_dir())
 }
 
+/// Every location this adapter considers — for the transparency trace.
+pub fn probe_locations(home: &Path) -> Vec<PathBuf> {
+    match data_root(home) {
+        Some(root) => vec![root.join("opencode.db"), root.join("storage"), root],
+        None => {
+            let mut v = vec![home.join(".local/share/opencode")];
+            for d in [dirs::data_dir(), dirs::data_local_dir()].into_iter().flatten() {
+                v.push(d.join("opencode"));
+            }
+            v
+        }
+    }
+}
+
 fn storage_root(home: &Path) -> Option<PathBuf> {
     data_root(home).map(|r| r.join("storage")).filter(|s| s.is_dir())
 }
@@ -102,15 +116,8 @@ pub fn scan(home: &Path) -> Result<Vec<FileEntry>> {
     Ok(out)
 }
 
-#[derive(Debug, Default, PartialEq)]
-pub struct ApplyReport {
-    pub pulled: usize,
-    pub unchanged: usize,
-    pub skipped_newer_local: usize,
-}
-
-pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<ApplyReport> {
-    let mut report = ApplyReport::default();
+pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<crate::sync::ApplyReport> {
+    let mut report = crate::sync::ApplyReport::default();
     // Apply even if the dir doesn't exist yet (first pull creates it).
     let root = home.join(".local/share/opencode/storage");
     let prefix = format!("{PREFIX}/");
@@ -149,7 +156,7 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
         );
         on_pulled(logical);
-        report.pulled += 1;
+        report.applied += 1;
     }
     Ok(report)
 }
@@ -326,14 +333,6 @@ pub fn db_push(
     Ok(pushed)
 }
 
-#[derive(Debug, Default, PartialEq)]
-pub struct DbApplyReport {
-    pub applied: usize,
-    pub unchanged: usize,
-    pub skipped_newer_local: usize,
-    pub parked: usize,
-}
-
 /// Merge foreign sessions into opencode.db: insert missing, update only when
 /// the remote `time_updated` is newer, never delete. The db is backed up
 /// once (`opencode.db.vibesync-bak`) before this build's first-ever write.
@@ -345,8 +344,8 @@ pub fn db_apply(
     listing: &[(String, RemoteMeta)],
     on_file: &dyn Fn(),
     on_pulled: &dyn Fn(&str),
-) -> Result<DbApplyReport> {
-    let mut report = DbApplyReport::default();
+) -> Result<crate::sync::ApplyReport> {
+    let mut report = crate::sync::ApplyReport::default();
     let Some(db) = db_path(home) else { return Ok(report) };
     let prefix = format!("{DB_PREFIX}/");
     let mut conn: Option<rusqlite::Connection> = None;
@@ -599,7 +598,7 @@ mod tests {
         let mut state_b = SyncState::default();
         let listing = store.list().unwrap();
         let report = apply(&b, &mut state_b, &store, &listing, &|| {}, &|_| {}).unwrap();
-        assert_eq!(report.pulled, 1);
+        assert_eq!(report.applied, 1);
         assert!(b.join(".local/share/opencode/storage/session/ses_1.json").exists());
     }
 }
