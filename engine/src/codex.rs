@@ -466,6 +466,45 @@ pub fn db_apply(
     let mut seen = 0usize;
     let mut awaiting = 0usize;
     let mut conn: Option<rusqlite::Connection> = None;
+    // Heal foreign-shaped path fields directly, independent of the store
+    // loop: Codex's own backfill plants raw \\?\C:\... cwds from synced
+    // rollout files, and once a store object is recorded in state the loop
+    // below never refetches it — so a loop-dependent heal would starve.
+    // Adoption needs no remote data.
+    {
+        let ro = open_ro(&db)?;
+        let rows = query_maps(&ro, "SELECT * FROM threads", &[])?;
+        drop(ro);
+        let mut fixes: Vec<(String, &'static str, String)> = Vec::new();
+        for r in &rows {
+            let Some(id) = r.get("id").and_then(|v| v.as_str()) else { continue };
+            for f in THREAD_PATH_FIELDS {
+                if let Some(v) = r.get(*f).and_then(|v| v.as_str()) {
+                    if let Some(adopted) = crate::dbsync::adopt_foreign_home(v, tok.home()) {
+                        fixes.push((id.to_string(), f, adopted));
+                    }
+                }
+            }
+        }
+        if !fixes.is_empty() {
+            let bak = db.with_extension("sqlite.vibesync-bak");
+            if !bak.exists() {
+                let _ = std::fs::copy(&db, &bak);
+            }
+            let c = rusqlite::Connection::open(&db)?;
+            c.busy_timeout(std::time::Duration::from_millis(1500))?;
+            for (id, f, v) in &fixes {
+                c.execute(
+                    &format!("UPDATE threads SET `{f}` = ?1 WHERE id = ?2"),
+                    rusqlite::params![v, id],
+                )?;
+            }
+            crate::dlog::info(|| {
+                format!("codex db: adopted {} foreign path field(s) onto this machine's home", fixes.len())
+            });
+            conn = Some(c);
+        }
+    }
     for (logical, meta) in listing {
         if !logical.starts_with(&prefix) {
             continue;
@@ -628,6 +667,33 @@ mod db_tests {
         )
         .unwrap();
         p
+    }
+
+    #[test]
+    fn backfilled_foreign_cwds_are_adopted_without_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FolderStore::new(tmp.path().join("store"));
+        let b = tmp.path().join("b");
+        let db_b = make_state_db(&b);
+        let b_home = b.to_string_lossy().into_owned();
+        // Codex's backfill planted a raw Windows cwd (extended-length form).
+        rusqlite::Connection::open(&db_b)
+            .unwrap()
+            .execute(
+                "INSERT INTO threads VALUES ('thw', ?1, 100, 200, 'vscode', 'openai',
+                   '\\\\?\\C:\\Users\\you\\Documents\\X', 'Windows thread', '{}',
+                   'on-request', 100000, 200000, 200000, NULL)",
+                rusqlite::params![format!("{b_home}/.codex/sessions/2026/07/12/r.jsonl")],
+            )
+            .unwrap();
+        let tok_b = Tokenizer::with_case_sensitivity(&b_home, false);
+        let mut st = SyncState::default();
+        db_apply(&b, &tok_b, &mut st, &store, &[], &|| {}, &|_| {}).unwrap();
+        let cwd: String = rusqlite::Connection::open(&db_b)
+            .unwrap()
+            .query_row("SELECT cwd FROM threads WHERE id='thw'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cwd, format!("{b_home}/Documents/X"));
     }
 
     #[test]
