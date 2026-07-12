@@ -557,6 +557,11 @@ function setBusy(busy, label) {
 	if (busy) {
 		$("status-dot").className = "dot busy";
 		$("status-text").textContent = "Syncing";
+	} else if (status?.configured && $("status-text").textContent === "Syncing") {
+		// Symmetric restore: the badge must never outlive the button's busy
+		// state (error text set by callers is left alone).
+		$("status-dot").className = "dot ok";
+		$("status-text").textContent = "Synced";
 	}
 	setTimeout(fitWindow, 50); // busy label changes the page height
 }
