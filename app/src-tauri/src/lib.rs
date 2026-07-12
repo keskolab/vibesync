@@ -759,10 +759,28 @@ pub fn run() {
                 .expect("failed to apply vibrancy");
             }
 
+            // Right-click menu; left click keeps toggling the popover.
+            let menu = {
+                use tauri::menu::{MenuBuilder, MenuItemBuilder};
+                let open = MenuItemBuilder::with_id("open", "Open VibeSync").build(app)?;
+                let quit = MenuItemBuilder::with_id("quit", "Quit VibeSync").build(app)?;
+                MenuBuilder::new(app).item(&open).separator().item(&quit).build()?
+            };
             TrayIconBuilder::with_id("main-tray")
                 .icon(tray_icon())
                 .icon_as_template(true)
                 .tooltip("VibeSync")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "open" => {
+                        if let Some(win) = app.get_webview_window("main") {
+                            present_popover(&win);
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
                 .on_tray_icon_event(|tray, event| {
                     tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
                     TRAY_SEEN.store(true, Ordering::Relaxed);
