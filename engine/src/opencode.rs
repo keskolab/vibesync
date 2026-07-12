@@ -7,9 +7,13 @@
 //! files (opaque, additive — records are id-keyed and never collide) and
 //! never writes the db. That guarantees a safe cross-machine archive.
 //!
-//! Two layers, both synced:
-//! - storage/ per-record JSON files (legacy layer, additive, opaque).
-//! - opencode.db rows (CURRENT layer — modern builds write sessions only
+//! Three layers, all synced (OpenCode's storage moved twice; a mixed-
+//! version fleet has machines on each generation):
+//! - storage/ per-record JSON files (oldest layer, additive, opaque).
+//! - project/<slug>/storage/ per-project JSON files (current layout per
+//!   opencode.ai/docs/troubleshooting; slug is "global" for non-git dirs,
+//!   so ad-hoc sessions share a stable key across machines).
+//! - opencode.db rows (db-era layer — those builds write sessions only
 //!   here; live-verified 2026-07-12 when a Windows-created session never
 //!   appeared in storage/). Each session exports as ONE store object
 //!   (session + project + messages + parts) under `opencode/db/`; apply
@@ -29,6 +33,8 @@ use crate::store::{RemoteMeta, SyncStore};
 use crate::tokenizer::Tokenizer;
 
 pub const PREFIX: &str = "opencode/storage";
+/// Store namespace for the per-project layout (`project/<slug>/storage/`).
+pub const PROJECT_PREFIX: &str = "opencode/project";
 /// Volatile/derived subdirs we never sync.
 const SKIP: &[&str] = &["session_diff", "session_share", "migration"];
 
@@ -52,7 +58,9 @@ fn data_root(home: &Path) -> Option<PathBuf> {
 /// Every location this adapter considers — for the transparency trace.
 pub fn probe_locations(home: &Path) -> Vec<PathBuf> {
     match data_root(home) {
-        Some(root) => vec![root.join("opencode.db"), root.join("storage"), root],
+        Some(root) => {
+            vec![root.join("opencode.db"), root.join("project"), root.join("storage"), root]
+        }
         None => {
             let mut v = vec![home.join(".local/share/opencode")];
             for d in [dirs::data_dir(), dirs::data_local_dir()].into_iter().flatten() {
@@ -91,9 +99,29 @@ pub fn detect(home: &Path) -> bool {
 }
 
 pub fn scan(home: &Path) -> Result<Vec<FileEntry>> {
-    let Some(root) = storage_root(home) else { return Ok(vec![]) };
+    let Some(root) = data_root(home) else { return Ok(vec![]) };
     let mut out = Vec::new();
-    for entry in walkdir::WalkDir::new(&root).follow_links(false).into_iter().filter_entry(|e| {
+    scan_tree(&root.join("storage"), PREFIX, &mut out)?;
+    // Current layout: one storage/ subtree per project slug.
+    let projects = root.join("project");
+    if projects.is_dir() {
+        for e in std::fs::read_dir(&projects)?.flatten() {
+            if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let slug = e.file_name().to_string_lossy().into_owned();
+            scan_tree(&e.path().join("storage"), &format!("{PROJECT_PREFIX}/{slug}/storage"), &mut out)?;
+        }
+    }
+    out.sort_by(|a, b| a.logical.cmp(&b.logical));
+    Ok(out)
+}
+
+fn scan_tree(root: &Path, prefix: &str, out: &mut Vec<FileEntry>) -> Result<()> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {
         !(e.file_type().is_dir()
             && e.file_name().to_str().map(|n| SKIP.contains(&n)).unwrap_or(false))
     }) {
@@ -106,30 +134,37 @@ pub fn scan(home: &Path) -> Result<Vec<FileEntry>> {
             continue;
         }
         let rel = path
-            .strip_prefix(&root)?
+            .strip_prefix(root)?
             .components()
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join("/");
         out.push(FileEntry {
-            logical: format!("{PREFIX}/{rel}"),
+            logical: format!("{prefix}/{rel}"),
             abs: path.to_path_buf(),
             size: entry.metadata()?.len(),
             mtime_ms: mtime_ms(path)?,
             hash: hash_file(path)?,
         });
     }
-    out.sort_by(|a, b| a.logical.cmp(&b.logical));
-    Ok(out)
+    Ok(())
 }
 
 pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<crate::sync::ApplyReport> {
     let mut report = crate::sync::ApplyReport::default();
-    // Apply even if the dir doesn't exist yet (first pull creates it).
-    let root = home.join(".local/share/opencode/storage");
-    let prefix = format!("{PREFIX}/");
+    // Apply even if the dirs don't exist yet (first pull creates them).
+    let base = data_root(home).unwrap_or_else(|| home.join(".local/share/opencode"));
+    let sprefix = format!("{PREFIX}/");
+    let pprefix = format!("{PROJECT_PREFIX}/");
     for (logical, meta) in listing {
-        let Some(rest) = logical.strip_prefix(&prefix) else { continue };
+        // Both file layers mirror 1:1 under the data root.
+        let rel = if let Some(rest) = logical.strip_prefix(&sprefix) {
+            format!("storage/{rest}")
+        } else if let Some(rest) = logical.strip_prefix(&pprefix) {
+            format!("project/{rest}")
+        } else {
+            continue;
+        };
         on_file();
         if let Some(st) = state.files.get(logical) {
             if st.deleted_locally || st.hash == meta.hash {
@@ -137,8 +172,8 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
                 continue;
             }
         }
-        let mut abs = root.clone();
-        for c in rest.split('/') {
+        let mut abs = base.clone();
+        for c in rel.split('/') {
             abs.push(c);
         }
         if abs.exists() {
@@ -609,31 +644,49 @@ pub fn light_counts(home: &Path) -> (usize, u64, usize, Option<i64>) {
                     .query_row("SELECT MAX(time_updated) FROM session", [], |r| r.get(0))
                     .unwrap_or(None);
                 let bytes = std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0);
-                return (n, bytes, p, last);
+                // An empty db can be a vestige on a machine whose OpenCode
+                // uses the file layers — fall through and count those.
+                if n > 0 {
+                    return (n, bytes, p, last);
+                }
             }
         }
     }
-    let Some(root) = storage_root(home) else { return (0, 0, 0, None) };
+    // File layers: legacy storage/session/ plus each project/<slug>/storage/session/.
+    let Some(base) = data_root(home) else { return (0, 0, 0, None) };
+    let mut session_dirs = vec![base.join("storage").join("session")];
+    let mut project_slugs = 0usize;
+    if let Ok(rd) = std::fs::read_dir(base.join("project")) {
+        for e in rd.flatten() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                project_slugs += 1;
+                session_dirs.push(e.path().join("storage").join("session"));
+            }
+        }
+    }
+    let root = base.join("storage");
     let mut sessions = 0;
     let mut bytes = 0u64;
     let mut last: Option<i64> = None;
-    for entry in walkdir::WalkDir::new(root.join("session")).into_iter().flatten() {
-        let p = entry.path();
-        if p.extension().and_then(|e| e.to_str()) == Some("json") {
-            sessions += 1;
-            bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
-            if let Ok(m) = mtime_ms(p) {
-                last = Some(last.map_or(m, |l: i64| l.max(m)));
+    for dir in session_dirs {
+        for entry in walkdir::WalkDir::new(dir).into_iter().flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("json") {
+                sessions += 1;
+                bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                if let Ok(m) = mtime_ms(p) {
+                    last = Some(last.map_or(m, |l: i64| l.max(m)));
+                }
             }
         }
     }
-    let projects = walkdir::WalkDir::new(root.join("project"))
+    let legacy_projects = walkdir::WalkDir::new(root.join("project"))
         .max_depth(1)
         .into_iter()
         .flatten()
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
         .count();
-    (sessions, bytes, projects, last)
+    (sessions, bytes, legacy_projects + project_slugs, last)
 }
 
 #[cfg(test)]
@@ -763,6 +816,46 @@ mod tests {
         let title: String =
             c.query_row("SELECT title FROM session WHERE id='ses1'", [], |r| r.get(0)).unwrap();
         assert_eq!(title, "local edit");
+    }
+
+    #[test]
+    fn project_layout_syncs_additively() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FolderStore::new(tmp.path().join("store"));
+        let a = tmp.path().join("a");
+        let g = a.join(".local/share/opencode/project/global/storage/session");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(g.join("ses_9.json"), "{\"id\":\"ses_9\"}").unwrap();
+        let m = a.join(".local/share/opencode/project/my-repo/storage/message/ses_8");
+        std::fs::create_dir_all(&m).unwrap();
+        std::fs::write(m.join("msg_1.json"), "{\"role\":\"user\"}").unwrap();
+        // Volatile dirs are skipped inside project storage too.
+        let sd = a.join(".local/share/opencode/project/global/storage/session_diff");
+        std::fs::create_dir_all(&sd).unwrap();
+        std::fs::write(sd.join("d.json"), "x").unwrap();
+
+        let entries = scan(&a).unwrap();
+        let logicals: Vec<&str> = entries.iter().map(|e| e.logical.as_str()).collect();
+        assert_eq!(
+            logicals,
+            [
+                "opencode/project/global/storage/session/ses_9.json",
+                "opencode/project/my-repo/storage/message/ses_8/msg_1.json",
+            ]
+        );
+        let mut st_a = SyncState::default();
+        crate::sync::push(&entries, &mut st_a, &store, "a").unwrap();
+
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(b.join(".local/share/opencode")).unwrap();
+        let mut st_b = SyncState::default();
+        let listing = store.list().unwrap();
+        let r = apply(&b, &mut st_b, &store, &listing, &|| {}, &|_| {}).unwrap();
+        assert_eq!(r.applied, 2);
+        assert!(b.join(".local/share/opencode/project/global/storage/session/ses_9.json").exists());
+        assert!(b
+            .join(".local/share/opencode/project/my-repo/storage/message/ses_8/msg_1.json")
+            .exists());
     }
 
     #[test]

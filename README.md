@@ -83,6 +83,7 @@ Nothing outside this list is read or written. `~` is your home folder (`C:\Users
 | VS Code | `.../Code/User/workspaceStorage/<id>/state.vscdb` ² | Updates one key (the chat index) so synced chats show in the panel |
 | Codex | `~/.codex/sessions/`, `~/.codex/session_index.jsonl` | Syncs; merges the index so every machine lists all sessions |
 | OpenCode | `~/.local/share/opencode/opencode.db` | Merges synced sessions in (insert/update-newer only, never deletes); one-time backup `opencode.db.vibesync-bak` before the first write |
+| OpenCode | `~/.local/share/opencode/project/` | Syncs each project's `storage/` records (current OpenCode layout) |
 | OpenCode | `~/.local/share/opencode/storage/` | Syncs (legacy records) |
 | Zed | `.../Zed/threads/threads.db` ³ | Syncs thread rows, newest wins |
 | Copilot CLI | `~/.copilot/session-state/` | Syncs |
