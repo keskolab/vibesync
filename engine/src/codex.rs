@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::dbsync::{expand_field, insert_map, query_maps, tokenize_field};
+use crate::dbsync::{expand_field, query_maps, tokenize_field};
 use crate::scanner::{hash_bytes, hash_file, mtime_ms, FileEntry};
 use crate::state::{FileState, SyncState};
 use crate::store::{RemoteMeta, SyncStore};
@@ -441,6 +441,40 @@ pub fn db_push(
         return Ok(0);
     }
     let threads = query_maps(&conn, "SELECT * FROM threads", &[])?;
+    // Deletion tombstones: a thread this machine previously merged or
+    // exported (it has a main-slot state record) that is GONE from the
+    // local db was deleted by Codex — usually its own cleanup after a
+    // failed open. Without a tombstone the next apply re-inserts it and
+    // the session flickers in and out forever.
+    {
+        let live: std::collections::HashSet<String> = threads
+            .iter()
+            .filter_map(|t| t.get("id").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        let prefix_own = format!("{DB_PREFIX}/");
+        let mut dead: Vec<String> = Vec::new();
+        for (k, st) in state.files.iter() {
+            if st.deleted_locally || !k.starts_with(&prefix_own) || k.ends_with("#own") {
+                continue;
+            }
+            if k == "codex/db#local-summary" {
+                continue;
+            }
+            let Some(id) = k.strip_prefix(&prefix_own).and_then(|r| r.strip_suffix(".json")) else {
+                continue;
+            };
+            if !live.contains(id) {
+                dead.push(k.clone());
+            }
+        }
+        for k in dead {
+            crate::dlog::debug(|| format!("codex db: {k} deleted locally — tombstoned, will not resurrect here"));
+            if let Some(st) = state.files.get_mut(&k) {
+                st.deleted_locally = true;
+            }
+            state.files.remove(&format!("{k}#own"));
+        }
+    }
     let mut pushed = 0;
     let mut unchanged = 0;
     for mut t in threads {
@@ -710,16 +744,16 @@ pub fn db_apply(
         let local_row_t = local_row.as_ref().map(thread_eff).unwrap_or(0);
         let t = obj.get("thread").and_then(|s| s.as_object()).unwrap();
         if local_row.is_none() || remote_row_t > local_row_t {
-            insert_map(c, "threads", t, true)?;
+            crate::dbsync::insert_map_pk(c, "threads", t, true, &["id"])?;
         }
         for row in obj.get("dynamic_tools").and_then(|v| v.as_array()).into_iter().flatten() {
             if let Some(row) = row.as_object() {
-                insert_map(c, "thread_dynamic_tools", row, true)?;
+                crate::dbsync::insert_map_pk(c, "thread_dynamic_tools", row, true, &["thread_id", "position"])?;
             }
         }
         for row in obj.get("spawn_edges").and_then(|v| v.as_array()).into_iter().flatten() {
             if let Some(row) = row.as_object() {
-                insert_map(c, "thread_spawn_edges", row, true)?;
+                crate::dbsync::insert_map_pk(c, "thread_spawn_edges", row, true, &["child_thread_id"])?;
             }
         }
         state.files.insert(
@@ -763,6 +797,48 @@ mod db_tests {
         )
         .unwrap();
         p
+    }
+
+    #[test]
+    fn deleted_thread_is_tombstoned_not_resurrected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FolderStore::new(tmp.path().join("store"));
+        let a = tmp.path().join("a");
+        let db_a = make_state_db(&a);
+        let a_home = a.to_string_lossy().into_owned();
+        rusqlite::Connection::open(&db_a)
+            .unwrap()
+            .execute(
+                "INSERT INTO threads VALUES ('thd', ?1, 100, 200, 'vscode', 'openai', ?2,
+                   'Doomed', '{}', 'on-request', 100000, 200000, 200000, NULL)",
+                rusqlite::params![
+                    format!("{a_home}/.codex/sessions/2026/07/12/rd.jsonl"),
+                    format!("{a_home}/proj"),
+                ],
+            )
+            .unwrap();
+        let ro = a.join(".codex/sessions/2026/07/12/rd.jsonl");
+        std::fs::create_dir_all(ro.parent().unwrap()).unwrap();
+        std::fs::write(&ro, "{}").unwrap();
+        let tok = Tokenizer::with_case_sensitivity(&a_home, false);
+        let mut st = SyncState::default();
+        assert_eq!(db_push(&a, &tok, &mut st, &store, "a", &[]).unwrap(), 1);
+
+        // Codex deletes the thread (e.g. cleanup after a failed open).
+        rusqlite::Connection::open(&db_a)
+            .unwrap()
+            .execute("DELETE FROM threads WHERE id='thd'", [])
+            .unwrap();
+        // Next export pass tombstones it...
+        db_push(&a, &tok, &mut st, &store, "a", &store.list().unwrap()).unwrap();
+        // ...so apply must NOT resurrect it from the store copy.
+        let r = db_apply(&a, &tok, &mut st, &store, &store.list().unwrap(), &|| {}, &|_| {}).unwrap();
+        assert_eq!(r.applied, 0);
+        let n: i64 = rusqlite::Connection::open(&db_a)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM threads WHERE id='thd'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "deleted thread must stay deleted on this machine");
     }
 
     #[test]
