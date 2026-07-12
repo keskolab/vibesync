@@ -71,10 +71,6 @@ pub fn probe_locations(home: &Path) -> Vec<PathBuf> {
     }
 }
 
-fn storage_root(home: &Path) -> Option<PathBuf> {
-    data_root(home).map(|r| r.join("storage")).filter(|s| s.is_dir())
-}
-
 /// Installed = the data root holds something a real install writes (db,
 /// auth, bin, logs). Pre-gating VibeSync versions created storage/ on
 /// machines without OpenCode — such residue must not read as an install.
