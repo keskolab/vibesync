@@ -50,9 +50,23 @@ fn storage_root(home: &Path) -> Option<PathBuf> {
 /// auth, bin, logs). Pre-gating VibeSync versions created storage/ on
 /// machines without OpenCode — such residue must not read as an install.
 pub fn detect(home: &Path) -> bool {
-    let Some(root) = data_root(home) else { return false };
+    let Some(root) = data_root(home) else {
+        crate::dlog::debug(|| {
+            "detect opencode: NOT installed (no data root under ~/.local/share or platform data dirs)"
+                .to_string()
+        });
+        return false;
+    };
     let Ok(rd) = std::fs::read_dir(&root) else { return false };
-    rd.flatten().any(|e| e.file_name() != "storage")
+    let found = rd.flatten().any(|e| e.file_name() != "storage");
+    crate::dlog::debug(|| {
+        format!(
+            "detect opencode: {} ({})",
+            if found { "installed" } else { "NOT installed (only sync residue)" },
+            root.display()
+        )
+    });
+    found
 }
 
 pub fn scan(home: &Path) -> Result<Vec<FileEntry>> {
