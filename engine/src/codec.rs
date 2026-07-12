@@ -81,14 +81,32 @@ impl AgeCodec {
     }
 }
 
+/// scrypt output per passphrase, process-wide. The KDF is deliberately
+/// expensive (~1s of CPU) and a fresh codec is built for EVERY sync — the
+/// per-instance OnceLock made every autosync pay it again. Derive once per
+/// passphrase per app run.
+static DERIVED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, [u8; 32]>>,
+> = std::sync::LazyLock::new(Default::default);
+
 /// passphrase -> scrypt(fixed salt) -> 32 bytes -> bech32 AGE-SECRET-KEY.
 /// Deterministic so every machine derives the same key.
 fn derive_identity(passphrase: &str) -> age::x25519::Identity {
     use bech32::{ToBase32, Variant};
-    let mut key = [0u8; 32];
-    let params = scrypt::Params::new(17, 8, 1, 32).expect("scrypt params");
-    scrypt::scrypt(passphrase.as_bytes(), b"vibesync-age-v1", &params, &mut key)
-        .expect("scrypt");
+    let key: [u8; 32] = {
+        let mut cache = DERIVED.lock().unwrap();
+        match cache.get(passphrase) {
+            Some(k) => *k,
+            None => {
+                let mut key = [0u8; 32];
+                let params = scrypt::Params::new(17, 8, 1, 32).expect("scrypt params");
+                scrypt::scrypt(passphrase.as_bytes(), b"vibesync-age-v1", &params, &mut key)
+                    .expect("scrypt");
+                cache.insert(passphrase.to_string(), key);
+                key
+            }
+        }
+    };
     let encoded = bech32::encode("age-secret-key-", key.to_base32(), Variant::Bech32)
         .expect("bech32");
     encoded.to_uppercase().parse().expect("valid derived age identity")
