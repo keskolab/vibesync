@@ -573,6 +573,49 @@ window.addEventListener("DOMContentLoaded", async () => {
 	setInterval(renderStatusLine, 15000);
 
 	setPending(!isSetup());
+	// ---------- self-update ----------
+	let updatePending = null;
+	const renderUpdateBtn = () => {
+		$("check-updates").textContent = updatePending
+			? `Install v${updatePending.latestVersion} & restart`
+			: "Check for updates";
+	};
+	$("check-updates").addEventListener("click", async () => {
+		const btn = $("check-updates");
+		const res = $("update-result");
+		btn.disabled = true;
+		if (updatePending) {
+			btn.textContent = "Installing…";
+			res.textContent = "Downloading — the app restarts by itself when done.";
+			try {
+				await invoke("install_pending_update");
+			} catch (e) {
+				res.textContent = String(e);
+				btn.disabled = false;
+				renderUpdateBtn();
+			}
+			return;
+		}
+		btn.textContent = "Checking…";
+		try {
+			const r = await invoke("check_for_updates");
+			updatePending = r.available ? r : null;
+			res.textContent = r.message;
+		} catch (e) {
+			updatePending = null;
+			res.textContent = String(e);
+		}
+		btn.disabled = false;
+		renderUpdateBtn();
+		setTimeout(fitWindow, 50);
+	});
+	// Startup check found one (Rust already notified the OS).
+	tauri?.event.listen("updates://available", (e) => {
+		updatePending = e.payload;
+		renderUpdateBtn();
+		$("update-result").textContent = e.payload.message;
+	});
+
 	invoke("engine_version")
 		.then((v) => {
 			$("version").textContent = `VibeSync – v${v}`;
