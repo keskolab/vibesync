@@ -20,7 +20,7 @@ pub mod vscode;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use codec::{AgeCodec, Codec, GzipCodec};
-pub use config::{machine_name, open_store, StoreConfig};
+pub use config::{machine_name, open_store, open_store_cached, StoreConfig};
 pub use scanner::FileEntry;
 pub use state::{FileState, SyncState};
 pub use store::{AzureSasStore, FolderStore, RemoteMeta, S3Store, SyncStore};

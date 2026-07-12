@@ -165,6 +165,20 @@ pub struct S3Store {
     credentials: rusty_s3::Credentials,
     codec: Box<dyn Codec>,
     agent: ureq::Agent,
+    /// Persisted listing cache: meta-object key -> (etag, RemoteMeta). The
+    /// bucket LIST returns each object's ETag for free; a sidecar whose ETag
+    /// is unchanged since last sync has unchanged content, so its meta needs
+    /// no re-download. Turns a no-change listing from one GET per object
+    /// into a handful of LIST pages.
+    list_cache: Option<PathBuf>,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ListCache {
+    /// Which store this cache belongs to (endpoint|bucket) — discarded on
+    /// mismatch so switching stores can't serve stale metadata.
+    scope: String,
+    entries: std::collections::HashMap<String, (String, RemoteMeta)>,
 }
 
 impl S3Store {
@@ -196,6 +210,7 @@ impl S3Store {
                 .timeout(Duration::from_secs(120))
                 .max_idle_connections_per_host(32)
                 .build(),
+            list_cache: None,
         })
     }
 
@@ -212,6 +227,37 @@ impl S3Store {
             .send_bytes(body)
             .map_err(|e| clean_s3_err("upload", e))?;
         Ok(())
+    }
+
+    /// Enable the persistent listing cache (app data dir file).
+    pub fn with_list_cache(mut self, path: PathBuf) -> Self {
+        self.list_cache = Some(path);
+        self
+    }
+
+    fn cache_scope(&self) -> String {
+        format!("{}|{}", self.bucket.base_url(), self.bucket.name())
+    }
+
+    fn load_list_cache(&self) -> ListCache {
+        let Some(p) = &self.list_cache else { return ListCache::default() };
+        let cache: ListCache = std::fs::read(p)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        if cache.scope == self.cache_scope() {
+            cache
+        } else {
+            ListCache::default()
+        }
+    }
+
+    fn save_list_cache(&self, cache: &ListCache) {
+        if let Some(p) = &self.list_cache {
+            if let Ok(bytes) = serde_json::to_vec(cache) {
+                let _ = std::fs::write(p, bytes);
+            }
+        }
     }
 
     /// get_bytes with retry/backoff — list() fetches thousands of meta
@@ -331,7 +377,7 @@ impl SyncStore for S3Store {
                     .into_owned();
                 if let Some(base) = key.strip_suffix(META_SUFFIX) {
                     if let Some(logical) = base.strip_prefix(prefix) {
-                        out.push(logical.to_string());
+                        out.push((logical.to_string(), obj.etag.clone()));
                     }
                 }
             }
@@ -340,11 +386,22 @@ impl SyncStore for S3Store {
                 None => break,
             }
         }
-        // Fetch sidecar metas in parallel — serially this dominates sync time.
+        // Serve unchanged sidecars from the ETag-validated cache; fetch only
+        // the changed/unknown ones in parallel (serially this dominated sync).
         use rayon::prelude::*;
-        let mut result: Vec<(String, RemoteMeta)> = out
+        let mut cache = self.load_list_cache();
+        let (hits, misses): (Vec<_>, Vec<_>) = out
+            .into_iter()
+            .partition(|(logical, etag)| {
+                cache.entries.get(logical).map(|(e, _)| e == etag).unwrap_or(false)
+            });
+        let mut result: Vec<(String, RemoteMeta)> = hits
+            .iter()
+            .map(|(logical, _)| (logical.clone(), cache.entries[logical].1.clone()))
+            .collect();
+        let fetched: Vec<(String, String, RemoteMeta)> = misses
             .par_iter()
-            .map(|logical| -> Result<Option<(String, RemoteMeta)>> {
+            .map(|(logical, etag)| -> Result<Option<(String, String, RemoteMeta)>> {
                 let Some(meta_bytes) = self.get_bytes_retry(&self.key(logical, META_SUFFIX))?
                 else {
                     return Ok(None); // sidecar genuinely missing: interrupted upload
@@ -352,12 +409,23 @@ impl SyncStore for S3Store {
                 // Corrupt sidecar: skip rather than brick sync; source re-push heals.
                 Ok(serde_json::from_slice::<RemoteMeta>(&meta_bytes)
                     .ok()
-                    .map(|m| (logical.clone(), m)))
+                    .map(|m| (logical.clone(), etag.clone(), m)))
             })
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten()
             .collect();
+        // Rebuild the cache from exactly this listing (drops deleted objects).
+        let mut fresh = ListCache { scope: self.cache_scope(), entries: Default::default() };
+        for (logical, etag) in &hits {
+            fresh.entries.insert(logical.clone(), (etag.clone(), cache.entries[logical].1.clone()));
+        }
+        for (logical, etag, meta) in fetched {
+            fresh.entries.insert(logical.clone(), (etag, meta.clone()));
+            result.push((logical, meta));
+        }
+        cache = fresh;
+        self.save_list_cache(&cache);
         result.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(result)
     }

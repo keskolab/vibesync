@@ -22,7 +22,29 @@ pub struct FileEntry {
     pub hash: String,
 }
 
+/// Process-lifetime hash cache: (mtime_ms, size) -> hash per absolute path.
+/// Scans re-hash every file on every sync; for a long-running tray app the
+/// overwhelming majority are unchanged between 15-minute autosyncs, so a
+/// stat() replaces a full read+SHA. Validated by mtime+size, so an edited
+/// file always re-hashes; bounded by the fleet's file count (a few MB).
+static HASH_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (i64, u64, String)>>,
+> = std::sync::LazyLock::new(Default::default);
+
 pub fn hash_file(path: &Path) -> Result<String> {
+    let meta = std::fs::metadata(path)?;
+    let key = (mtime_ms(path).unwrap_or(0), meta.len());
+    if let Some((m, s, h)) = HASH_CACHE.lock().unwrap().get(path) {
+        if (*m, *s) == key {
+            return Ok(h.clone());
+        }
+    }
+    let hash = hash_file_uncached(path)?;
+    HASH_CACHE.lock().unwrap().insert(path.to_path_buf(), (key.0, key.1, hash.clone()));
+    Ok(hash)
+}
+
+fn hash_file_uncached(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path)
         .with_context(|| format!("open {} for hashing", path.display()))?;
     let mut hasher = Sha256::new();

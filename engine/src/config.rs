@@ -32,6 +32,16 @@ pub enum StoreConfig {
 /// Build the store described by `config`. `passphrase` is required whenever
 /// content encryption applies (encrypted folders and all S3 backends).
 pub fn open_store(config: &StoreConfig, passphrase: Option<&str>) -> Result<Box<dyn SyncStore>> {
+    open_store_cached(config, passphrase, None)
+}
+
+/// `cache_dir`: where S3-class stores may persist their ETag-validated
+/// listing cache (skips per-object meta downloads for unchanged objects).
+pub fn open_store_cached(
+    config: &StoreConfig,
+    passphrase: Option<&str>,
+    cache_dir: Option<&std::path::Path>,
+) -> Result<Box<dyn SyncStore>> {
     let codec_for = |encrypted: bool| -> Result<Box<dyn Codec>> {
         if encrypted {
             let pass = passphrase
@@ -46,14 +56,18 @@ pub fn open_store(config: &StoreConfig, passphrase: Option<&str>) -> Result<Box<
             Ok(Box::new(FolderStore::with_codec(path.clone(), codec_for(*encrypted)?)))
         }
         StoreConfig::S3 { endpoint, region, bucket, access_key_id, secret_access_key } => {
-            Ok(Box::new(S3Store::new(
+            let mut s = S3Store::new(
                 endpoint,
                 region,
                 bucket,
                 access_key_id,
                 secret_access_key,
                 codec_for(true)?,
-            )?))
+            )?;
+            if let Some(dir) = cache_dir {
+                s = s.with_list_cache(dir.join("store_list_cache.json"));
+            }
+            Ok(Box::new(s))
         }
         StoreConfig::AzureSas { container_sas_url } => Ok(Box::new(
             crate::store::AzureSasStore::new(container_sas_url, codec_for(true)?)?,
