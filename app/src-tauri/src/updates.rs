@@ -12,13 +12,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
-/// Fixed update source: the repo's latest release manifest. Overridable via
-/// env for testing a draft release.
-const UPDATE_ENDPOINT: &str =
-    "https://github.com/JohnKesko/vibesync/releases/latest/download/latest.json";
-/// Minisign public key matching the TAURI_SIGNING_PRIVATE_KEY repo secret.
-const UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxREY5MDBEMEFBODU4MEYKUldRUFdLZ0tEWkRmNGJudDVFSnBlL1pmcnB5UXFHRy84aHhKdXk5Y3hzUC9qaUNnN1BMQVdybmQK";
-
 #[derive(Default)]
 pub struct PendingUpdate(pub Mutex<Option<Update>>);
 
@@ -32,16 +25,24 @@ pub struct UpdateCheckResult {
     pub message: String,
 }
 
+/// Endpoint + pubkey live in tauri.conf.json (plugins.updater) — the plugin
+/// refuses to initialize without them there. Env vars override for testing a
+/// draft release against a temporary endpoint.
 fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
-    let endpoint = std::env::var("VIBESYNC_UPDATE_ENDPOINT")
-        .unwrap_or_else(|_| UPDATE_ENDPOINT.to_string());
-    let url: url::Url = endpoint.parse().map_err(|e| format!("update endpoint: {e}"))?;
-    app.updater_builder()
-        .endpoints(vec![url])
-        .map_err(|e| e.to_string())?
-        .pubkey(std::env::var("VIBESYNC_UPDATE_PUBKEY").unwrap_or_else(|_| UPDATE_PUBKEY.to_string()))
-        .build()
-        .map_err(|e| e.to_string())
+    let ep = std::env::var("VIBESYNC_UPDATE_ENDPOINT").ok();
+    let pk = std::env::var("VIBESYNC_UPDATE_PUBKEY").ok();
+    if ep.is_none() && pk.is_none() {
+        return app.updater().map_err(|e| e.to_string());
+    }
+    let mut b = app.updater_builder();
+    if let Some(ep) = ep {
+        let url: url::Url = ep.parse().map_err(|e| format!("update endpoint: {e}"))?;
+        b = b.endpoints(vec![url]).map_err(|e| e.to_string())?;
+    }
+    if let Some(pk) = pk {
+        b = b.pubkey(pk);
+    }
+    b.build().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
