@@ -75,15 +75,8 @@ pub fn scan(home: &Path) -> Result<Vec<FileEntry>> {
     Ok(out)
 }
 
-#[derive(Debug, Default, PartialEq)]
-pub struct ApplyReport {
-    pub pulled: usize,
-    pub unchanged: usize,
-    pub skipped_newer_local: usize,
-}
-
-pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<ApplyReport> {
-    let mut report = ApplyReport::default();
+pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<crate::sync::ApplyReport> {
+    let mut report = crate::sync::ApplyReport::default();
     let dir = root(home).join("session-state");
     let prefix = format!("{PREFIX}/");
     for (logical, meta) in listing {
@@ -121,7 +114,7 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
         );
         on_pulled(logical);
-        report.pulled += 1;
+        report.applied += 1;
     }
     Ok(report)
 }
@@ -190,7 +183,7 @@ mod tests {
         let mut state_b = SyncState::default();
         let listing = store.list().unwrap();
         let report = apply(&b, &mut state_b, &store, &listing, &|| {}, &|_| {}).unwrap();
-        assert_eq!(report.pulled, 1);
+        assert_eq!(report.applied, 1);
         assert!(b.join(".copilot/session-state/5ebe-uuid/state.json").exists());
     }
 }

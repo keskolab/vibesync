@@ -100,6 +100,17 @@ pub fn pull(
 
 /// Pull for one config dir (default `.claude` or a `.claude-*` profile).
 #[allow(clippy::too_many_arguments)]
+/// The one apply outcome every adapter reports — replaces six per-adapter
+/// near-clones so the app maps results uniformly.
+#[derive(Debug, Default, PartialEq)]
+pub struct ApplyReport {
+    pub applied: usize,
+    pub unchanged: usize,
+    pub skipped_newer_local: usize,
+    /// Entries waiting for a project/repo that isn't on this machine yet.
+    pub parked: usize,
+}
+
 pub fn pull_dir(
     adapter: &Adapter,
     home: &Path,

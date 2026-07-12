@@ -111,14 +111,6 @@ fn parse_index(bytes: &[u8]) -> BTreeMap<String, (String, String)> {
     map
 }
 
-#[derive(Debug, Default, PartialEq)]
-pub struct ApplyReport {
-    pub pulled: usize,
-    pub unchanged: usize,
-    pub skipped_newer_local: usize,
-    pub index_added: usize,
-}
-
 /// Push session files (via the generic pusher, caller-supplied entries) is
 /// handled by the caller; here we publish this machine's index object.
 pub fn push_index(
@@ -152,8 +144,8 @@ pub fn push_index(
 
 /// Apply session files this machine lacks, then union every machine's index
 /// into the local session_index.jsonl (never dropping local entries).
-pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<ApplyReport> {
-    let mut report = ApplyReport::default();
+pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<crate::sync::ApplyReport> {
+    let mut report = crate::sync::ApplyReport::default();
     let sessions_root = root(home).join("sessions");
     let index_prefix = format!("{INDEX_PREFIX}/");
     let session_prefix = format!("{SESSIONS_PREFIX}/");
@@ -172,8 +164,10 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
                     match merged.get(&id) {
                         Some((cur, _)) if *cur >= updated => {}
                         _ => {
-                            if merged.insert(id, (updated, line)).is_none() {
-                                report.index_added += 1;
+                            if merged.insert(id.clone(), (updated, line)).is_none() {
+                                crate::dlog::debug(|| {
+                                    format!("codex: merged session {id} into local index")
+                                });
                             }
                         }
                     }
@@ -220,7 +214,7 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
         );
         on_pulled(logical);
-        report.pulled += 1;
+        report.applied += 1;
     }
 
     // Write the unioned index back (atomic).
@@ -314,7 +308,7 @@ mod tests {
         let mut state_b = SyncState::default();
         let listing = store.list().unwrap();
         let report = apply(&b, &mut state_b, &store, &listing, &|| {}, &|_| {}).unwrap();
-        assert_eq!(report.pulled, 1); // A's session file landed
+        assert_eq!(report.applied, 1); // A's session file landed
         assert!(b.join(".codex/sessions/2026/04/21/rollout-aaa.jsonl").exists());
 
         // B's index now lists BOTH sessions.
