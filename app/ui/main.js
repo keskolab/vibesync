@@ -190,7 +190,7 @@ function applySettings(s) {
 	const entries = Object.entries(s.projectMappings || {});
 	ul.innerHTML = entries.length
 		? ""
-		: `<li class="muted"><div class="tlabel">No mappings yet<span class="tsub">Git repos with a remote are matched automatically</span></div></li>`;
+		: `<li class="muted"><div class="tlabel">No mappings — and that’s normal<span class="tsub">Projects match automatically. Most people never add one.</span></div></li>`;
 	for (const [name, path] of entries) {
 		const li = document.createElement("li");
 		li.innerHTML = `

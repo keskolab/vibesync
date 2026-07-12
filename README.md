@@ -25,7 +25,7 @@ The rules every sync follows:
 
 - **Nothing is ever lost.** Sync never deletes anything. If the same session changed on two computers, the newer version wins and the older one is kept beside it as a backup file.
 - **Nothing comes back from the dead.** When a tool cleans up old sessions (Claude does after ~30 days), your storage keeps them forever — but they're never pushed back onto a computer that already cleaned them up.
-- **Projects follow you, not your folder layout.** A project is recognized by its git repository, so `C:\Github\app` on your PC and `~/dev/app` on your Mac are the same project — even if you later rename or move the folder. Folders without git can be mapped by name in Settings.
+- **Works across your computers with zero setup.** A session from `C:\Github\app` on your PC lands in `~/dev/app` on your Mac — same project, different folders, nothing to configure. Git projects are recognized by the repository itself; everything else follows your home folder layout automatically. If a computer doesn't have a project yet, that project's sessions just wait in your storage until it shows up — clone the repo and they're there.
 - **Only changes transfer.** After the first sync, routine syncs finish in seconds.
 - Adding another computer is just: install VibeSync, point it at the same place, enter the same passphrase, press Sync.
 
