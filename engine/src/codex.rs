@@ -55,6 +55,152 @@ pub fn detect(home: &Path) -> bool {
     found
 }
 
+/// Rollout files carry the session's cwd INSIDE their content
+/// (session_meta and turn_context lines) — Codex matches sessions to
+/// folders by it, so an untranslated rollout is invisible to `codex
+/// resume` and poisons the app's open flow on another machine. Rollouts
+/// therefore sync in TOKENIZED form and materialize with each machine's
+/// own paths. Every other line is copied byte-verbatim: user content is
+/// never touched, and any line that fails to parse passes through as-is.
+fn transform_rollout(bytes: &[u8], f: &dyn Fn(&str) -> String) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for line in bytes.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let mapped = (|| -> Option<Vec<u8>> {
+            // Cheap gate before parsing potentially huge lines: the type
+            // field sits near the start, but field order isn't guaranteed —
+            // scan a generous window. A false positive just costs one parse.
+            let head = match std::str::from_utf8(&line[..line.len().min(2000)]) {
+                Ok(h) => h,
+                Err(e) => std::str::from_utf8(&line[..e.valid_up_to()]).unwrap_or(""),
+            };
+            if !head.contains("session_meta") && !head.contains("turn_context") {
+                return None;
+            }
+            let mut v: serde_json::Value = serde_json::from_slice(line).ok()?;
+            let t = v.get("type")?.as_str()?.to_string();
+            if t != "session_meta" && t != "turn_context" {
+                return None;
+            }
+            let cwd = v.get_mut("payload")?.get_mut("cwd")?;
+            let s = cwd.as_str()?;
+            *cwd = serde_json::Value::String(f(s));
+            serde_json::to_vec(&v).ok()
+        })();
+        match mapped {
+            Some(m) => out.extend_from_slice(&m),
+            None => out.extend_from_slice(line),
+        }
+        out.push(b'\n');
+    }
+    out
+}
+
+/// tokenize direction for rollout content.
+fn rollout_tokenize<'a>(tok: &'a crate::tokenizer::Tokenizer) -> impl Fn(&str) -> String + 'a {
+    move |p| tok.tokenize_plain(p)
+}
+
+/// expand direction: local paths, local separators, foreign homes adopted.
+fn rollout_expand<'a>(tok: &'a crate::tokenizer::Tokenizer) -> impl Fn(&str) -> String + 'a {
+    move |p| {
+        let e = crate::dbsync::normalize_path_shape(&tok.expand_plain(p));
+        crate::dbsync::adopt_foreign_home(&e, tok.home()).unwrap_or(e)
+    }
+}
+
+/// Dedicated session-file push — tokenized content means the generic
+/// byte-opaque pusher can't carry these. Diffing is listing-first (a store
+/// that lost an object gets it again) with an mtime fast path, and files
+/// that vanish from disk are tombstoned so they never resurrect here.
+pub fn push_sessions(
+    home: &Path,
+    tok: &crate::tokenizer::Tokenizer,
+    state: &mut SyncState,
+    store: &dyn SyncStore,
+    machine: &str,
+    listing: &[(String, RemoteMeta)],
+) -> Result<usize> {
+    let dir = root(home).join("sessions");
+    let prefix = format!("{SESSIONS_PREFIX}/");
+    let remote: std::collections::HashMap<&str, &str> = listing
+        .iter()
+        .filter(|(k, _)| k.starts_with(&prefix))
+        .map(|(k, m)| (k.as_str(), m.hash.as_str()))
+        .collect();
+    // One-time migration: pre-tokenization state records raw-content hashes
+    // whose mtime fast path would suppress the re-encode forever.
+    const FMT_KEY: &str = "codex/sessions#tokenized-v2";
+    let migrated = state.files.contains_key(FMT_KEY);
+    let mut pushed = 0;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if dir.is_dir() {
+        for entry in walkdir::WalkDir::new(&dir).follow_links(false) {
+            let entry = entry?;
+            if !entry.file_type().is_file()
+                || entry.path().extension().and_then(|e| e.to_str()) != Some("jsonl")
+            {
+                continue;
+            }
+            let rel = entry
+                .path()
+                .strip_prefix(&dir)?
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            let logical = format!("{SESSIONS_PREFIX}/{rel}");
+            seen.insert(logical.clone());
+            let m = mtime_ms(entry.path())?;
+            if migrated {
+                if let Some(st) = state.files.get(&logical) {
+                    if !st.deleted_locally
+                        && st.mtime_ms == m
+                        && remote.get(logical.as_str()).map(|h| *h == st.hash).unwrap_or(false)
+                    {
+                        continue;
+                    }
+                }
+            }
+            let raw = std::fs::read(entry.path())?;
+            let toked = transform_rollout(&raw, &rollout_tokenize(tok));
+            let hash = hash_bytes(&toked);
+            if remote.get(logical.as_str()).map(|h| *h == hash).unwrap_or(false) {
+                state.files.insert(
+                    logical,
+                    FileState { hash, mtime_ms: m, size: toked.len() as u64, deleted_locally: false },
+                );
+                continue;
+            }
+            store.put(
+                &logical,
+                &toked,
+                &RemoteMeta { hash: hash.clone(), mtime_ms: m, size: toked.len() as u64, source: machine.to_string() },
+            )?;
+            state.files.insert(
+                logical,
+                FileState { hash, mtime_ms: m, size: toked.len() as u64, deleted_locally: false },
+            );
+            pushed += 1;
+        }
+    }
+    for (k, st) in state.files.iter_mut() {
+        if k.starts_with(&prefix) && !st.deleted_locally && !seen.contains(k) {
+            st.deleted_locally = true;
+        }
+    }
+    state.files.insert(
+        FMT_KEY.to_string(),
+        FileState { hash: String::new(), mtime_ms: 0, size: 0, deleted_locally: false },
+    );
+    if pushed > 0 {
+        crate::dlog::info(|| format!("codex: published {pushed} session file(s) (paths tokenized)"));
+    }
+    Ok(pushed)
+}
+
 /// Scan session files (index is handled separately on push/apply).
 pub fn scan(home: &Path) -> Result<Vec<FileEntry>> {
     let dir = root(home).join("sessions");
@@ -145,7 +291,7 @@ pub fn push_index(
 
 /// Apply session files this machine lacks, then union every machine's index
 /// into the local session_index.jsonl (never dropping local entries).
-pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<crate::sync::ApplyReport> {
+pub fn apply(home: &Path, tok: &crate::tokenizer::Tokenizer, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<crate::sync::ApplyReport> {
     let mut report = crate::sync::ApplyReport::default();
     let sessions_root = root(home).join("sessions");
     let index_prefix = format!("{INDEX_PREFIX}/");
@@ -192,7 +338,13 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
             }
         }
         if abs.exists() {
-            if hash_file(&abs)? == meta.hash {
+            // Store objects hold the TOKENIZED form; compare in that space.
+            let local_toked = transform_rollout(&std::fs::read(&abs)?, &rollout_tokenize(tok));
+            if hash_bytes(&local_toked) == meta.hash {
+                state.files.insert(
+                    logical.clone(),
+                    FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
+                );
                 report.unchanged += 1;
                 continue;
             }
@@ -202,11 +354,13 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
             }
         }
         let Some((data, _)) = store.get(logical)? else { continue };
+        // Materialize with THIS machine's paths inside the content.
+        let localized = transform_rollout(&data, &rollout_expand(tok));
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = abs.with_extension("vibesync-tmp");
-        std::fs::write(&tmp, &data)?;
+        std::fs::write(&tmp, &localized)?;
         std::fs::rename(&tmp, &abs)?;
         filetime::set_file_mtime(
             &abs,
@@ -800,6 +954,51 @@ mod db_tests {
     }
 
     #[test]
+    fn rollout_content_localizes_across_machines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FolderStore::new(tmp.path().join("store"));
+        let a = tmp.path().join("a");
+        let a_home = a.to_string_lossy().into_owned();
+        let dir = a.join(".codex/sessions/2026/07/12");
+        std::fs::create_dir_all(&dir).unwrap();
+        let garbage = "this line is not JSON and must survive byte-for-byte";
+        let content = format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({"timestamp":"t","type":"session_meta","payload":{"id":"r1","cwd":format!("{a_home}/proj")}}),
+            garbage,
+            serde_json::json!({"timestamp":"t","type":"turn_context","payload":{"cwd":format!("{a_home}/proj")}}),
+        );
+        std::fs::write(dir.join("rollout-r1.jsonl"), &content).unwrap();
+        let tok_a = Tokenizer::with_case_sensitivity(&a_home, false);
+        let mut st_a = SyncState::default();
+        assert_eq!(push_sessions(&a, &tok_a, &mut st_a, &store, "a", &[]).unwrap(), 1);
+        // The store holds the tokenized form.
+        let (bytes, _) = store.get("codex/sessions/2026/07/12/rollout-r1.jsonl").unwrap().unwrap();
+        let stored = String::from_utf8(bytes).unwrap();
+        assert!(stored.contains("${HOME}/proj"), "{stored}");
+        assert!(stored.contains(garbage));
+
+        // B materializes it with ITS paths inside the content.
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(b.join(".codex")).unwrap();
+        let b_home = b.to_string_lossy().into_owned();
+        let tok_b = Tokenizer::with_case_sensitivity(&b_home, false);
+        let mut st_b = SyncState::default();
+        let listing = store.list().unwrap();
+        apply(&b, &tok_b, &mut st_b, &store, &listing, &|| {}, &|_| {}).unwrap();
+        let local =
+            std::fs::read_to_string(b.join(".codex/sessions/2026/07/12/rollout-r1.jsonl")).unwrap();
+        assert!(local.contains(&format!("{b_home}/proj")), "{local}");
+        assert!(!local.contains("${HOME}"), "{local}");
+        assert!(local.contains(garbage));
+
+        // Roundtrip is stable: B re-pushing changes nothing.
+        assert_eq!(push_sessions(&b, &tok_b, &mut st_b, &store, "b", &store.list().unwrap()).unwrap(), 0);
+        // A also stays settled.
+        assert_eq!(push_sessions(&a, &tok_a, &mut st_a, &store, "a", &store.list().unwrap()).unwrap(), 0);
+    }
+
+    #[test]
     fn deleted_thread_is_tombstoned_not_resurrected() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FolderStore::new(tmp.path().join("store"));
@@ -1051,7 +1250,8 @@ mod tests {
 
         let mut state_b = SyncState::default();
         let listing = store.list().unwrap();
-        let report = apply(&b, &mut state_b, &store, &listing, &|| {}, &|_| {}).unwrap();
+        let tok_b = crate::tokenizer::Tokenizer::with_case_sensitivity(&b.to_string_lossy(), false);
+        let report = apply(&b, &tok_b, &mut state_b, &store, &listing, &|| {}, &|_| {}).unwrap();
         assert_eq!(report.applied, 1); // A's session file landed
         assert!(b.join(".codex/sessions/2026/04/21/rollout-aaa.jsonl").exists());
 
