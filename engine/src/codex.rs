@@ -324,6 +324,49 @@ pub fn local_dirs(home: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// A folder move leaves Codex's cwd pointing at a dead path forever (the
+/// session even drops out of Codex's own list). When the dead path's
+/// basename exists at exactly ONE plausible location under this home —
+/// standard user folders plus wherever live sessions already anchor — the
+/// row re-points there. Ambiguity means never guess.
+fn relocate_dead_cwd(
+    dead: &str,
+    home: &str,
+    rows: &[serde_json::Map<String, serde_json::Value>],
+) -> Option<String> {
+    let base = Path::new(dead).file_name()?.to_string_lossy().into_owned();
+    let mut parents: Vec<PathBuf> = vec![
+        Path::new(home).join("Documents"),
+        Path::new(home).join("Desktop"),
+        Path::new(home).join("Development"),
+    ];
+    for r in rows {
+        if let Some(c) = r.get("cwd").and_then(|v| v.as_str()) {
+            let c = c.strip_prefix("\\\\?\\").unwrap_or(c);
+            let p = Path::new(c);
+            if p.is_dir() {
+                if let Some(par) = p.parent() {
+                    parents.push(par.to_path_buf());
+                }
+            }
+        }
+    }
+    parents.sort();
+    parents.dedup();
+    let mut hits: Vec<PathBuf> = parents
+        .into_iter()
+        .map(|p| p.join(&base))
+        .filter(|c| c.is_dir() && *c.to_string_lossy() != *dead)
+        .collect();
+    hits.sort();
+    hits.dedup();
+    if hits.len() == 1 {
+        Some(crate::dbsync::normalize_path_shape(&hits[0].to_string_lossy()))
+    } else {
+        None
+    }
+}
+
 /// A thread's export version: the newest of its second- and ms-resolution
 /// timestamps (the schema carries both; triggers backfill the ms columns).
 fn thread_eff(t: &serde_json::Map<String, serde_json::Value>) -> i64 {
@@ -370,13 +413,15 @@ pub fn db_push(
         return Ok(0);
     };
     let conn = open_ro(&db)?;
-    let summary: (i64, i64, i64, i64) = conn.query_row(
+    let summary: (i64, i64, i64, i64, String) = conn.query_row(
         "SELECT (SELECT COUNT(*) FROM threads),
                 (SELECT COALESCE(MAX(COALESCE(updated_at_ms, updated_at * 1000)), 0) FROM threads),
                 (SELECT COUNT(*) FROM thread_dynamic_tools),
-                (SELECT COUNT(*) FROM thread_spawn_edges)",
+                (SELECT COUNT(*) FROM thread_spawn_edges),
+                (SELECT COALESCE(group_concat(id || cwd || rollout_path), '')
+                   FROM (SELECT id, cwd, rollout_path FROM threads ORDER BY id))",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
     crate::dlog::debug(|| {
         format!("codex db: {} — {} threads, {} dynamic tools", db.display(), summary.0, summary.2)
@@ -417,7 +462,14 @@ pub fn db_push(
         let hash = hash_bytes(&bytes);
         let logical = format!("{DB_PREFIX}/{id}.json");
         if let Some((rhash, rmtime)) = remote.get(logical.as_str()) {
-            if *rmtime > 0 && (*rhash == hash || *rmtime >= eff) {
+            // A strictly newer store copy always wins; at EQUAL version we
+            // re-publish only when our own canonical bytes changed since we
+            // last pushed/recorded this thread (a heal, a mapping, an
+            // equal-time edit). That comparison is against OUR state — a
+            // deterministic local fact — so cross-machine serialization
+            // drift converges in one bounded hop instead of ping-ponging.
+            let own_prev = state.files.get(&logical).map(|s| s.hash == hash).unwrap_or(false);
+            if *rmtime > 0 && (*rhash == hash || *rmtime > eff || (*rmtime >= eff && own_prev)) {
                 unchanged += 1;
                 continue;
             }
@@ -478,6 +530,18 @@ pub fn db_apply(
         let mut fixes: Vec<(String, &'static str, String)> = Vec::new();
         for r in &rows {
             let Some(id) = r.get("id").and_then(|v| v.as_str()) else { continue };
+            if let Some(cwd) = r.get("cwd").and_then(|v| v.as_str()) {
+                let clean = cwd.strip_prefix("\\\\?\\").unwrap_or(cwd);
+                if !crate::dbsync::foreign_shaped(clean, tok.home()) && !Path::new(clean).exists() {
+                    if let Some(moved) = relocate_dead_cwd(clean, tok.home(), &rows) {
+                        crate::dlog::info(|| {
+                            format!("codex db: {id} re-pointed to moved folder {moved}")
+                        });
+                        fixes.push((id.to_string(), "cwd", moved));
+                        continue;
+                    }
+                }
+            }
             for f in THREAD_PATH_FIELDS {
                 if let Some(v) = r.get(*f).and_then(|v| v.as_str()) {
                     if let Some(adopted) = crate::dbsync::adopt_foreign_home(v, tok.home()) {
@@ -520,9 +584,12 @@ pub fn db_apply(
         seen += 1;
         on_file();
         if let Some(st) = state.files.get(logical) {
+            // Strictly-newer state skips; EQUAL version with a different
+            // hash is a re-publication (heal/mapping/equal-time edit) and
+            // must be examined — the kept-branch path heal handles it.
             if st.deleted_locally
                 || st.hash == meta.hash
-                || (st.mtime_ms > 0 && st.mtime_ms >= meta.mtime_ms)
+                || (st.mtime_ms > 0 && st.mtime_ms > meta.mtime_ms)
             {
                 report.unchanged += 1;
                 continue;
@@ -579,10 +646,17 @@ pub fn db_apply(
                 for f in THREAD_PATH_FIELDS {
                     let local_v = lr.get(*f).and_then(|v| v.as_str()).unwrap_or("");
                     let remote_v = t.get(*f).and_then(|v| v.as_str()).unwrap_or("");
-                    if !remote_v.is_empty()
-                        && crate::dbsync::foreign_shaped(local_v, tok.home())
+                    let local_dead = *f == "cwd"
+                        && !local_v.is_empty()
+                        && !Path::new(local_v.strip_prefix("\\\\?\\").unwrap_or(local_v)).exists();
+                    let remote_ok = !remote_v.is_empty()
                         && !crate::dbsync::foreign_shaped(remote_v, tok.home())
                         && !crate::gitmap::has_unresolved_token(remote_v)
+                        && local_v != remote_v;
+                    if remote_ok
+                        && (crate::dbsync::foreign_shaped(local_v, tok.home())
+                            || (local_dead
+                                && Path::new(remote_v.strip_prefix("\\\\?\\").unwrap_or(remote_v)).exists()))
                     {
                         healed.push((*f, remote_v.to_string()));
                     }
@@ -675,6 +749,40 @@ mod db_tests {
         )
         .unwrap();
         p
+    }
+
+    #[test]
+    fn moved_folder_re_points_dead_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FolderStore::new(tmp.path().join("store"));
+        let b = tmp.path().join("b");
+        let db_b = make_state_db(&b);
+        let b_home = b.to_string_lossy().into_owned();
+        // The folder moved from <home>/old/X to <home>/Documents/X; the
+        // thread row still points at the dead spot.
+        std::fs::create_dir_all(b.join("Documents").join("X")).unwrap();
+        rusqlite::Connection::open(&db_b)
+            .unwrap()
+            .execute(
+                "INSERT INTO threads VALUES ('thm', ?1, 100, 200, 'vscode', 'openai',
+                   ?2, 'Moved thread', '{}', 'on-request', 100000, 200000, 200000, NULL)",
+                rusqlite::params![
+                    format!("{b_home}/.codex/sessions/2026/07/12/r.jsonl"),
+                    format!("{b_home}/old/X"),
+                ],
+            )
+            .unwrap();
+        let tok_b = Tokenizer::with_case_sensitivity(&b_home, false);
+        let mut st = SyncState::default();
+        db_apply(&b, &tok_b, &mut st, &store, &[], &|| {}, &|_| {}).unwrap();
+        let cwd: String = rusqlite::Connection::open(&db_b)
+            .unwrap()
+            .query_row("SELECT cwd FROM threads WHERE id='thm'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            cwd,
+            crate::dbsync::normalize_path_shape(&b.join("Documents").join("X").to_string_lossy())
+        );
     }
 
     #[test]
@@ -777,9 +885,11 @@ mod db_tests {
             c.query_row("SELECT COUNT(*) FROM thread_dynamic_tools WHERE thread_id='th1'", [], |r| r.get(0)).unwrap();
         assert_eq!(tools, 1);
 
-        // Ping-pong guard: B's byte-divergent re-export at equal version
-        // must not push.
+        // Equal-version local change (title edit, same timestamps): pushes
+        // exactly ONCE — our canonical bytes changed vs our own record —
+        // then settles. Bounded, not a ping-pong.
         c.execute("UPDATE threads SET title='renamed locally' WHERE id='th1'", []).unwrap();
+        assert_eq!(db_push(&b, &tok_b, &mut st_b, &store, "b", &store.list().unwrap()).unwrap(), 1);
         assert_eq!(db_push(&b, &tok_b, &mut st_b, &store, "b", &store.list().unwrap()).unwrap(), 0);
 
         // Newer local thread: untouched by an older remote.
