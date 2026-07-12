@@ -60,6 +60,58 @@ pub(crate) fn insert_map(
     map: &serde_json::Map<String, serde_json::Value>,
     or_replace: bool,
 ) -> Result<()> {
+    insert_map_pk(conn, table, map, or_replace, &[])
+}
+
+/// Like [`insert_map`], but when replacing an EXISTING row (looked up by
+/// `pk` columns) the incoming map is OVERLAID on the current row first —
+/// a sender on an older tool schema must never wipe columns it doesn't
+/// know about back to their defaults (a wiped `preview` hides the thread
+/// from Codex's list entirely).
+pub(crate) fn insert_map_pk(
+    conn: &rusqlite::Connection,
+    table: &str,
+    map: &serde_json::Map<String, serde_json::Value>,
+    or_replace: bool,
+    pk: &[&str],
+) -> Result<()> {
+    let mut merged;
+    let map = if or_replace && !pk.is_empty() && pk.iter().all(|k| map.contains_key(*k)) {
+        let cond = pk
+            .iter()
+            .enumerate()
+            .map(|(i, k)| format!("`{k}` = ?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let params: Vec<Box<dyn rusqlite::ToSql>> = pk
+            .iter()
+            .map(|k| -> Box<dyn rusqlite::ToSql> {
+                match &map[*k] {
+                    serde_json::Value::Number(n) if n.is_i64() => Box::new(n.as_i64().unwrap()),
+                    serde_json::Value::String(v) => Box::new(v.clone()),
+                    other => Box::new(other.to_string()),
+                }
+            })
+            .collect();
+        let existing = query_maps(
+            conn,
+            &format!("SELECT * FROM `{table}` WHERE {cond}"),
+            &params.iter().map(|b| b.as_ref()).collect::<Vec<_>>(),
+        )?
+        .pop();
+        match existing {
+            Some(mut base) => {
+                for (k, v) in map {
+                    base.insert(k.clone(), v.clone());
+                }
+                merged = base;
+                &merged
+            }
+            None => map,
+        }
+    } else {
+        map
+    };
     let local: Vec<String> = table_cols(conn, table)?;
     let cols: Vec<&String> = local.iter().filter(|c| map.contains_key(*c)).collect();
     if cols.is_empty() {
@@ -178,6 +230,29 @@ pub(crate) fn expand_field(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_overlays_instead_of_wiping() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+               preview TEXT NOT NULL DEFAULT '');
+             INSERT INTO threads VALUES ('t1', 'old title', 'the preview');",
+        )
+        .unwrap();
+        // A sender on an older schema knows nothing about `preview`.
+        let mut incoming = serde_json::Map::new();
+        incoming.insert("id".into(), serde_json::Value::String("t1".into()));
+        incoming.insert("title".into(), serde_json::Value::String("new title".into()));
+        insert_map_pk(&conn, "threads", &incoming, true, &["id"]).unwrap();
+        let (title, preview): (String, String) = conn
+            .query_row("SELECT title, preview FROM threads WHERE id='t1'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(title, "new title");
+        assert_eq!(preview, "the preview"); // NOT wiped to the default
+    }
 
     #[test]
     fn foreign_home_paths_are_adopted() {

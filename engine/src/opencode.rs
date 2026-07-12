@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::dbsync::{expand_field, insert_map, max_time_of, max_time_of_json, query_maps, tokenize_field};
+use crate::dbsync::{expand_field, max_time_of, max_time_of_json, query_maps, tokenize_field};
 use crate::scanner::{hash_bytes, hash_file, mtime_ms, FileEntry};
 use crate::state::{FileState, SyncState};
 use crate::store::{RemoteMeta, SyncStore};
@@ -535,7 +535,7 @@ pub fn db_apply(
                     }
                 }
             }
-            insert_map(c, "project", project, false)?; // never clobber a local project row
+            crate::dbsync::insert_map_pk(c, "project", project, false, &["id"])?; // never clobber a local project row
         }
         if let Some(lw) = &relocate {
             crate::dlog::debug(|| format!("opencode db: {id} relocated to local clone {lw}"));
@@ -548,16 +548,16 @@ pub fn db_apply(
         // a remote that wins on child-row activity alone must not revert
         // local session metadata (title, archive state, ...).
         if local_ses_t.map(|t| remote_ses_t > t).unwrap_or(true) {
-            insert_map(c, "session", session, true)?;
+            crate::dbsync::insert_map_pk(c, "session", session, true, &["id"])?;
         }
         for m in obj.get("messages").and_then(|v| v.as_array()).into_iter().flatten() {
             if let Some(m) = m.as_object() {
-                insert_map(c, "message", m, true)?;
+                crate::dbsync::insert_map_pk(c, "message", m, true, &["id"])?;
             }
         }
         for p in obj.get("parts").and_then(|v| v.as_array()).into_iter().flatten() {
             if let Some(p) = p.as_object() {
-                insert_map(c, "part", p, true)?;
+                crate::dbsync::insert_map_pk(c, "part", p, true, &["id"])?;
             }
         }
         state.files.insert(
