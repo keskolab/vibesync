@@ -1426,11 +1426,6 @@ fn scan_claude(env: &ScanEnv, _state: &mut engine::SyncState) -> Result<Vec<engi
 fn scan_vscode(env: &ScanEnv, _state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
     engine::vscode::scan(env.home)
 }
-fn scan_codex(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
-    let out = engine::codex::scan(env.home)?;
-    state.mark_deletions(engine::codex::SESSIONS_PREFIX, &out);
-    Ok(out)
-}
 fn scan_opencode(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
     let out = engine::opencode::scan(env.home)?;
     state.mark_deletions(engine::opencode::PREFIX, &out);
@@ -1448,10 +1443,13 @@ fn scan_shared(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engin
 }
 
 fn publish_codex(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
-    // Legacy index for old Codex builds, plus the thread-db export that
-    // modern builds (state_<N>.sqlite) actually list from.
+    // Session files carry tokenized content, so they need the dedicated
+    // pusher; plus the legacy index for old builds, plus the thread-db
+    // export that modern builds (state_<N>.sqlite) actually list from.
+    let files = engine::codex::push_sessions(env.home, env.tok, state, env.store, env.machine, env.listing)?;
     engine::codex::push_index(env.home, env.machine, state, env.store)?;
-    engine::codex::db_push(env.home, env.tok, state, env.store, env.machine, env.listing)
+    let threads = engine::codex::db_push(env.home, env.tok, state, env.store, env.machine, env.listing)?;
+    Ok(files + threads)
 }
 fn publish_opencode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
     engine::opencode::db_push(env.home, env.tok, state, env.store, env.machine, env.listing)
@@ -1541,7 +1539,7 @@ fn apply_codex(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenRepor
     // File/index layer first so rollout files land before the thread-db
     // merge checks for them; the layers stay independent like OpenCode's.
     let mut g = GenReport::default();
-    match engine::codex::apply(env.home, state, env.store, env.listing, env.tick, env.record) {
+    match engine::codex::apply(env.home, env.tok, state, env.store, env.listing, env.tick, env.record) {
         Ok(f) => g.absorb(f),
         Err(e) => g.errors.push(format!("file-layer apply failed: {e:#}")),
     }
@@ -1604,7 +1602,7 @@ fn tool_runs() -> Vec<ToolRun> {
     vec![
         ToolRun { id: "claude-code", name: "Claude Code", purge_prefix: Some("claude/"), scope: None, detect: d_claude, paths: p_claude, scan: Some(scan_claude), publish: None, apply: apply_claude },
         ToolRun { id: "vscode", name: "VS Code", purge_prefix: Some("vscode/"), scope: None, detect: d_vscode, paths: p_vscode, scan: Some(scan_vscode), publish: None, apply: apply_vscode },
-        ToolRun { id: "codex", name: "Codex", purge_prefix: Some("codex/"), scope: None, detect: engine::codex::detect, paths: p_codex, scan: Some(scan_codex), publish: Some(publish_codex), apply: apply_codex },
+        ToolRun { id: "codex", name: "Codex", purge_prefix: Some("codex/"), scope: None, detect: engine::codex::detect, paths: p_codex, scan: None, publish: Some(publish_codex), apply: apply_codex },
         ToolRun { id: "opencode", name: "OpenCode", purge_prefix: Some("opencode/"), scope: None, detect: engine::opencode::detect, paths: p_opencode, scan: Some(scan_opencode), publish: Some(publish_opencode), apply: apply_opencode },
         ToolRun { id: "copilot", name: "Copilot CLI", purge_prefix: Some("copilot/"), scope: None, detect: engine::copilot::detect, paths: p_copilot, scan: Some(scan_copilot), publish: None, apply: apply_copilot },
         ToolRun { id: "zed", name: "Zed", purge_prefix: Some("zed/"), scope: None, detect: d_zed, paths: p_zed, scan: None, publish: Some(publish_zed), apply: apply_zed },
