@@ -482,6 +482,14 @@ pub fn db_apply(
                 if let Some(v) = r.get(*f).and_then(|v| v.as_str()) {
                     if let Some(adopted) = crate::dbsync::adopt_foreign_home(v, tok.home()) {
                         fixes.push((id.to_string(), f, adopted));
+                    } else if !v.starts_with("\\\\?\\") {
+                        // Mixed separators from pre-fix merges break Codex's
+                        // string-matched workspace grouping — normalize.
+                        // (Codex's own \\?\-prefixed rows are left alone.)
+                        let n = crate::dbsync::normalize_path_shape(v);
+                        if n != v {
+                            fixes.push((id.to_string(), f, n));
+                        }
                     }
                 }
             }
@@ -676,14 +684,20 @@ mod db_tests {
         let b = tmp.path().join("b");
         let db_b = make_state_db(&b);
         let b_home = b.to_string_lossy().into_owned();
-        // Codex's backfill planted a raw Windows cwd (extended-length form).
+        // Codex's backfill planted a raw cwd from the OTHER OS family
+        // (whichever that is for the running host).
+        let foreign = if cfg!(windows) {
+            "/Users/mac/Documents/X".to_string()
+        } else {
+            "\\\\?\\C:\\Users\\you\\Documents\\X".to_string()
+        };
         rusqlite::Connection::open(&db_b)
             .unwrap()
             .execute(
                 "INSERT INTO threads VALUES ('thw', ?1, 100, 200, 'vscode', 'openai',
-                   '\\\\?\\C:\\Users\\you\\Documents\\X', 'Windows thread', '{}',
+                   ?2, 'Foreign thread', '{}',
                    'on-request', 100000, 200000, 200000, NULL)",
-                rusqlite::params![format!("{b_home}/.codex/sessions/2026/07/12/r.jsonl")],
+                rusqlite::params![format!("{b_home}/.codex/sessions/2026/07/12/r.jsonl"), foreign],
             )
             .unwrap();
         let tok_b = Tokenizer::with_case_sensitivity(&b_home, false);
@@ -693,7 +707,7 @@ mod db_tests {
             .unwrap()
             .query_row("SELECT cwd FROM threads WHERE id='thw'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(cwd, format!("{b_home}/Documents/X"));
+        assert_eq!(cwd, crate::dbsync::normalize_path_shape(&format!("{b_home}/Documents/X")));
     }
 
     #[test]
@@ -711,7 +725,11 @@ mod db_tests {
                 rusqlite::params![
                     format!("{a_home}/.codex/sessions/2026/07/12/rollout-th1.jsonl"),
                     format!("{a_home}/proj"),
-                    format!("{{\"type\":\"workspace-write\",\"writable_roots\":[\"{a_home}/proj\"]}}"),
+                    serde_json::json!({
+                        "type": "workspace-write",
+                        "writable_roots": [format!("{a_home}/proj")],
+                    })
+                    .to_string(),
                 ],
             )
             .unwrap();
@@ -747,9 +765,14 @@ mod db_tests {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
             .unwrap();
-        assert_eq!(cwd, format!("{b_home}/proj"));
-        assert_eq!(rp, ro.to_string_lossy());
-        assert!(sp.contains(&format!("{b_home}/proj")), "{sp}");
+        assert_eq!(cwd, crate::dbsync::normalize_path_shape(&format!("{b_home}/proj")));
+        // Path equality is component-wise, so separator style never matters.
+        assert_eq!(std::path::Path::new(&rp), ro.as_path());
+        let spv: serde_json::Value = serde_json::from_str(&sp).unwrap();
+        assert_eq!(
+            spv["writable_roots"][0],
+            crate::dbsync::normalize_path_shape(&format!("{b_home}/proj"))
+        );
         let tools: i64 =
             c.query_row("SELECT COUNT(*) FROM thread_dynamic_tools WHERE thread_id='th1'", [], |r| r.get(0)).unwrap();
         assert_eq!(tools, 1);
