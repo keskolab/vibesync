@@ -28,6 +28,13 @@ fn active(level: Level) -> bool {
     SINK_SET.load(Ordering::Relaxed) || mini_log::is_enabled(level)
 }
 
+/// True when a line at `level` would actually go somewhere (file sink
+/// installed or console level enabled) — lets callers skip expensive work
+/// whose only purpose is producing trace lines.
+pub fn is_active(level: Level) -> bool {
+    active(level)
+}
+
 fn emit(level: Level, msg: String) {
     // mini-log prints to the console when LOG_LEVEL allows and gives us the
     // canonical formatted line for the file sink.
