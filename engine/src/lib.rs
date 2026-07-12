@@ -2,6 +2,7 @@
 //! paths, tracks sync state, and pushes/pulls through pluggable stores.
 
 pub mod adapters;
+pub mod atlas;
 pub mod codec;
 pub mod codex;
 pub mod opencode;

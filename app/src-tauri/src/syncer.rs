@@ -751,9 +751,21 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         config.project_mappings.len(),
         gitmap_t0.elapsed().as_millis()
     ));
+    // Fleet atlas: every machine's clone location for every known repo,
+    // shared through the store. Other machines' roots become tokenize-only
+    // aliases, so a transcript recorded under a foreign clone path keys to
+    // the one canonical ${GIT} identity — this is what merges duplicate
+    // sidebar projects and retires legacy path-keyed store objects.
+    let atlas = engine::atlas::sync_atlas(
+        store.as_ref(),
+        &gitmap,
+        &dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default(),
+        &engine::machine_name(),
+    );
     let tok = engine::Tokenizer::from_env()?
         .with_gitmap(&gitmap)
-        .with_manual_projects(&config.project_mappings);
+        .with_manual_projects(&config.project_mappings)
+        .with_fleet_aliases(&atlas);
     let home = dirs::home_dir().context("no home dir")?;
 
     let include_plugins = config.sync_plugins;
@@ -889,8 +901,41 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             }
         }
     }
-    // Unified progress space: pushed files + pull-side entries + registry.
-    let total = entries.len() + listing.len() + 1;
+    // Never overwrite a strictly newer store copy with older local bytes —
+    // matters when fleet aliases re-key an old local copy of a file another
+    // machine kept updating (mirror of the pull side's newer-local rule).
+    {
+        let store_view: std::collections::HashMap<&str, (&str, i64)> =
+            listing.iter().map(|(k, m)| (k.as_str(), (m.hash.as_str(), m.mtime_ms))).collect();
+        let before = entries.len();
+        entries.retain(|e| {
+            store_view
+                .get(e.logical.as_str())
+                .map(|(h, m)| *h == e.hash || *m <= e.mtime_ms)
+                .unwrap_or(true)
+        });
+        let kept_back = before - entries.len();
+        if kept_back > 0 {
+            dlog.info(format!(
+                "push: {kept_back} files kept back — the store has newer copies (they sync down instead)"
+            ));
+        }
+    }
+    // Unified progress space: scanned files plus the store objects of
+    // ENABLED tools — disabled namespaces never tick, so counting them
+    // left the button stuck far from its total.
+    let enabled_ids: std::collections::HashSet<&str> = tools
+        .iter()
+        .zip(&tool_state)
+        .filter(|(_, (inst, en))| *inst && *en)
+        .map(|(t, _)| t.id)
+        .collect();
+    let total = entries.len()
+        + listing
+            .iter()
+            .filter(|(k, _)| tool_of(k).map(|t| enabled_ids.contains(t)).unwrap_or(false))
+            .count()
+        + 1;
     let done = std::sync::atomic::AtomicUsize::new(0);
     let progress_cell = std::sync::Mutex::new(&mut progress);
     let report_progress = |d: usize| {
@@ -1307,6 +1352,11 @@ fn scan_claude(env: &ScanEnv, _state: &mut engine::SyncState) -> Result<Vec<engi
     for dir in env.dirs {
         out.extend(CLAUDE_CODE.scan_dir(env.home, dir, env.tok, env.include_plugins)?);
     }
+    // Fleet aliases can map two local dirs to one logical key (the live
+    // clone's transcripts plus a foreign-path copy materialized by pre-atlas
+    // syncs): keep the newest copy of each.
+    out.sort_by(|a, b| a.logical.cmp(&b.logical).then(b.mtime_ms.cmp(&a.mtime_ms)));
+    out.dedup_by(|cur, prev| cur.logical == prev.logical);
     Ok(out)
 }
 fn scan_vscode(env: &ScanEnv, _state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
@@ -1344,8 +1394,47 @@ fn publish_zed(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
     engine::zed::push(env.home, state, env.store, env.machine)
 }
 
+/// The `<dirtok>` of a `claude/projects/<dirtok>/...` (or profiles/...) key.
+fn project_dirtok(logical: &str) -> Option<&str> {
+    let rest = logical.strip_prefix("claude/")?;
+    let rest = rest
+        .strip_prefix("profiles/")
+        .and_then(|r| r.split_once('/').map(|(_, r)| r))
+        .unwrap_or(rest);
+    let rest = rest.strip_prefix("projects/")?;
+    Some(rest.split_once('/').map(|(d, _)| d).unwrap_or(rest))
+}
+
+/// A legacy path-keyed project dir this machine can canonicalize (via the
+/// fleet atlas) is superseded — pulling it would materialize a duplicate
+/// foreign-path project dir — but ONLY once the canonical key family
+/// actually exists in the store; until then the legacy key is that
+/// content's only home. Identity keys (${GIT}/${PROJ}) are never legacy:
+/// a machine whose manual mapping outranks a git identity must still pull
+/// the git-keyed objects. ${EHOME} fallback keys for unmapped folders pass
+/// through untouched.
+fn stale_claude_key(
+    logical: &str,
+    tok: &engine::Tokenizer,
+    canon_present: &std::collections::HashSet<String>,
+) -> bool {
+    let Some(dirtok) = project_dirtok(logical) else { return false };
+    if dirtok.starts_with("${GIT:") || dirtok.starts_with("${PROJ:") {
+        return false;
+    }
+    let canon = tok.tokenize_encoded(&tok.expand_encoded(dirtok));
+    canon != dirtok && canon_present.contains(&canon)
+}
+
 fn apply_claude(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
     let mut g = GenReport::default();
+    let canon_present: std::collections::HashSet<String> = env
+        .listing
+        .iter()
+        .filter_map(|(k, _)| project_dirtok(k))
+        .filter(|d| d.starts_with("${GIT:") || d.starts_with("${PROJ:"))
+        .map(str::to_string)
+        .collect();
     for dir in env.dirs {
         let r = engine::sync::pull_dir(
             &CLAUDE_CODE,
@@ -1356,9 +1445,13 @@ fn apply_claude(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenRepo
             env.store,
             env.include_plugins,
             &|logical| {
-                scope_of(logical)
+                if scope_of(logical)
                     .map(|s| env.off_scopes.iter().any(|o| o == s))
                     .unwrap_or(false)
+                {
+                    return true;
+                }
+                stale_claude_key(logical, env.tok, &canon_present)
             },
             env.listing,
             env.tick,
@@ -1522,6 +1615,20 @@ fn transcript_exists(entry: &serde_json::Value, home: &std::path::Path) -> bool 
     transcript_path(entry, home).map(|p| p.exists()).unwrap_or(false)
 }
 
+/// One-time-per-run copy of every live registry entry before we modify any.
+fn backup_registry(
+    paths: &Paths,
+    local: &std::collections::HashMap<String, (serde_json::Value, PathBuf)>,
+) {
+    let backup = paths.config.parent().unwrap().join("registry-backup");
+    let _ = std::fs::create_dir_all(&backup);
+    for (_, (_, p)) in local {
+        if let Some(name) = p.file_name() {
+            let _ = std::fs::copy(p, backup.join(name));
+        }
+    }
+}
+
 /// Validated, atomic, compact, 0600 write — every rule Gate A taught us.
 fn write_registry_entry(path: &PathBuf, entry: &serde_json::Value) -> Result<()> {
     engine::registry::validate(entry)?;
@@ -1604,6 +1711,81 @@ fn sync_registry(
         }
     }
 
+    // HEAL: entries we created for other machines' sessions keep the cwd
+    // they were born with; once the fleet atlas maps that path to a project
+    // this machine has, snap the entry to the local clone. The transcript
+    // moves WITH the entry: the copy at the old location is the one the user
+    // has been appending to, so it is carried to the canonical location
+    // unless a fresher file already lives there — re-pointing at a stale
+    // pull would make recent turns vanish. Native entries are never touched.
+    let home = dirs::home_dir().context("no home dir")?;
+    let mut heals: Vec<(String, serde_json::Value)> = Vec::new();
+    for (sid, (entry, _)) in &local {
+        if !applied.contains(sid.as_str()) {
+            continue;
+        }
+        let mut cand = entry.clone();
+        if !registry::canonicalize_entry(&mut cand, tok) {
+            continue;
+        }
+        let (Some(old_tp), Some(new_tp)) =
+            (transcript_path(entry, &home), transcript_path(&cand, &home))
+        else {
+            continue;
+        };
+        let old_m = engine::scanner::mtime_ms(&old_tp).unwrap_or(0);
+        let new_m = engine::scanner::mtime_ms(&new_tp).unwrap_or(0);
+        if old_tp.exists() {
+            if old_m == 0 {
+                continue; // unreadable metadata — don't risk a stale re-point
+            }
+            // A transcript touched minutes ago may belong to a session that
+            // is STILL RUNNING and appending to the old path; healing now
+            // would strand everything typed after the copy. Wait for idle.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(i64::MAX);
+            if now_ms.saturating_sub(old_m) < 10 * 60 * 1000 {
+                continue;
+            }
+            if !new_tp.exists() || old_m > new_m {
+                let copied =
+                    new_tp.parent().map(|p| std::fs::create_dir_all(p).is_ok()).unwrap_or(false)
+                        && {
+                            let tmp = new_tp.with_extension("vibesync-tmp");
+                            std::fs::copy(&old_tp, &tmp).is_ok()
+                                && std::fs::rename(&tmp, &new_tp).is_ok()
+                        };
+                if !copied {
+                    continue;
+                }
+            }
+        }
+        if !new_tp.exists() {
+            continue; // nothing to stand on yet — retry next sync
+        }
+        heals.push((sid.clone(), cand));
+    }
+    let mut backed_up = false;
+    let mut repointed = 0usize;
+    if !heals.is_empty() {
+        backup_registry(paths, &local);
+        backed_up = true;
+    }
+    for (sid, cand) in heals {
+        let Some((entry, path)) = local.get_mut(&sid) else { continue };
+        if write_registry_entry(path, &cand).is_ok() {
+            *entry = cand;
+            repointed += 1;
+        }
+    }
+    if repointed > 0 {
+        engine::dlog::info(|| {
+            format!("sidebar: {repointed} synced entries re-pointed to this machine's project paths")
+        });
+    }
+
     // PUSH: tokenized, validated entries into the registry/ namespace.
     // Two guards learned from real Windows logs (2026-07-12), where idle
     // syncs re-uploaded 5-13 entries of ~180 KB each, every time:
@@ -1622,7 +1804,6 @@ fn sync_registry(
         .unwrap_or_default();
     let mut pushed = 0usize;
     let scanned: Vec<String> = local.keys().map(|s| format!("claude/registry/{s}.json")).collect();
-    let home = dirs::home_dir().context("no home dir")?;
     for (sid, (entry, path)) in &local {
         if registry::validate(entry).is_err() {
             continue; // never propagate a malformed entry
@@ -1682,7 +1863,6 @@ fn sync_registry(
     let mut applied_count = 0usize;
     let mut ghosts = 0usize;
     let mut healed = 0usize;
-    let mut backed_up = false;
     for (logical, meta) in listing {
         let Some(sid) = logical.strip_prefix("claude/registry/").and_then(|s| s.strip_suffix(".json")) else {
             continue;
@@ -1695,7 +1875,15 @@ fn sync_registry(
         // Known ghost, unchanged in the store, transcript still absent: skip
         // the fetch (these were re-downloaded every sync otherwise).
         if let Some((h, tpath)) = ghost_cache.get(logical.as_str()) {
-            if *h == meta.hash && !std::path::Path::new(tpath).exists() {
+            // Two marker kinds: a parked entry stores its tokenized cwd
+            // (blocked while the token stays unexpandable); a plain ghost
+            // stores its expected transcript path (blocked while absent).
+            let still_blocked = if engine::gitmap::has_unresolved_token(tpath) {
+                tok.expand_plain(tpath) == *tpath
+            } else {
+                !std::path::Path::new(tpath).exists()
+            };
+            if *h == meta.hash && still_blocked {
                 ghosts += 1;
                 new_ghost_cache.insert(logical.clone(), (h.clone(), tpath.clone()));
                 continue;
@@ -1705,6 +1893,21 @@ fn sync_registry(
         let Ok(mut remote) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
         registry::expand_paths(&mut remote, tok);
         registry::normalize_separators(&mut remote);
+
+        // Parking rule (same as transcripts): an entry whose paths still
+        // hold a token this machine can't expand belongs to a project that
+        // isn't here yet. It must neither apply nor read as a ghost —
+        // classifying it as one would delete a working local entry below.
+        if registry::has_unresolved_paths(&remote) {
+            ghosts += 1;
+            // Cache marker = the tokenized cwd itself: the skip below holds
+            // only while the token stays unexpandable, so cloning the repo
+            // later re-evaluates this entry instead of parking it forever.
+            if let Some(cwd) = remote.get("cwd").and_then(|c| c.as_str()) {
+                new_ghost_cache.insert(logical.clone(), (meta.hash.clone(), cwd.to_string()));
+            }
+            continue;
+        }
 
         let target = dir.join(format!("{sid}.json"));
 
@@ -1726,11 +1929,17 @@ fn sync_registry(
                     .insert(logical.clone(), (meta.hash.clone(), tp.display().to_string()));
             }
             // We only ever wrote entries tracked in `applied`; a machine's own
-            // native entries are never in that set, so this cannot delete them.
+            // native entries are never in that set, so this cannot delete
+            // them. And a local entry whose own transcript still opens is
+            // never removed on the strength of the REMOTE's path view — that
+            // view may simply not be materialized here yet.
             if applied.contains(sid) && target.exists() {
-                let _ = std::fs::remove_file(&target);
-                applied.remove(sid);
-                healed += 1;
+                let local_ok = local.get(sid).map(|(e, _)| transcript_exists(e, &home)).unwrap_or(false);
+                if !local_ok {
+                    let _ = std::fs::remove_file(&target);
+                    applied.remove(sid);
+                    healed += 1;
+                }
             }
             continue;
         }
@@ -1764,13 +1973,7 @@ fn sync_registry(
         };
         // One-time safety net before the first write of this run.
         if !backed_up {
-            let backup = paths.config.parent().unwrap().join("registry-backup");
-            let _ = std::fs::create_dir_all(&backup);
-            for (_, (_, p)) in &local {
-                if let Some(name) = p.file_name() {
-                    let _ = std::fs::copy(p, backup.join(name));
-                }
-            }
+            backup_registry(paths, &local);
             backed_up = true;
         }
         if write_registry_entry(&target, &final_entry).is_ok() {

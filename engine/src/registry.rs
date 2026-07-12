@@ -63,6 +63,37 @@ pub fn expand_paths(entry: &mut Value, tok: &Tokenizer) {
     map_paths(entry, &|s| tok.expand_plain(s));
 }
 
+/// True when any path field still holds a project token this machine
+/// cannot expand — such an entry belongs to a project that isn't here yet
+/// and must park (never apply, never count as a ghost, never be written).
+pub fn has_unresolved_paths(entry: &Value) -> bool {
+    PATH_FIELDS.iter().any(|k| {
+        entry
+            .get(*k)
+            .and_then(Value::as_str)
+            .map(crate::gitmap::has_unresolved_token)
+            .unwrap_or(false)
+    })
+}
+
+/// Snap an entry's machine-local paths to their canonical local form:
+/// tokenize then expand through an alias-aware tokenizer, so a cwd recorded
+/// under another machine's (or a pre-rename) clone path lands on THIS
+/// machine's clone of the same project. Returns false (entry untouched) when
+/// nothing changes or when a path would be left holding a token this machine
+/// cannot expand — a live registry entry must never contain one.
+pub fn canonicalize_entry(entry: &mut Value, tok: &Tokenizer) -> bool {
+    let before = entry.clone();
+    tokenize_paths(entry, tok);
+    expand_paths(entry, tok);
+    normalize_separators(entry);
+    if has_unresolved_paths(entry) || *entry == before {
+        *entry = before;
+        return false;
+    }
+    true
+}
+
 /// Make each path field's separators self-consistent after cross-platform
 /// expansion: a `${HOME}`-tokenized entry keeps the origin machine's
 /// separators in its tail, so expanding on the other OS yields mixed
