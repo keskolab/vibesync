@@ -170,6 +170,26 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
 
 pub const DB_PREFIX: &str = "opencode/db";
 
+/// The max time_created/time_updated across a set of rows. A session's
+/// export version is this max over the session row AND every message/part —
+/// session.time_updated alone misses writes that only touch child rows (a
+/// late message, a streamed part finalizing), and those must still travel.
+fn max_time_of<'a>(rows: impl Iterator<Item = &'a serde_json::Map<String, serde_json::Value>>) -> i64 {
+    rows.flat_map(|r| {
+        ["time_created", "time_updated"]
+            .into_iter()
+            .filter_map(|k| r.get(k).and_then(|v| v.as_i64()))
+    })
+    .max()
+    .unwrap_or(0)
+}
+
+fn max_time_of_json(rows: Option<&serde_json::Value>) -> i64 {
+    max_time_of(
+        rows.and_then(|v| v.as_array()).into_iter().flatten().filter_map(|v| v.as_object()),
+    )
+}
+
 fn db_path(home: &Path) -> Option<PathBuf> {
     data_root(home).map(|r| r.join("opencode.db")).filter(|p| p.exists())
 }
@@ -305,11 +325,18 @@ pub fn db_push(
             summary.3
         )
     });
+    // The db this machine's OpenCode actually writes may live elsewhere
+    // (version/platform differences), so every candidate root is probed on
+    // every export pass — a single remote debug.log answers "where are the
+    // sessions?". Loud when the chosen db looks wrong, quiet otherwise, and
+    // skipped entirely when no one is listening (the probe's only product
+    // is log lines).
     if summary.0 == 0 {
-        // The db this machine's OpenCode actually writes may live elsewhere
-        // (version/platform differences). Probe every candidate so a single
-        // remote debug.log answers "where are the sessions?".
-        crate::dlog::warn(|| format!("opencode db: 0 sessions in {} — probing all candidate roots:", db.display()));
+        crate::dlog::warn(|| format!("opencode db: 0 sessions in {} — is this the db your OpenCode writes?", db.display()));
+    }
+    let probe_level =
+        if summary.0 == 0 { crate::dlog::Level::Warning } else { crate::dlog::Level::Debug };
+    if crate::dlog::is_active(probe_level) {
         for cand in candidate_roots(home) {
             let cdb = cand.join("opencode.db");
             let verdict = if !cdb.exists() {
@@ -319,23 +346,31 @@ pub fn db_push(
                     &cdb,
                     rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
                 ) {
-                    Ok(c) => match c.query_row("SELECT COUNT(*) FROM session", [], |r| r.get::<_, i64>(0)) {
-                        Ok(n) => format!("{n} sessions"),
-                        Err(e) => format!("no session table ({e})"),
-                    },
+                    Ok(c) => {
+                        let _ = c.busy_timeout(std::time::Duration::from_millis(1500));
+                        match c.query_row("SELECT COUNT(*) FROM session", [], |r| r.get::<_, i64>(0)) {
+                            Ok(n) => format!("{n} sessions"),
+                            Err(e) => format!("count failed ({e})"),
+                        }
+                    }
                     Err(e) => format!("cannot open ({e})"),
                 }
             };
-            crate::dlog::warn(|| format!("opencode db:   candidate {} — {}", cdb.display(), verdict));
+            let line = format!("opencode db:   candidate {} — {}", cdb.display(), verdict);
+            if summary.0 == 0 {
+                crate::dlog::warn(|| line.clone());
+            } else {
+                crate::dlog::debug(|| line.clone());
+            }
         }
     }
     let prefix = format!("{DB_PREFIX}/");
-    let remote: std::collections::HashMap<&str, &str> = listing
+    let remote: std::collections::HashMap<&str, (&str, i64)> = listing
         .iter()
         .filter(|(k, _)| k.starts_with(&prefix))
-        .map(|(k, m)| (k.as_str(), m.hash.as_str()))
+        .map(|(k, m)| (k.as_str(), (m.hash.as_str(), m.mtime_ms)))
         .collect();
-    let mut store_set: Vec<String> = remote.iter().map(|(k, h)| format!("{k}={h}")).collect();
+    let mut store_set: Vec<String> = remote.iter().map(|(k, (h, _))| format!("{k}={h}")).collect();
     store_set.sort();
     let summary_hash = hash_bytes(format!("{summary:?}|{}", store_set.join(";")).as_bytes());
     const SUMMARY_KEY: &str = "opencode/db#local-summary";
@@ -361,6 +396,12 @@ pub fn db_push(
         let parts =
             query_maps(&conn, "SELECT * FROM part WHERE session_id = ?1 ORDER BY id", &[&id])?;
         tokenize_field(&mut session, "directory", tok);
+        let local_eff = session
+            .get("time_updated")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .max(max_time_of(messages.iter()))
+            .max(max_time_of(parts.iter()));
         let project = project.map(|mut p| {
             tokenize_field(&mut p, "worktree", tok);
             p
@@ -371,9 +412,20 @@ pub fn db_push(
         let bytes = serde_json::to_vec(&obj)?;
         let hash = hash_bytes(&bytes);
         let logical = format!("{DB_PREFIX}/{id}.json");
-        if remote.get(logical.as_str()).map(|h| *h == hash).unwrap_or(false) {
-            unchanged += 1;
-            continue;
+        // Byte equality is too strict across machines: a merged session
+        // re-serializes with per-machine differences (path separators,
+        // schema drift), which made every machine "correct" the store each
+        // sync, forever. The store copy's recorded version settles it: only
+        // strictly newer local content is worth publishing. A legacy object
+        // (mtime 0, pre-versioning) is re-put once to upgrade its metadata.
+        // Versions are OpenCode's wall-clock stamps — with badly skewed
+        // machine clocks, last-writer-wins can briefly favor the wrong copy,
+        // the same trade OpenCode itself makes.
+        if let Some((rhash, rmtime)) = remote.get(logical.as_str()) {
+            if *rmtime > 0 && (*rhash == hash || *rmtime >= local_eff) {
+                unchanged += 1;
+                continue;
+            }
         }
         crate::dlog::debug(|| {
             format!("opencode db: exporting {id} ({} messages, {} KB)", obj["messages"].as_array().map(|a| a.len()).unwrap_or(0), bytes.len() / 1024)
@@ -381,11 +433,11 @@ pub fn db_push(
         store.put(
             &logical,
             &bytes,
-            &RemoteMeta { hash: hash.clone(), mtime_ms: 0, size: bytes.len() as u64, source: machine.to_string() },
+            &RemoteMeta { hash: hash.clone(), mtime_ms: local_eff, size: bytes.len() as u64, source: machine.to_string() },
         )?;
         state.files.insert(
             logical,
-            FileState { hash, mtime_ms: 0, size: bytes.len() as u64, deleted_locally: false },
+            FileState { hash, mtime_ms: local_eff, size: bytes.len() as u64, deleted_locally: false },
         );
         pushed += 1;
     }
@@ -402,8 +454,10 @@ pub fn db_push(
 }
 
 /// Merge foreign sessions into opencode.db: insert missing, update only when
-/// the remote `time_updated` is newer, never delete. The db is backed up
-/// once (`opencode.db.vibesync-bak`) before this build's first-ever write.
+/// the remote is newer (max timestamp across session+messages+parts; the
+/// session row itself is replaced only if the remote ROW is newer), never
+/// delete. The db is backed up once (`opencode.db.vibesync-bak`) before this
+/// build's first-ever write.
 pub fn db_apply(
     home: &Path,
     tok: &Tokenizer,
@@ -428,7 +482,13 @@ pub fn db_apply(
         seen += 1;
         on_file();
         if let Some(st) = state.files.get(logical) {
-            if st.deleted_locally || st.hash == meta.hash {
+            // The mtime guard covers the listing snapshot predating our own
+            // push this sync: we already hold a version at least as new, so
+            // don't re-download what we just uploaded.
+            if st.deleted_locally
+                || st.hash == meta.hash
+                || (st.mtime_ms > 0 && st.mtime_ms >= meta.mtime_ms)
+            {
                 report.unchanged += 1;
                 continue;
             }
@@ -450,12 +510,15 @@ pub fn db_apply(
             report.parked += 1; // project unknown here; retry when it appears
             continue;
         }
-        let (Some(id), Some(remote_updated)) = (
+        let (Some(id), Some(remote_ses_t)) = (
             session.get("id").and_then(|v| v.as_str()).map(String::from),
             session.get("time_updated").and_then(|v| v.as_i64()),
         ) else {
             continue;
         };
+        let remote_eff = remote_ses_t
+            .max(max_time_of_json(obj.get("messages")))
+            .max(max_time_of_json(obj.get("parts")));
         // Open lazily + back up before the first write of this build's life.
         if conn.is_none() {
             let bak = db.with_extension("db.vibesync-bak");
@@ -467,27 +530,40 @@ pub fn db_apply(
             conn = Some(c);
         }
         let c = conn.as_ref().unwrap();
-        let local_updated: Option<i64> = c
+        let local_ses_t: Option<i64> = c
             .query_row("SELECT time_updated FROM session WHERE id = ?1", [&id], |r| r.get(0))
             .ok();
-        if let Some(local) = local_updated {
-            if local >= remote_updated {
+        if let Some(local_t) = local_ses_t {
+            let local_child: i64 = c
+                .query_row(
+                    "SELECT COALESCE((SELECT MAX(MAX(time_created, time_updated)) FROM message WHERE session_id = ?1), 0),
+                            COALESCE((SELECT MAX(MAX(time_created, time_updated)) FROM part WHERE session_id = ?1), 0)",
+                    [&id],
+                    |r| Ok(std::cmp::max(r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .unwrap_or(0);
+            if local_t.max(local_child) >= remote_eff {
                 crate::dlog::debug(|| format!("opencode db: {id} kept — local copy is same or newer"));
                 report.skipped_newer_local += 1;
                 state.files.insert(
                     logical.clone(),
-                    FileState { hash: meta.hash.clone(), mtime_ms: 0, size: meta.size, deleted_locally: false },
+                    FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
                 );
                 continue;
             }
         }
-        crate::dlog::debug(|| format!("opencode: merging session {id} into opencode.db"));
+        crate::dlog::debug(|| format!("opencode db: merging session {id} into opencode.db"));
         if let Some(project) = obj.get_mut("project").and_then(|p| p.as_object_mut()) {
             expand_field(project, "worktree", tok);
             insert_map(c, "project", project, false)?; // never clobber a local project row
         }
         let session = obj.get("session").and_then(|s| s.as_object()).unwrap();
-        insert_map(c, "session", session, true)?;
+        // Replace the session ROW only when the remote row itself is newer —
+        // a remote that wins on child-row activity alone must not revert
+        // local session metadata (title, archive state, ...).
+        if local_ses_t.map(|t| remote_ses_t > t).unwrap_or(true) {
+            insert_map(c, "session", session, true)?;
+        }
         for m in obj.get("messages").and_then(|v| v.as_array()).into_iter().flatten() {
             if let Some(m) = m.as_object() {
                 insert_map(c, "message", m, true)?;
@@ -500,7 +576,7 @@ pub fn db_apply(
         }
         state.files.insert(
             logical.clone(),
-            FileState { hash: meta.hash.clone(), mtime_ms: 0, size: meta.size, deleted_locally: false },
+            FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
         );
         on_pulled(logical);
         report.applied += 1;
@@ -642,17 +718,47 @@ mod tests {
             .unwrap();
         assert_eq!(dir, "/home/bob/dev/app");
         assert_eq!(title, "Windows test");
+        // Ping-pong guard: B re-serializes the merged session with different
+        // bytes (here: a title tweak with time_updated untouched). Equal
+        // time_updated means the store copy is authoritative — no push.
+        c.execute("UPDATE session SET title = 'renamed locally' WHERE id = 'ses1'", [])
+            .unwrap();
+        assert_eq!(db_push(&b, &tok_b, &mut st_b, &store, "b", &store.list().unwrap()).unwrap(), 0);
         let msgs: i64 = c.query_row("SELECT COUNT(*) FROM message", [], |r| r.get(0)).unwrap();
         let parts: i64 = c.query_row("SELECT COUNT(*) FROM part", [], |r| r.get(0)).unwrap();
         assert_eq!((msgs, parts), (1, 1));
         // Backup was taken before the first write.
         assert!(db_b.with_extension("db.vibesync-bak").exists());
 
+        // Push direction: strictly newer local content must overwrite the
+        // byte-divergent store copy...
+        c.execute("UPDATE session SET title = 'resumed on b', time_updated = 300 WHERE id = 'ses1'", [])
+            .unwrap();
+        assert_eq!(db_push(&b, &tok_b, &mut st_b, &store, "b", &store.list().unwrap()).unwrap(), 1);
+        // ...including a message written WITHOUT a session-row bump (the
+        // export version is the max timestamp across session+messages+parts).
+        c.execute("INSERT INTO message VALUES ('msg2','ses1',400,400,'{\"role\":\"assistant\"}')", [])
+            .unwrap();
+        assert_eq!(db_push(&b, &tok_b, &mut st_b, &store, "b", &store.list().unwrap()).unwrap(), 1);
+        // A merges the late message; its own session row (older, t=200) is
+        // replaced by B's newer row, and the new message lands.
+        let r = db_apply(&a, &tok_a, &mut st_a, &store, &store.list().unwrap(), &|| {}, &|_| {}).unwrap();
+        assert_eq!(r.applied, 1);
+        let ca = rusqlite::Connection::open(&db_a).unwrap();
+        let (title_a, n_msgs): (String, i64) = ca
+            .query_row(
+                "SELECT title, (SELECT COUNT(*) FROM message WHERE session_id='ses1') FROM session WHERE id='ses1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((title_a.as_str(), n_msgs), ("resumed on b", 2));
+
         // Local session newer than remote: untouched.
         c.execute("UPDATE session SET title='local edit', time_updated=999 WHERE id='ses1'", [])
             .unwrap();
         let mut st_b2 = SyncState::default();
-        let r = db_apply(&b, &tok_b, &mut st_b2, &store, &listing, &|| {}, &|_| {}).unwrap();
+        let r = db_apply(&b, &tok_b, &mut st_b2, &store, &store.list().unwrap(), &|| {}, &|_| {}).unwrap();
         assert_eq!(r.skipped_newer_local, 1);
         let title: String =
             c.query_row("SELECT title FROM session WHERE id='ses1'", [], |r| r.get(0)).unwrap();
