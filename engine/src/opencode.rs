@@ -34,12 +34,19 @@ const SKIP: &[&str] = &["session_diff", "session_share", "migration"];
 
 /// OpenCode's data root (`~/.local/share/opencode` everywhere in practice;
 /// platform data dirs checked as fallback).
-fn data_root(home: &Path) -> Option<PathBuf> {
+fn candidate_roots(home: &Path) -> Vec<PathBuf> {
     let mut cands = vec![home.join(".local/share/opencode")];
     for d in [dirs::data_dir(), dirs::data_local_dir()].into_iter().flatten() {
-        cands.push(d.join("opencode"));
+        let c = d.join("opencode");
+        if !cands.contains(&c) {
+            cands.push(c);
+        }
     }
-    cands.into_iter().find(|c| c.is_dir())
+    cands
+}
+
+fn data_root(home: &Path) -> Option<PathBuf> {
+    candidate_roots(home).into_iter().find(|c| c.is_dir())
 }
 
 /// Every location this adapter considers — for the transparency trace.
@@ -256,22 +263,29 @@ fn expand_field(m: &mut serde_json::Map<String, serde_json::Value>, key: &str, t
     }
 }
 
-/// Export every db session as one store object. Content-hash diffing via
-/// state, like the generic pusher.
+/// Export every db session as one store object, diffed against the store
+/// LISTING (not just local state) — a store that lost or never received an
+/// export gets it again, so a stale state file can never suppress a push.
 pub fn db_push(
     home: &Path,
     tok: &Tokenizer,
     state: &mut SyncState,
     store: &dyn SyncStore,
     machine: &str,
+    listing: &[(String, RemoteMeta)],
 ) -> Result<usize> {
-    let Some(db) = db_path(home) else { return Ok(0) };
+    let Some(db) = db_path(home) else {
+        crate::dlog::warn(|| "opencode db: no opencode.db found — nothing to export".to_string());
+        return Ok(0);
+    };
     let conn = rusqlite::Connection::open_with_flags(
         &db,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )?;
     // Short-circuit: exporting every session (plus messages/parts) each sync
-    // is wasted work when the db hasn't changed. One summary row decides.
+    // is wasted work when nothing moved. "Nothing moved" must cover BOTH
+    // sides: one summary row for the local db, plus the store's current
+    // opencode/db object set — so store-side changes re-trigger a full pass.
     let summary: (i64, i64, i64, i64) = conn.query_row(
         "SELECT (SELECT COUNT(*) FROM session),
                 (SELECT COALESCE(MAX(time_updated),0) FROM session),
@@ -280,13 +294,58 @@ pub fn db_push(
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
-    let summary_hash = hash_bytes(format!("{summary:?}").as_bytes());
+    let db_kb = std::fs::metadata(&db).map(|m| m.len() / 1024).unwrap_or(0);
+    crate::dlog::debug(|| {
+        format!(
+            "opencode db: {} ({} KB) — {} sessions, {} messages, {} parts",
+            db.display(),
+            db_kb,
+            summary.0,
+            summary.2,
+            summary.3
+        )
+    });
+    if summary.0 == 0 {
+        // The db this machine's OpenCode actually writes may live elsewhere
+        // (version/platform differences). Probe every candidate so a single
+        // remote debug.log answers "where are the sessions?".
+        crate::dlog::warn(|| format!("opencode db: 0 sessions in {} — probing all candidate roots:", db.display()));
+        for cand in candidate_roots(home) {
+            let cdb = cand.join("opencode.db");
+            let verdict = if !cdb.exists() {
+                "no opencode.db".to_string()
+            } else {
+                match rusqlite::Connection::open_with_flags(
+                    &cdb,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+                ) {
+                    Ok(c) => match c.query_row("SELECT COUNT(*) FROM session", [], |r| r.get::<_, i64>(0)) {
+                        Ok(n) => format!("{n} sessions"),
+                        Err(e) => format!("no session table ({e})"),
+                    },
+                    Err(e) => format!("cannot open ({e})"),
+                }
+            };
+            crate::dlog::warn(|| format!("opencode db:   candidate {} — {}", cdb.display(), verdict));
+        }
+    }
+    let prefix = format!("{DB_PREFIX}/");
+    let remote: std::collections::HashMap<&str, &str> = listing
+        .iter()
+        .filter(|(k, _)| k.starts_with(&prefix))
+        .map(|(k, m)| (k.as_str(), m.hash.as_str()))
+        .collect();
+    let mut store_set: Vec<String> = remote.iter().map(|(k, h)| format!("{k}={h}")).collect();
+    store_set.sort();
+    let summary_hash = hash_bytes(format!("{summary:?}|{}", store_set.join(";")).as_bytes());
     const SUMMARY_KEY: &str = "opencode/db#local-summary";
     if state.files.get(SUMMARY_KEY).map(|s| s.hash == summary_hash).unwrap_or(false) {
+        crate::dlog::debug(|| "opencode db: db and store unchanged since last export — skipping".to_string());
         return Ok(0);
     }
     let sessions = query_maps(&conn, "SELECT * FROM session", &[])?;
     let mut pushed = 0;
+    let mut unchanged = 0;
     for mut session in sessions {
         let Some(id) = session.get("id").and_then(|v| v.as_str()).map(String::from) else {
             continue;
@@ -312,9 +371,13 @@ pub fn db_push(
         let bytes = serde_json::to_vec(&obj)?;
         let hash = hash_bytes(&bytes);
         let logical = format!("{DB_PREFIX}/{id}.json");
-        if state.files.get(&logical).map(|s| s.hash == hash).unwrap_or(false) {
+        if remote.get(logical.as_str()).map(|h| *h == hash).unwrap_or(false) {
+            unchanged += 1;
             continue;
         }
+        crate::dlog::debug(|| {
+            format!("opencode db: exporting {id} ({} messages, {} KB)", obj["messages"].as_array().map(|a| a.len()).unwrap_or(0), bytes.len() / 1024)
+        });
         store.put(
             &logical,
             &bytes,
@@ -330,6 +393,11 @@ pub fn db_push(
         SUMMARY_KEY.to_string(),
         FileState { hash: summary_hash, mtime_ms: 0, size: 0, deleted_locally: false },
     );
+    if pushed > 0 {
+        crate::dlog::info(|| format!("opencode db: exported {pushed} session(s), {unchanged} already in store"));
+    } else {
+        crate::dlog::debug(|| format!("opencode db: nothing to export ({unchanged} already in store)"));
+    }
     Ok(pushed)
 }
 
@@ -346,13 +414,18 @@ pub fn db_apply(
     on_pulled: &dyn Fn(&str),
 ) -> Result<crate::sync::ApplyReport> {
     let mut report = crate::sync::ApplyReport::default();
-    let Some(db) = db_path(home) else { return Ok(report) };
+    let Some(db) = db_path(home) else {
+        crate::dlog::warn(|| "opencode db: no local opencode.db — cannot import sessions".to_string());
+        return Ok(report);
+    };
     let prefix = format!("{DB_PREFIX}/");
+    let mut seen = 0usize;
     let mut conn: Option<rusqlite::Connection> = None;
     for (logical, meta) in listing {
         if !logical.starts_with(&prefix) {
             continue;
         }
+        seen += 1;
         on_file();
         if let Some(st) = state.files.get(logical) {
             if st.deleted_locally || st.hash == meta.hash {
@@ -372,6 +445,8 @@ pub fn db_apply(
             .map(crate::gitmap::has_unresolved_token)
             .unwrap_or(false)
         {
+            let d = session.get("directory").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+            crate::dlog::debug(|| format!("opencode db: {logical} parked — directory {d} has no mapping on this machine"));
             report.parked += 1; // project unknown here; retry when it appears
             continue;
         }
@@ -397,6 +472,7 @@ pub fn db_apply(
             .ok();
         if let Some(local) = local_updated {
             if local >= remote_updated {
+                crate::dlog::debug(|| format!("opencode db: {id} kept — local copy is same or newer"));
                 report.skipped_newer_local += 1;
                 state.files.insert(
                     logical.clone(),
@@ -429,6 +505,12 @@ pub fn db_apply(
         on_pulled(logical);
         report.applied += 1;
     }
+    crate::dlog::debug(|| {
+        format!(
+            "opencode db: store holds {seen} session export(s) — {} merged, {} unchanged, {} kept (local newer), {} parked",
+            report.applied, report.unchanged, report.skipped_newer_local, report.parked
+        )
+    });
     Ok(report)
 }
 
@@ -536,9 +618,12 @@ mod tests {
         }
         let tok_a = Tokenizer::with_case_sensitivity("/Users/u", false);
         let mut st_a = SyncState::default();
-        assert_eq!(db_push(&a, &tok_a, &mut st_a, &store, "a").unwrap(), 1);
-        // Re-push with no change: content-hash diff skips.
-        assert_eq!(db_push(&a, &tok_a, &mut st_a, &store, "a").unwrap(), 0);
+        assert_eq!(db_push(&a, &tok_a, &mut st_a, &store, "a", &store.list().unwrap()).unwrap(), 1);
+        // Re-push with no change: the export is in the listing — skipped.
+        assert_eq!(db_push(&a, &tok_a, &mut st_a, &store, "a", &store.list().unwrap()).unwrap(), 0);
+        // A store that lost the export gets it again even though local state
+        // says "already pushed" — the listing, not state, is authoritative.
+        assert_eq!(db_push(&a, &tok_a, &mut st_a, &store, "a", &[]).unwrap(), 1);
 
         // Machine B (different home): session lands fully, paths expanded.
         let b = tmp.path().join("b");

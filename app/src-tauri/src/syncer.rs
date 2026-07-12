@@ -1328,7 +1328,7 @@ fn publish_codex(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize>
     Ok(0)
 }
 fn publish_opencode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
-    engine::opencode::db_push(env.home, env.tok, state, env.store, env.machine)
+    engine::opencode::db_push(env.home, env.tok, state, env.store, env.machine, env.listing)
 }
 fn publish_zed(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
     engine::zed::push(env.home, state, env.store, env.machine)
@@ -1595,6 +1595,21 @@ fn sync_registry(
     }
 
     // PUSH: tokenized, validated entries into the registry/ namespace.
+    // Two guards learned from real Windows logs (2026-07-12), where idle
+    // syncs re-uploaded 5-13 entries of ~180 KB each, every time:
+    // - remoteMcpServersConfig is ~95% of an entry's bytes and is this
+    //   machine's local MCP tool schemas — useless on another machine, so
+    //   it is stripped from what we publish.
+    // - Claude Desktop touches focus timestamps constantly; pushes are
+    //   gated on a hash that ignores those fields, so an entry only
+    //   re-uploads when something another machine would care about changed.
+    const LOCAL_ONLY_FIELDS: &[&str] = &["remoteMcpServersConfig"];
+    const VOLATILE_FIELDS: &[&str] = &["lastFocusedAt", "lastActivityAt", "promptSuggestion"];
+    let gate_path = paths.config.parent().unwrap().join("registry_push_gate.json");
+    let mut gate: std::collections::HashMap<String, String> = std::fs::read(&gate_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
     let mut pushed = 0usize;
     let scanned: Vec<String> = local.keys().map(|s| format!("claude/registry/{s}.json")).collect();
     let home = dirs::home_dir().context("no home dir")?;
@@ -1607,12 +1622,28 @@ fn sync_registry(
         }
         let mut out = entry.clone();
         registry::tokenize_paths(&mut out, tok);
+        if let Some(o) = out.as_object_mut() {
+            for k in LOCAL_ONLY_FIELDS {
+                o.remove(*k);
+            }
+        }
         let bytes = serde_json::to_vec(&out)?;
         let hash = engine::scanner::hash_bytes(&bytes);
         let logical = format!("claude/registry/{sid}.json");
-        if state.files.get(&logical).map(|s| s.hash == hash).unwrap_or(false) {
+        let mut stable = out.clone();
+        if let Some(o) = stable.as_object_mut() {
+            for k in VOLATILE_FIELDS {
+                o.remove(*k);
+            }
+        }
+        let gate_hash = engine::scanner::hash_bytes(&serde_json::to_vec(&stable)?);
+        let unchanged_full = state.files.get(&logical).map(|s| s.hash == hash).unwrap_or(false);
+        let unchanged_stable = gate.get(sid.as_str()).map(|h| *h == gate_hash).unwrap_or(false);
+        if unchanged_full || unchanged_stable {
+            gate.insert(sid.clone(), gate_hash);
             continue;
         }
+        gate.insert(sid.clone(), gate_hash);
         let mtime = engine::scanner::mtime_ms(path).unwrap_or(0);
         store.put(
             &logical,
@@ -1624,6 +1655,10 @@ fn sync_registry(
             engine::FileState { hash, mtime_ms: mtime, size: bytes.len() as u64, deleted_locally: false },
         );
         pushed += 1;
+    }
+    gate.retain(|sid, _| local.contains_key(sid));
+    if let Ok(bytes) = serde_json::to_vec(&gate) {
+        let _ = std::fs::write(&gate_path, bytes);
     }
     // Locally deleted entries must not resurrect.
     let present: std::collections::BTreeSet<&str> = scanned.iter().map(|s| s.as_str()).collect();
