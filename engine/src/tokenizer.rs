@@ -184,6 +184,9 @@ impl Tokenizer {
     /// a known repo (tail separators canonicalized to `/`), else
     /// `/Users/alice/x` → `${HOME}/x` (boundary-aware; non-matching unchanged).
     pub fn tokenize_plain(&self, path: &str) -> String {
+        // Windows extended-length prefix (`\\?\C:\...`) — observed in real
+        // Codex cwds — must not defeat root matching.
+        let path = path.strip_prefix("\\\\?\\").unwrap_or(path);
         for (name, root, _) in &self.proj_roots {
             if let Some(rest) = self.strip(path, root) {
                 if rest.is_empty() {
@@ -343,6 +346,15 @@ mod tests {
         assert_eq!(
             encode_cwd("/Users/björn/My Proj"),
             "-Users-bj-rn-My-Proj"
+        );
+    }
+
+    #[test]
+    fn extended_length_prefix_is_stripped() {
+        let t = Tokenizer::with_case_sensitivity("C:\\Users\\you", true);
+        assert_eq!(
+            t.tokenize_plain("\\\\?\\C:\\Users\\you\\Documents\\X"),
+            "${HOME}\\Documents\\X"
         );
     }
 

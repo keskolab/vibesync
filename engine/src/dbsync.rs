@@ -112,13 +112,65 @@ pub(crate) fn normalize_path_shape(s: &str) -> String {
     }
 }
 
+/// True when a path clearly belongs to the OTHER OS family than `home` —
+/// a Windows drive path on a unix machine or a POSIX-absolute path on a
+/// Windows one. Such values come from pre-tokenization exports or from a
+/// tool's own backfill and need adoption or healing.
+pub(crate) fn foreign_shaped(s: &str, home: &str) -> bool {
+    let s = s.strip_prefix("\\\\?\\").unwrap_or(s);
+    let windows_home = home.as_bytes().get(1) == Some(&b':');
+    let windows_path = s.as_bytes().len() >= 2
+        && s.as_bytes()[0].is_ascii_alphabetic()
+        && s.as_bytes()[1] == b':';
+    if windows_home {
+        s.starts_with('/')
+    } else {
+        windows_path
+    }
+}
+
+/// Map a path under ANOTHER OS's user-home onto the local home — the same
+/// meaning `${HOME}` tokenization would have carried, recovered after the
+/// fact (`\\?\C:\Users\bob\Documents\X` -> `/Users/alice/Documents/X`).
+/// Paths outside a recognizable home (C:\Temp\...) don't translate: None.
+pub(crate) fn adopt_foreign_home(s: &str, home: &str) -> Option<String> {
+    if !foreign_shaped(s, home) {
+        return None;
+    }
+    let s = s.strip_prefix("\\\\?\\").unwrap_or(s);
+    let norm = s.replace('\\', "/");
+    let rest = if norm.as_bytes().get(1) == Some(&b':') {
+        // X:/Users/<name>/rest
+        let mut parts = norm.splitn(4, '/');
+        let (_drive, users, _name, rest) =
+            (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+        if !users.eq_ignore_ascii_case("Users") {
+            return None;
+        }
+        rest.to_string()
+    } else {
+        // /Users/<name>/rest or /home/<name>/rest
+        let mut parts = norm.splitn(4, '/');
+        let (_e, base, _name, rest) =
+            (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+        if base != "Users" && base != "home" {
+            return None;
+        }
+        rest.to_string()
+    };
+    Some(normalize_path_shape(&format!("{}/{rest}", home.trim_end_matches(['/', '\\']))))
+}
+
 pub(crate) fn expand_field(
     m: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
     tok: &Tokenizer,
 ) {
     if let Some(serde_json::Value::String(s)) = m.get(key) {
-        let e = normalize_path_shape(&tok.expand_plain(s));
+        let mut e = normalize_path_shape(&tok.expand_plain(s));
+        if let Some(adopted) = adopt_foreign_home(&e, tok.home()) {
+            e = adopted;
+        }
         m.insert(key.to_string(), serde_json::Value::String(e));
     }
 }
@@ -126,6 +178,24 @@ pub(crate) fn expand_field(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreign_home_paths_are_adopted() {
+        // Raw Windows cwd (extended-length, never tokenized) on a Mac.
+        assert_eq!(
+            adopt_foreign_home("\\\\?\\C:\\Users\\you\\Documents\\X", "/Users/alice").as_deref(),
+            Some("/Users/alice/Documents/X")
+        );
+        // Outside any home: no adoption.
+        assert_eq!(adopt_foreign_home("C:\\Temp\\X", "/Users/alice"), None);
+        // Reverse direction: POSIX home path on a Windows machine.
+        assert_eq!(
+            adopt_foreign_home("/Users/alice/Documents/X", "C:\\Users\\you").as_deref(),
+            Some("C:\\Users\\you\\Documents\\X")
+        );
+        // Same-family paths are left alone.
+        assert_eq!(adopt_foreign_home("/Users/alice/x", "/Users/bob"), None);
+    }
 
     #[test]
     fn cross_os_expansion_normalizes_separators() {

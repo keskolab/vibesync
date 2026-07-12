@@ -524,7 +524,35 @@ pub fn db_apply(
         let local_row = query_maps(c, "SELECT * FROM threads WHERE id = ?1", &[&id])?.pop();
         if let Some(lr) = &local_row {
             if thread_eff(lr) >= remote_eff {
-                crate::dlog::debug(|| format!("codex db: {id} kept — local copy is same or newer"));
+                // Codex backfills threads from synced rollout files BEFORE
+                // our merge runs, planting raw foreign cwds the UI can never
+                // scope to a workspace here. A kept row still gets its path
+                // fields healed from the remote's translated values.
+                let mut healed = Vec::new();
+                for f in THREAD_PATH_FIELDS {
+                    let local_v = lr.get(*f).and_then(|v| v.as_str()).unwrap_or("");
+                    let remote_v = t.get(*f).and_then(|v| v.as_str()).unwrap_or("");
+                    if !remote_v.is_empty()
+                        && crate::dbsync::foreign_shaped(local_v, tok.home())
+                        && !crate::dbsync::foreign_shaped(remote_v, tok.home())
+                        && !crate::gitmap::has_unresolved_token(remote_v)
+                    {
+                        healed.push((*f, remote_v.to_string()));
+                    }
+                }
+                for (f, v) in &healed {
+                    c.execute(
+                        &format!("UPDATE threads SET `{f}` = ?1 WHERE id = ?2"),
+                        rusqlite::params![v, id],
+                    )?;
+                }
+                if !healed.is_empty() {
+                    crate::dlog::debug(|| {
+                        format!("codex db: {id} kept — {} path field(s) healed to local shape", healed.len())
+                    });
+                } else {
+                    crate::dlog::debug(|| format!("codex db: {id} kept — local copy is same or newer"));
+                }
                 report.skipped_newer_local += 1;
                 state.files.insert(
                     logical.clone(),
