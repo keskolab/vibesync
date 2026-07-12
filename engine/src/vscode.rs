@@ -220,7 +220,7 @@ pub fn apply_roots_opts(
         let ws_key = comps[..marker].join("/");
         on_file();
         if let Some(st) = state.files.get(logical) {
-            if st.deleted_locally || st.hash == meta.hash {
+            if st.deleted_locally {
                 report.unchanged += 1;
                 continue;
             }
@@ -232,6 +232,14 @@ pub fn apply_roots_opts(
         let mut abs = ws_dir.clone();
         for c in &comps[marker..] {
             abs.push(unsanitize(c));
+        }
+        if let Some(st) = state.files.get(logical) {
+            // State is trusted only while the file is really there — a
+            // synced-then-cleaned file must re-download, not skip forever.
+            if st.deleted_locally || (st.hash == meta.hash && abs.exists()) {
+                report.unchanged += 1;
+                continue;
+            }
         }
         if abs.exists() {
             if hash_file(&abs)? == meta.hash {

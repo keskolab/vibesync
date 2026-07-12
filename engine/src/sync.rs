@@ -151,7 +151,9 @@ pub fn pull_dir(
                 on_file();
                 continue;
             }
-            if st.hash == meta.hash {
+            // State is trusted only while the file is really there — a
+            // synced-then-cleaned file must re-download, not skip forever.
+            if st.hash == meta.hash && abs.exists() {
                 report.unchanged += 1;
                 on_file();
                 continue;
