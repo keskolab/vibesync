@@ -1743,6 +1743,25 @@ fn sync_registry(
             .unwrap_or_default();
     let mut new_ghost_cache: std::collections::HashMap<String, (String, String)> =
         Default::default();
+    // One-time repair: our own ghost-removals used to be recorded as user
+    // deletions by the push sweep, permanently blocking those entries even
+    // after their transcripts arrived. Clear registry tombstones once;
+    // genuinely user-deleted entries resurrect one time and re-tombstone on
+    // the next sweep if deleted again.
+    let reset_marker = paths.config.parent().unwrap().join("tombstone_reset_v1");
+    if !reset_marker.exists() {
+        let cleared = {
+            let before = state.files.len();
+            state.files.retain(|k, st| !(k.starts_with("claude/registry/") && st.deleted_locally));
+            before - state.files.len()
+        };
+        if cleared > 0 {
+            engine::dlog::info(|| {
+                format!("sidebar: cleared {cleared} stale deletion markers (one-time repair)")
+            });
+        }
+        let _ = std::fs::write(&reset_marker, b"done");
+    }
     let applied_path = paths.config.parent().unwrap().join("applied_registry.json");
     let mut applied: std::collections::HashSet<String> = std::fs::read(&applied_path)
         .ok()
@@ -2009,6 +2028,11 @@ fn sync_registry(
                 if !local_ok {
                     let _ = std::fs::remove_file(&target);
                     applied.remove(sid);
+                    // Drop the state entry too: the push-side deletion sweep
+                    // must not read OUR removal as a user deletion — that
+                    // tombstone would block the entry forever, even after
+                    // its transcript arrives.
+                    state.files.remove(logical);
                     healed += 1;
                 }
             }
