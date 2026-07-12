@@ -149,7 +149,7 @@ pub struct ApplyReport {
     pub skipped_newer_local: usize,
 }
 
-pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn()) -> Result<ApplyReport> {
+pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<ApplyReport> {
     let mut report = ApplyReport::default();
     let Some(path) = db_path() else { return Ok(report) };
     let home_s = home.to_string_lossy().into_owned();
@@ -208,6 +208,7 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
             logical.clone(),
             FileState { hash: meta.hash.clone(), mtime_ms: 0, size: meta.size, deleted_locally: false },
         );
+        on_pulled(logical);
         report.applied += 1;
     }
     Ok(report)

@@ -139,7 +139,7 @@ pub fn push_index(
 
 /// Apply session files this machine lacks, then union every machine's index
 /// into the local session_index.jsonl (never dropping local entries).
-pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn()) -> Result<ApplyReport> {
+pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<ApplyReport> {
     let mut report = ApplyReport::default();
     let sessions_root = root(home).join("sessions");
     let index_prefix = format!("{INDEX_PREFIX}/");
@@ -206,6 +206,7 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
             logical.clone(),
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
         );
+        on_pulled(logical);
         report.pulled += 1;
     }
 
@@ -299,7 +300,7 @@ mod tests {
 
         let mut state_b = SyncState::default();
         let listing = store.list().unwrap();
-        let report = apply(&b, &mut state_b, &store, &listing, &|| {}).unwrap();
+        let report = apply(&b, &mut state_b, &store, &listing, &|| {}, &|_| {}).unwrap();
         assert_eq!(report.pulled, 1); // A's session file landed
         assert!(b.join(".codex/sessions/2026/04/21/rollout-aaa.jsonl").exists());
 

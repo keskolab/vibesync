@@ -95,7 +95,7 @@ pub struct ApplyReport {
     pub skipped_newer_local: usize,
 }
 
-pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn()) -> Result<ApplyReport> {
+pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<ApplyReport> {
     let mut report = ApplyReport::default();
     // Apply even if the dir doesn't exist yet (first pull creates it).
     let root = home.join(".local/share/opencode/storage");
@@ -134,6 +134,7 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
             logical.clone(),
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
         );
+        on_pulled(logical);
         report.pulled += 1;
     }
     Ok(report)
@@ -329,6 +330,7 @@ pub fn db_apply(
     store: &dyn SyncStore,
     listing: &[(String, RemoteMeta)],
     on_file: &dyn Fn(),
+    on_pulled: &dyn Fn(&str),
 ) -> Result<DbApplyReport> {
     let mut report = DbApplyReport::default();
     let Some(db) = db_path(home) else { return Ok(report) };
@@ -410,6 +412,7 @@ pub fn db_apply(
             logical.clone(),
             FileState { hash: meta.hash.clone(), mtime_ms: 0, size: meta.size, deleted_locally: false },
         );
+        on_pulled(logical);
         report.applied += 1;
     }
     Ok(report)
@@ -530,7 +533,7 @@ mod tests {
         let tok_b = Tokenizer::with_case_sensitivity("/home/bob", false);
         let mut st_b = SyncState::default();
         let listing = store.list().unwrap();
-        let r = db_apply(&b, &tok_b, &mut st_b, &store, &listing, &|| {}).unwrap();
+        let r = db_apply(&b, &tok_b, &mut st_b, &store, &listing, &|| {}, &|_| {}).unwrap();
         assert_eq!(r.applied, 1);
         let c = rusqlite::Connection::open(&db_b).unwrap();
         let (dir, title): (String, String) = c
@@ -550,7 +553,7 @@ mod tests {
         c.execute("UPDATE session SET title='local edit', time_updated=999 WHERE id='ses1'", [])
             .unwrap();
         let mut st_b2 = SyncState::default();
-        let r = db_apply(&b, &tok_b, &mut st_b2, &store, &listing, &|| {}).unwrap();
+        let r = db_apply(&b, &tok_b, &mut st_b2, &store, &listing, &|| {}, &|_| {}).unwrap();
         assert_eq!(r.skipped_newer_local, 1);
         let title: String =
             c.query_row("SELECT title FROM session WHERE id='ses1'", [], |r| r.get(0)).unwrap();
@@ -580,7 +583,7 @@ mod tests {
         std::fs::create_dir_all(b.join(".local/share/opencode/storage")).unwrap();
         let mut state_b = SyncState::default();
         let listing = store.list().unwrap();
-        let report = apply(&b, &mut state_b, &store, &listing, &|| {}).unwrap();
+        let report = apply(&b, &mut state_b, &store, &listing, &|| {}, &|_| {}).unwrap();
         assert_eq!(report.pulled, 1);
         assert!(b.join(".local/share/opencode/storage/session/ses_1.json").exists());
     }

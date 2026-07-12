@@ -213,9 +213,14 @@ function fmtClock(ms) {
 	});
 }
 
+// Remote-controlled strings (machine names from the store) must never reach
+// innerHTML raw.
+const esc = (s) =>
+	String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
 // "+N new · 16:04" chip for a tool/shared card with unseen synced items.
-function newBadge(count, ms) {
-	if (!count) return "";
+function newBadge(count, ms, seen) {
+	if (!count || seen) return "";
 	return ` <span class="badge-new">+${count} new${ms ? ` · ${fmtClock(ms)}` : ""}</span>`;
 }
 
@@ -272,7 +277,7 @@ function renderAll() {
       ${ICONS[t.id] || ""}
       <div class="tlabel">${t.name}<span class="tsub">${
 				t.installed
-					? `${t.sessions} sessions · ${t.plans} plans · ${fmtSizeStr(t.bytes)}${newBadge(t.newItems, t.newMs)}`
+					? `${t.sessions} sessions · ${t.plans} plans · ${fmtSizeStr(t.bytes)}${newBadge(t.newItems, t.newMs, t.newSeen)}`
 					: "Not installed"
 			}</span></div>
       ${
@@ -308,11 +313,12 @@ function renderAll() {
 	sLabel.style.display = "";
 	sl.style.display = "";
 	if (status.sharedInstalled) {
-		sl.innerHTML = `<li>
+		sl.innerHTML = `<li class="tip-host">
       ${ICONS.shared}
-      <div class="tlabel"><span class="tname">Global Skills <span class="name-note">(used by all AI tools)</span></span><span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"}, ${fmtSizeStr(status.sharedBytes)}${newBadge(status.sharedNew, status.sharedNewMs)}<br>Path: ${SKILLS_PATH}</span></div>
+      <div class="tlabel"><span class="tname">Global Skills <span class="name-note">(used by all AI tools)</span><span class="help-tip" tabindex="0"><svg viewBox="0 0 16 16" aria-label="About global skills"><path d="M8 1.2a6.8 6.8 0 1 0 0 13.6A6.8 6.8 0 0 0 8 1.2zm0 1.5a5.3 5.3 0 1 1 0 10.6A5.3 5.3 0 0 1 8 2.7zm.1 2.1c-1.2 0-2.1.7-2.4 1.8l1.3.4c.1-.5.5-.9 1.1-.9.5 0 .9.3.9.8 0 .9-1.6 1-1.6 2.4v.3h1.4v-.2c0-.8 1.7-1 1.7-2.5 0-1.2-1-2.1-2.4-2.1zM8 11a.9.9 0 1 0 0 1.8A.9.9 0 0 0 8 11z"/></svg><span class="tip-bubble">Reusable skills every AI tool can read (the Agent Skills standard). VibeSync keeps this folder identical on all your computers. Location: ${SKILLS_PATH}</span></span></span><span class="tsub">${status.sharedSkills} skill${status.sharedSkills === 1 ? "" : "s"}, ${fmtSizeStr(status.sharedBytes)}${newBadge(status.sharedNew, status.sharedNewMs, status.sharedNewSeen)}</span></div>
       <label class="switch"><input type="checkbox" ${status.sharedEnabled ? "checked" : ""} /><span class="knob"></span></label>
       <span class="chevron-spacer"></span>`;
+		sl.querySelector(".help-tip")?.addEventListener("click", (e) => e.stopPropagation());
 		sl.querySelector("label.switch").addEventListener("click", (e) =>
 			e.stopPropagation(),
 		);
@@ -323,7 +329,7 @@ function renderAll() {
 			});
 			renderAll();
 		});
-		if (status.sharedNew > 0) {
+		if (status.sharedNew > 0 && !status.sharedNewSeen) {
 			sl.querySelector("li").addEventListener("click", () => {
 				invoke("ack_new", { id: "shared" })
 					.then((s) => {
@@ -358,7 +364,7 @@ async function refreshStatus() {
 }
 
 function openTool(t) {
-	if (t.newItems > 0) {
+	if (t.newItems > 0 && !t.newSeen) {
 		invoke("ack_new", { id: t.id })
 			.then((s) => {
 				status = s;
@@ -373,6 +379,27 @@ function openTool(t) {
 		{ value: t.projects, label: t.projects === 1 ? "project" : "projects" },
 		{ value: sz.v, label: `${sz.unit} local` },
 	]);
+	// Provenance: which machine the last sync's new items came from.
+	const nl = $("tool-new-label");
+	const nv = $("tool-new");
+	const sources = Object.entries(t.newSources || {});
+	if (t.newItems > 0) {
+		nl.style.display = "";
+		nv.style.display = "";
+		nl.textContent = `New in last sync${t.newMs ? ` · ${fmtClock(t.newMs)}` : ""}`;
+		const pretty = (name) => name.replace(/\.(local|lan|home)$/i, "");
+		nv.innerHTML = sources.length
+			? sources
+					.map(
+						([src, n]) =>
+							`<div><span>From ${esc(pretty(src))}</span><b class="badge-new">+${n}</b></div>`,
+					)
+					.join("")
+			: `<div><span>New items</span><b class="badge-new">+${t.newItems}</b></div>`;
+	} else {
+		nl.style.display = "none";
+		nv.style.display = "none";
+	}
 	const extra = $("tool-counts-extra");
 	if (t.id === "claude-code") {
 		extra.style.display = "";

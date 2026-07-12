@@ -186,8 +186,9 @@ pub fn apply(
     merge_index: bool,
     listing: &[(String, RemoteMeta)],
     on_file: &dyn Fn(),
+    on_pulled: &dyn Fn(&str),
 ) -> Result<ApplyReport> {
-    apply_roots_opts(&storage_roots(), store, state, home, merge_index, listing, on_file)
+    apply_roots_opts(&storage_roots(), store, state, home, merge_index, listing, on_file, on_pulled)
 }
 
 pub fn apply_roots(
@@ -197,7 +198,7 @@ pub fn apply_roots(
     home: &Path,
 ) -> Result<ApplyReport> {
     let listing = store.list()?;
-    apply_roots_opts(roots, store, state, home, true, &listing, &|| {})
+    apply_roots_opts(roots, store, state, home, true, &listing, &|| {}, &|_| {})
 }
 
 pub fn apply_roots_opts(
@@ -208,6 +209,7 @@ pub fn apply_roots_opts(
     merge_index: bool,
     listing: &[(String, RemoteMeta)],
     on_file: &dyn Fn(),
+    on_pulled: &dyn Fn(&str),
 ) -> Result<ApplyReport> {
     let mut report = ApplyReport::default();
     let home = home_norm(home);
@@ -275,6 +277,7 @@ pub fn apply_roots_opts(
             logical.clone(),
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
         );
+        on_pulled(logical);
         report.applied += 1;
         // Chat session files (not editing sidecars) must also be registered
         // in the workspace's index or the panel never lists them.
