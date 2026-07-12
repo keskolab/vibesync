@@ -335,10 +335,7 @@ impl S3Store {
             match self.get_bytes(key) {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    mini_log::LogMessage::new(
-                        mini_log::Level::Warning,
-                        format!("store fetch retry for {key}: {e}"),
-                    );
+                    crate::dlog::warn(|| format!("store fetch retry for {key}: {e}"));
                     last = Some(e);
                     std::thread::sleep(delay);
                     delay *= 2;
@@ -384,6 +381,7 @@ fn clean_s3_err(op: &str, e: ureq::Error) -> anyhow::Error {
 
 impl SyncStore for S3Store {
     fn put(&self, logical: &str, plain: &[u8], meta: &RemoteMeta) -> Result<()> {
+        crate::dlog::debug(|| format!("uploading {logical} ({} KB)", plain.len() / 1024));
         let encoded = self.codec.encode(plain)?;
         self.put_bytes(&self.key(logical, self.codec.suffix()), &encoded)?;
         self.put_bytes(&self.key(logical, META_SUFFIX), &serde_json::to_vec(meta)?)?;
@@ -391,6 +389,7 @@ impl SyncStore for S3Store {
     }
 
     fn get(&self, logical: &str) -> Result<Option<(Vec<u8>, RemoteMeta)>> {
+        crate::dlog::debug(|| format!("downloading {logical}"));
         let Some(meta_bytes) = self.get_bytes(&self.key(logical, META_SUFFIX))? else {
             return Ok(None);
         };
@@ -443,10 +442,9 @@ impl SyncStore for S3Store {
             .partition(|(logical, etag)| {
                 cache.entries.get(logical).map(|(e, _)| e == etag).unwrap_or(false)
             });
-        mini_log::LogMessage::new(
-            mini_log::Level::Debug,
-            format!("s3 list: {} cached metas, {} to fetch", hits.len(), misses.len()),
-        );
+        crate::dlog::debug(|| {
+            format!("s3 list: {} cached metas, {} to fetch", hits.len(), misses.len())
+        });
         let mut result: Vec<(String, RemoteMeta)> = hits
             .iter()
             .map(|(logical, _)| (logical.clone(), cache.entries[logical].1.clone()))
@@ -597,10 +595,7 @@ impl AzureSasStore {
             match self.get_bytes(key) {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    mini_log::LogMessage::new(
-                        mini_log::Level::Warning,
-                        format!("store fetch retry for {key}: {e}"),
-                    );
+                    crate::dlog::warn(|| format!("store fetch retry for {key}: {e}"));
                     last = Some(e);
                     std::thread::sleep(delay);
                     delay *= 2;

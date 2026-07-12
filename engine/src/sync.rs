@@ -127,6 +127,7 @@ pub fn pull_dir(
         if crate::gitmap::has_unresolved_token(&abs.to_string_lossy()) {
             // Repo unknown on this machine: park in the store (state stays
             // untracked, so the entry is retried once the repo appears).
+            crate::dlog::debug(|| format!("parked (project not on this machine): {logical}"));
             on_file();
             continue;
         }
@@ -166,6 +167,7 @@ pub fn pull_dir(
                 continue;
             }
             // Local loses: keep its content as a backup sibling before replacing.
+            crate::dlog::debug(|| format!("conflict: backing up {}", abs.display()));
             let bak = abs.with_extension(match abs.extension().and_then(|e| e.to_str()) {
                 Some(ext) => format!("{ext}.vibesync-bak"),
                 None => "vibesync-bak".to_string(),
@@ -192,6 +194,7 @@ pub fn pull_dir(
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        crate::dlog::debug(|| format!("writing {}", abs.display()));
         let tmp = abs.with_extension("vibesync-tmp");
         std::fs::write(&tmp, &data)?;
         std::fs::rename(&tmp, abs)?;
