@@ -197,6 +197,18 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
             logical.clone(),
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
         );
+        // OpenCode scopes global-project sessions to their exact directory:
+        // a merged session stays invisible until that folder exists and is
+        // opened. Say so, or "synced but not visible" reads as a bug.
+        if let Some(d) = session.get("directory").and_then(|v| v.as_str()) {
+            if !Path::new(d).exists() {
+                awaiting_folder += 1;
+                let d = d.to_string();
+                crate::dlog::debug(|| {
+                    format!("opencode db: {id} merged — appears in OpenCode once {d} exists and is opened")
+                });
+            }
+        }
         on_pulled(logical);
         report.applied += 1;
     }
@@ -509,6 +521,7 @@ pub fn db_apply(
     };
     let prefix = format!("{DB_PREFIX}/");
     let mut seen = 0usize;
+    let mut awaiting_folder = 0usize;
     let mut conn: Option<rusqlite::Connection> = None;
     for (logical, meta) in listing {
         if !logical.starts_with(&prefix) {
@@ -613,12 +626,24 @@ pub fn db_apply(
             logical.clone(),
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
         );
+        // OpenCode scopes global-project sessions to their exact directory:
+        // a merged session stays invisible until that folder exists and is
+        // opened. Say so, or "synced but not visible" reads as a bug.
+        if let Some(d) = session.get("directory").and_then(|v| v.as_str()) {
+            if !Path::new(d).exists() {
+                awaiting_folder += 1;
+                let d = d.to_string();
+                crate::dlog::debug(|| {
+                    format!("opencode db: {id} merged — appears in OpenCode once {d} exists and is opened")
+                });
+            }
+        }
         on_pulled(logical);
         report.applied += 1;
     }
     crate::dlog::debug(|| {
         format!(
-            "opencode db: store holds {seen} session export(s) — {} merged, {} unchanged, {} kept (local newer), {} parked",
+            "opencode db: store holds {seen} session export(s) — {} merged ({awaiting_folder} awaiting their folder), {} unchanged, {} kept (local newer), {} parked",
             report.applied, report.unchanged, report.skipped_newer_local, report.parked
         )
     });
