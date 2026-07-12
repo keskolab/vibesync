@@ -136,7 +136,6 @@ function setPending(pending) {
 		"shared-label",
 		"shared-list",
 		"sync-now",
-		"progress",
 	]) {
 		$(id).style.display = pending ? "none" : "";
 	}
@@ -535,14 +534,11 @@ function setBusy(busy, label) {
 		$("status-dot").className = "dot busy";
 		$("status-text").textContent = "Syncing";
 	}
-	$("progress").classList.toggle("active", busy);
-	if (!busy) $("progress-bar").style.width = "0";
-	setTimeout(fitWindow, 50); // busy label/progress change the page height
+	setTimeout(fitWindow, 50); // busy label changes the page height
 }
 
 async function runSync(firstRun) {
 	setBusy(true, firstRun ? "First sync…" : "Syncing…");
-	$("progress-bar").style.width = "0";
 	if (firstRun) setSubText("First sync in progress…");
 	try {
 		const outcome = await invoke("sync_now");
@@ -584,10 +580,11 @@ window.addEventListener("DOMContentLoaded", async () => {
 		.catch(() => {});
 	$("open-setup").addEventListener("click", () => invoke("show_onboarding"));
 
-	// Real progress from the engine's chunked push.
+	// Live file counts on the button — the single progress surface. Guard on
+	// uiBusy so a late event can't scribble on an idle "Sync Now" button.
 	tauri?.event.listen("sync-progress", (e) => {
+		if (!uiBusy) return;
 		const { done, total } = e.payload;
-		$("progress-bar").style.width = `${Math.round((done / total) * 100)}%`;
 		$("sync-label").textContent =
 			`${done.toLocaleString()} / ${total.toLocaleString()} files`;
 	});
