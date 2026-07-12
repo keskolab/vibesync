@@ -248,6 +248,21 @@ pub fn db_push(
         &db,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )?;
+    // Short-circuit: exporting every session (plus messages/parts) each sync
+    // is wasted work when the db hasn't changed. One summary row decides.
+    let summary: (i64, i64, i64, i64) = conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM session),
+                (SELECT COALESCE(MAX(time_updated),0) FROM session),
+                (SELECT COUNT(*) FROM message),
+                (SELECT COUNT(*) FROM part)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    let summary_hash = hash_bytes(format!("{summary:?}").as_bytes());
+    const SUMMARY_KEY: &str = "opencode/db#local-summary";
+    if state.files.get(SUMMARY_KEY).map(|s| s.hash == summary_hash).unwrap_or(false) {
+        return Ok(0);
+    }
     let sessions = query_maps(&conn, "SELECT * FROM session", &[])?;
     let mut pushed = 0;
     for mut session in sessions {
@@ -289,6 +304,10 @@ pub fn db_push(
         );
         pushed += 1;
     }
+    state.files.insert(
+        SUMMARY_KEY.to_string(),
+        FileState { hash: summary_hash, mtime_ms: 0, size: 0, deleted_locally: false },
+    );
     Ok(pushed)
 }
 

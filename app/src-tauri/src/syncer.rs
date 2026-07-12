@@ -578,7 +578,9 @@ pub struct SyncOutcome {
 pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) -> Result<SyncOutcome> {
     let mut config = load_config(paths)?.context("VibeSync is not configured yet")?;
     resolve_secrets(&mut config)?;
-    let store = engine::open_store(&config.store, config.passphrase.as_deref())?;
+    let cache_dir = paths.config.parent().map(|p| p.to_path_buf());
+    let store =
+        engine::open_store_cached(&config.store, config.passphrase.as_deref(), cache_dir.as_deref())?;
     // Project identity mapping: learn `git origin -> local clone root` from
     // this machine's own sidebar entries, so the same repo cloned at
     // different paths on different machines still syncs as ONE project.
