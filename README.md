@@ -43,6 +43,7 @@ The rules every sync follows:
 | VS Code Copilot Chat | Chat history per project, visible in the Chat panel on every machine |
 | Codex | Session transcripts; every machine's session list shows all of them |
 | OpenCode | Sessions sync at the database level, with a backup taken before the first write |
+| Codex | Threads sync at the database level too (modern builds), with the same backup-first rule |
 | Zed | Agent threads (best synced while Zed is closed) |
 | Copilot CLI | Standalone `copilot` sessions |
 | All tools | Global skills in `~/.agents/skills` ([Agent Skills spec](https://agentskills.io)) |
@@ -83,6 +84,7 @@ Nothing outside this list is read or written. `~` is your home folder (`C:\Users
 | VS Code | `.../Code/User/workspaceStorage/<id>/state.vscdb` ² | Updates one key (the chat index) so synced chats show in the panel |
 | Codex | `~/.codex/sessions/`, `~/.codex/session_index.jsonl` | Syncs; merges the index so every machine lists all sessions |
 | All tools | `meta/git_atlas.json` (in your storage) | Fleet map of where each machine keeps each project (paths only) — lets the same repo live at different locations per machine |
+| Codex | `~/.codex/state_<N>.sqlite` | Merges synced threads in (insert/update-newer only, never deletes); one-time backup before the first write |
 | OpenCode | `~/.local/share/opencode/opencode.db` | Merges synced sessions in (insert/update-newer only, never deletes); one-time backup `opencode.db.vibesync-bak` before the first write |
 | OpenCode | `~/.local/share/opencode/project/` | Syncs each project's `storage/` records (current OpenCode layout) |
 | OpenCode | `~/.local/share/opencode/storage/` | Syncs (legacy records) |

@@ -5,6 +5,7 @@ pub mod adapters;
 pub mod atlas;
 pub mod codec;
 pub mod codex;
+pub(crate) mod dbsync;
 pub mod opencode;
 pub mod config;
 pub mod copilot;
