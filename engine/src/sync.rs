@@ -95,7 +95,7 @@ pub fn pull(
     include_optional: bool,
 ) -> Result<Report> {
     let listing = store.list()?;
-    pull_dir(adapter, home, ".claude", tok, state, store, include_optional, &|_| false, &listing, &|| {})
+    pull_dir(adapter, home, ".claude", tok, state, store, include_optional, &|_| false, &listing, &|| {}, &|_| {})
 }
 
 /// Pull for one config dir (default `.claude` or a `.claude-*` profile).
@@ -111,6 +111,7 @@ pub fn pull_dir(
     skip: &dyn Fn(&str) -> bool,
     listing: &[(String, RemoteMeta)],
     on_file: &(dyn Fn() + Sync),
+    on_pulled: &(dyn Fn(&str) + Sync),
 ) -> Result<Report> {
     let mut report = Report::default();
     // Pass 1 (serial, cheap): classify every entry in our namespace; collect
@@ -207,6 +208,7 @@ pub fn pull_dir(
                 deleted_locally: false,
             },
         );
+        on_pulled(logical);
         report.pulled += 1;
     }
     Ok(report)

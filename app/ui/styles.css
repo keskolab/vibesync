@@ -398,6 +398,19 @@ header {
   display: inline-flex;
   outline: none;
 }
+/* A card that hosts a tooltip: the bubble anchors to the full row. */
+.toggles li.tip-host {
+  position: relative;
+}
+.toggles li.tip-host .tip-bubble {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+.toggles li.tip-host .help-tip svg {
+  width: 11px;
+  height: 11px;
+  margin-left: 3px;
+}
 .help-tip svg {
   width: 12px;
   height: 12px;
@@ -420,6 +433,7 @@ header {
   line-height: 1.45;
   letter-spacing: 0;
   text-transform: none;
+  white-space: normal;
   padding: 8px 10px;
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
