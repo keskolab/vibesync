@@ -143,6 +143,7 @@ function setPending(pending) {
 	if (pending) {
 		$("status-dot").className = "dot";
 		$("status-text").textContent = "Not set up";
+		$("next-sync").textContent = "";
 		setSubText("Choose where your sessions live to start syncing");
 	}
 	const setStore = $("set-store");
@@ -230,18 +231,19 @@ function renderStatusLine() {
 	const loc = status.storeDesc || "not set";
 	let auto = "";
 	if (autosyncOn === false) {
-		auto = `<span><span class="kv-label">Auto-sync:</span> off</span>`;
+		auto = `<span class="kv-label">Auto-sync:</span> off`;
 	} else if (autosyncOn === true) {
 		// Worker due-check: interval after the last sync, polled once a minute —
 		// an overdue machine (just woke or launched) syncs within one: "soon".
 		const next = (status.lastSyncMs || 0) + autosyncMins * 60000;
 		const label = uiBusy ? "now" : next <= Date.now() ? "soon" : fmtClock(next);
-		auto = `<span><span class="kv-label">Next sync:</span> ${label}</span>`;
+		auto = `<span class="kv-label">Next sync:</span> ${label}`;
 	}
-	const html = `<span><span class="kv-label">Last sync:</span> ${when}</span>${auto}<span class="span-2"><span class="kv-label">Location:</span> ${loc}</span>`;
-	if ($("substatus").dataset.line !== html) {
-		$("substatus").dataset.line = html;
+	const html = `<span><span class="kv-label">Last sync:</span> ${when}</span><span class="loc-line"><span class="kv-label">Location:</span> ${loc}</span>`;
+	if ($("substatus").dataset.line !== html + auto) {
+		$("substatus").dataset.line = html + auto;
 		$("substatus").innerHTML = html;
+		$("next-sync").innerHTML = auto;
 		$("substatus").title = status.storeDetail || "";
 		setTimeout(fitWindow, 50); // height changes with content
 	}

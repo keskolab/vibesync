@@ -14,13 +14,16 @@
         <!-- Page 0: main / tools -->
         <section class="page" id="page-main">
           <header>
-            <div class="title-row">
-              <span class="status-pill" id="status-pill">
-                <span class="dot" id="status-dot"></span>
-                <span id="status-text">Loading</span>
-              </span>
+            <div class="head-row">
+              <div class="substatus" id="substatus"></div>
+              <div class="head-right">
+                <span class="status-pill" id="status-pill">
+                  <span class="dot" id="status-dot"></span>
+                  <span id="status-text">Loading</span>
+                </span>
+                <span class="substatus" id="next-sync"></span>
+              </div>
             </div>
-            <div class="substatus" id="substatus"></div>
           </header>
 
           <div class="setup-pending" id="setup-pending" style="display:none">
