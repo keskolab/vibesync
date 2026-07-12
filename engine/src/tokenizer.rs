@@ -72,6 +72,67 @@ impl Tokenizer {
         self
     }
 
+    /// Attach fleet-shared roots (the store's project atlas) as
+    /// TOKENIZE-ONLY aliases: `${HOME}`-relative entries resolve against
+    /// this machine's home. Another machine's clone path then produces the
+    /// same canonical `${GIT}` key, while expansion still targets only roots
+    /// this machine actually has (unknown repos park as usual). Call after
+    /// `with_gitmap` — local roots win dedup.
+    pub fn with_fleet_aliases(
+        mut self,
+        atlas: &std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        for (id, roots) in atlas {
+            for r in roots {
+                let plain = match r.strip_prefix(HOME_TOKEN) {
+                    Some(rest) => format!("{}{}", self.home, rest),
+                    None => r.clone(),
+                };
+                // Atlas tails carry the origin machine's separators.
+                let plain = if self.home.contains('\\') {
+                    plain.replace('/', "\\")
+                } else {
+                    plain.replace('\\', "/")
+                };
+                let plain = plain.trim_end_matches(['/', '\\']).to_string();
+                if plain.is_empty() {
+                    continue;
+                }
+                // Any locally-known root wins over an atlas alias — whether
+                // it's the same identity (a duplicate) or a different one
+                // (that path is already claimed by another project here).
+                let claimed = self
+                    .git_roots
+                    .iter()
+                    .map(|(_, p, _, _)| p)
+                    .chain(self.proj_roots.iter().map(|(_, p, _)| p))
+                    .any(|p| {
+                        *p == plain || (self.case_insensitive && p.eq_ignore_ascii_case(&plain))
+                    });
+                if claimed {
+                    continue;
+                }
+                // A real local folder that isn't a clone of this repo must
+                // not be hijacked by a fleet path coincidence. A dead path is
+                // safe: it can only match encoded transcript-dir names.
+                // (Known limit: Claude's `-` dir encoding is lossy, so a
+                // sibling like `decksy-tools` can prefix-match a `decksy`
+                // alias — same ambiguity local roots always had.)
+                let p = std::path::Path::new(&plain);
+                if p.exists() {
+                    match crate::gitmap::discover(p) {
+                        Some((_, found)) if found == *id => {}
+                        _ => continue,
+                    }
+                }
+                let encoded = encode_cwd(&plain);
+                self.git_roots.push((id.clone(), plain, encoded, false));
+            }
+        }
+        self.git_roots.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+        self
+    }
+
     /// Attach known git repo roots; their identities then take priority over
     /// `${HOME}` in both tokenize directions.
     pub fn with_gitmap(mut self, map: &GitMap) -> Self {
@@ -381,6 +442,47 @@ mod tests {
         // ...while expansion always targets the current location.
         assert_eq!(t.expand_plain("${GIT:github.com:o:r}/x"), "/Users/u/new-spot/x");
         assert_eq!(t.expand_encoded("${GIT:github.com:o:r}-x"), "-Users-u-new-spot-x");
+    }
+
+    #[test]
+    fn fleet_alias_tokenizes_foreign_clone_paths() {
+        const ID: &str = "github.com/johnkesko/decksy";
+        // This machine has decksy at 14_mobile; the atlas says another
+        // machine keeps it at 10_web.
+        let mut map = crate::gitmap::GitMap::default();
+        map.roots.insert(ID.into(), "/Users/u/Development/14_mobile/decksy".into());
+        let mut atlas = std::collections::BTreeMap::new();
+        atlas.insert(
+            ID.to_string(),
+            vec![
+                "${HOME}/Development/10_web/decksy".to_string(),
+                "${HOME}/Development/14_mobile/decksy".to_string(), // own root — deduped
+            ],
+        );
+        let t = Tokenizer::with_case_sensitivity("/Users/u", false)
+            .with_gitmap(&map)
+            .with_fleet_aliases(&atlas);
+        // The foreign path (plain and encoded) now yields the canonical key...
+        assert_eq!(
+            t.tokenize_plain("/Users/u/Development/10_web/decksy/src"),
+            "${GIT:github.com:johnkesko:decksy}/src"
+        );
+        assert_eq!(
+            t.tokenize_encoded("-Users-u-Development-10-web-decksy"),
+            "${GIT:github.com:johnkesko:decksy}"
+        );
+        // ...while expansion still lands on THIS machine's clone.
+        assert_eq!(
+            t.expand_plain("${GIT:github.com:johnkesko:decksy}"),
+            "/Users/u/Development/14_mobile/decksy"
+        );
+        // Atlas-only identity (repo not on this machine): tokenizes
+        // canonically, expansion parks.
+        let mut atlas2 = std::collections::BTreeMap::new();
+        atlas2.insert("github.com/o/onlyb".to_string(), vec!["${HOME}/x/onlyb".to_string()]);
+        let t2 = Tokenizer::with_case_sensitivity("/Users/u", false).with_fleet_aliases(&atlas2);
+        assert_eq!(t2.tokenize_plain("/Users/u/x/onlyb"), "${GIT:github.com:o:onlyb}");
+        assert_eq!(t2.expand_plain("${GIT:github.com:o:onlyb}"), "${GIT:github.com:o:onlyb}");
     }
 
     #[test]
