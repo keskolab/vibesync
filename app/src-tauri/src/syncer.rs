@@ -666,6 +666,9 @@ pub struct SyncOutcome {
 pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) -> Result<SyncOutcome> {
     let sync_t0 = std::time::Instant::now();
     let _ = engine::scanner::take_hash_stats(); // reset for this sync's report
+    if let Some(dir) = paths.config.parent() {
+        engine::scanner::set_hash_cache_file(dir.join("hash_cache.json"));
+    }
     let mut config = load_config(paths)?.context("VibeSync is not configured yet")?;
     let dlog = DebugLog::open(paths, config.debug_logging);
     dlog.info(format!("sync start — storage: {}", store_label(&config.store)));
@@ -683,6 +686,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     let gitmap_t0 = std::time::Instant::now();
     let mut gitmap = engine::gitmap::GitMap::load(&gitmap_path);
     let mut gitmap_changed = false;
+    let mut learned_cwds: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(dir) = registry_dir() {
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
@@ -698,7 +702,9 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
                 };
                 for key in ["cwd", "originCwd"] {
                     if let Some(cwd) = v.get(key).and_then(|c| c.as_str()) {
-                        gitmap_changed |= gitmap.learn(std::path::Path::new(cwd));
+                        if learned_cwds.insert(cwd.to_string()) {
+                            gitmap_changed |= gitmap.learn(std::path::Path::new(cwd));
+                        }
                     }
                 }
             }
@@ -1079,6 +1085,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         push.pushed,
         pull.pulled
     ));
+    engine::scanner::save_hash_cache();
     engine::dlog::set_sink(None);
 
     // Partial failure: everything that could sync did (and is recorded), but
@@ -1329,6 +1336,7 @@ fn apply_claude(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenRepo
         g.unchanged += r.unchanged;
         g.skipped_newer_local += r.skipped_newer_local;
         g.skipped_deleted += r.skipped_deleted;
+        g.parked += r.parked;
     }
     Ok(g)
 }
@@ -1382,6 +1390,7 @@ fn apply_shared(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenRepo
         unchanged: r.unchanged,
         skipped_newer_local: r.skipped_newer_local,
         skipped_deleted: r.skipped_deleted,
+        parked: r.parked,
         ..Default::default()
     })
 }
@@ -1529,6 +1538,14 @@ fn sync_registry(
     // Session IDs we've written to the local registry from remote — lets us
     // safely remove ghost entries we created without ever touching the
     // machine's own native entries.
+    let ghost_cache_path = paths.config.parent().unwrap().join("ghost_cache.json");
+    let ghost_cache: std::collections::HashMap<String, (String, String)> =
+        std::fs::read(&ghost_cache_path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+    let mut new_ghost_cache: std::collections::HashMap<String, (String, String)> =
+        Default::default();
     let applied_path = paths.config.parent().unwrap().join("applied_registry.json");
     let mut applied: std::collections::HashSet<String> = std::fs::read(&applied_path)
         .ok()
@@ -1608,6 +1625,15 @@ fn sync_registry(
                 continue;
             }
         }
+        // Known ghost, unchanged in the store, transcript still absent: skip
+        // the fetch (these were re-downloaded every sync otherwise).
+        if let Some((h, tpath)) = ghost_cache.get(logical.as_str()) {
+            if *h == meta.hash && !std::path::Path::new(tpath).exists() {
+                ghosts += 1;
+                new_ghost_cache.insert(logical.clone(), (h.clone(), tpath.clone()));
+                continue;
+            }
+        }
         let Some((bytes, _)) = store.get(logical)? else { continue };
         let Ok(mut remote) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
         registry::expand_paths(&mut remote, tok);
@@ -1628,6 +1654,10 @@ fn sync_registry(
                 )
             });
             ghosts += 1;
+            if let Some(tp) = transcript_path(&remote, &home) {
+                new_ghost_cache
+                    .insert(logical.clone(), (meta.hash.clone(), tp.display().to_string()));
+            }
             // We only ever wrote entries tracked in `applied`; a machine's own
             // native entries are never in that set, so this cannot delete them.
             if applied.contains(sid) && target.exists() {
@@ -1692,6 +1722,7 @@ fn sync_registry(
             applied_count += 1;
         }
     }
+    let _ = std::fs::write(&ghost_cache_path, serde_json::to_vec(&new_ghost_cache).unwrap_or_default());
     let _ = std::fs::write(&applied_path, serde_json::to_vec(&applied).unwrap_or_default());
     Ok((pushed, applied_count, ghosts, healed))
 }

@@ -104,6 +104,7 @@ Nothing outside this list is read or written. `~` is your home folder (`C:\Users
 | `applied_registry.json`, `registry-backup/` | Sidebar entries VibeSync added, and backups of the originals |
 | `store_list_cache.json` | Cloud listing cache so routine syncs make a handful of requests instead of thousands |
 | `debug.log` | Only when the Settings toggle is on: per-sync phase timings for troubleshooting |
+| `hash_cache.json`, `ghost_cache.json` | Speed caches: file fingerprints across app launches; known-stale sidebar entries so they aren't re-downloaded every sync |
 
 **Inside your storage** (all under `v1/files/`, each file with a small `.meta` sidecar; encrypted before upload on cloud backends): `claude/`, `vscode/ws/`, `codex/`, `opencode/`, `zed/threads/`, `copilot/session-state/`, `shared/skills/`.
 
