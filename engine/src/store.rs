@@ -229,6 +229,71 @@ impl S3Store {
         Ok(())
     }
 
+    /// All meta objects under `prefix` as (logical, etag), paginating.
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        use rusty_s3::S3Action;
+        let root = "v1/files/";
+        let mut out = Vec::new();
+        let mut continuation: Option<String> = None;
+        loop {
+            let mut action = self.bucket.list_objects_v2(Some(&self.credentials));
+            action.query_mut().insert("prefix", prefix);
+            if let Some(token) = &continuation {
+                action.query_mut().insert("continuation-token", token.clone());
+            }
+            let url = action.sign(SIGN_TTL);
+            let text = self
+                .agent
+                .get(url.as_str())
+                .call()
+                .map_err(|e| clean_s3_err("list", e))?
+                .into_string()?;
+            let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&text)
+                .context("parse LIST response")?;
+            for obj in parsed.contents {
+                // Keys arrive URL-encoded (encoding-type=url): v1%2Ffiles%2F...
+                let key = percent_encoding::percent_decode_str(&obj.key)
+                    .decode_utf8_lossy()
+                    .into_owned();
+                if let Some(base) = key.strip_suffix(META_SUFFIX) {
+                    if let Some(logical) = base.strip_prefix(root) {
+                        out.push((logical.to_string(), obj.etag.clone()));
+                    }
+                }
+            }
+            match parsed.next_continuation_token {
+                Some(token) => continuation = Some(token),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// One delimiter request: the tool namespaces under v1/files/ (e.g.
+    /// claude/, vscode/, shared/) so they can be listed in parallel.
+    fn top_prefixes(&self) -> Result<Vec<String>> {
+        use rusty_s3::S3Action;
+        let mut action = self.bucket.list_objects_v2(Some(&self.credentials));
+        action.query_mut().insert("prefix", "v1/files/");
+        action.query_mut().insert("delimiter", "/");
+        let url = action.sign(SIGN_TTL);
+        let text = self
+            .agent
+            .get(url.as_str())
+            .call()
+            .map_err(|e| clean_s3_err("list", e))?
+            .into_string()?;
+        let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&text)
+            .context("parse LIST response")?;
+        Ok(parsed
+            .common_prefixes
+            .into_iter()
+            .map(|p| {
+                percent_encoding::percent_decode_str(&p.prefix).decode_utf8_lossy().into_owned()
+            })
+            .collect())
+    }
+
     /// Enable the persistent listing cache (app data dir file).
     pub fn with_list_cache(mut self, path: PathBuf) -> Self {
         self.list_cache = Some(path);
@@ -351,44 +416,23 @@ impl SyncStore for S3Store {
     }
 
     fn list(&self) -> Result<Vec<(String, RemoteMeta)>> {
-        use rusty_s3::S3Action;
-        let prefix = "v1/files/";
-        let mut out = Vec::new();
-        let mut continuation: Option<String> = None;
-        loop {
-            let mut action = self.bucket.list_objects_v2(Some(&self.credentials));
-            action.query_mut().insert("prefix", prefix);
-            if let Some(token) = &continuation {
-                action.query_mut().insert("continuation-token", token.clone());
-            }
-            let url = action.sign(SIGN_TTL);
-            let text = self
-                .agent
-                .get(url.as_str())
-                .call()
-                .map_err(|e| clean_s3_err("list", e))?
-                .into_string()?;
-            let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&text)
-                .context("parse LIST response")?;
-            for obj in parsed.contents {
-                // Keys arrive URL-encoded (encoding-type=url): v1%2Ffiles%2F...
-                let key = percent_encoding::percent_decode_str(&obj.key)
-                    .decode_utf8_lossy()
-                    .into_owned();
-                if let Some(base) = key.strip_suffix(META_SUFFIX) {
-                    if let Some(logical) = base.strip_prefix(prefix) {
-                        out.push((logical.to_string(), obj.etag.clone()));
-                    }
-                }
-            }
-            match parsed.next_continuation_token {
-                Some(token) => continuation = Some(token),
-                None => break,
-            }
-        }
+        use rayon::prelude::*;
+        // Namespaces paginate independently — list them concurrently instead
+        // of one serial page walk across the whole store.
+        let prefixes = self.top_prefixes().unwrap_or_default();
+        let out: Vec<(String, String)> = if prefixes.is_empty() {
+            self.list_prefix("v1/files/")?
+        } else {
+            prefixes
+                .par_iter()
+                .map(|p| self.list_prefix(p))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect()
+        };
         // Serve unchanged sidecars from the ETag-validated cache; fetch only
         // the changed/unknown ones in parallel (serially this dominated sync).
-        use rayon::prelude::*;
         let mut cache = self.load_list_cache();
         let (hits, misses): (Vec<_>, Vec<_>) = out
             .into_iter()
