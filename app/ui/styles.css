@@ -133,6 +133,9 @@ header {
   letter-spacing: -0.1px;
 }
 .status-pill {
+  /* The main page has no app-name heading — the tray icon already says
+     which app this is; the pill alone keeps to the right edge. */
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 5px;
