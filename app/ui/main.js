@@ -173,6 +173,7 @@ function updateMapAdd() {
 function applySettings(s) {
 	$("opt-autostart").checked = s.autostart;
 	$("opt-autosync").checked = s.autosync;
+	$("opt-debuglog").checked = s.debugLogging;
 	$("autosync-sub").textContent = `Sync every ${fmtInterval(s.autosyncIntervalMins)}`;
 	autosyncMins = s.autosyncIntervalMins;
 	autosyncOn = s.autosync;
@@ -691,6 +692,11 @@ window.addEventListener("DOMContentLoaded", async () => {
 		}
 		updateMapAdd();
 	});
+	$("opt-debuglog").addEventListener("change", (e) =>
+		invoke("set_debug_logging", { enabled: e.target.checked }).catch(
+			() => (e.target.checked = !e.target.checked),
+		),
+	);
 	$("opt-autostart").addEventListener("change", (e) =>
 		invoke("set_autostart", { enabled: e.target.checked }).catch(
 			() => (e.target.checked = !e.target.checked),
