@@ -133,9 +133,6 @@ header {
   letter-spacing: -0.1px;
 }
 .status-pill {
-  /* The main page has no app-name heading — the tray icon already says
-     which app this is; the pill alone keeps to the right edge. */
-  margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -169,22 +166,36 @@ header {
   line-height: 1.5;
   color: var(--text-2);
 }
-/* The 2x2 grid applies ONLY to the main page's status area — other
-   .substatus uses (tool detail header) are plain single-line text. */
-#substatus {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  column-gap: 10px;
+/* Header: facts stacked left, status stacked right — no heading row.
+   (The tray icon already identifies the app.) */
+.head-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
 }
-/* Second column (Auto-sync) right-aligns under the status pill. */
-#substatus > span:nth-child(2):not(.span-2) {
-  text-align: right;
+.head-row .substatus {
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0; /* lets the location line ellipsize instead of pushing */
 }
-.substatus .span-2 {
-  grid-column: 1 / -1;
+#substatus .loc-line,
+#substatus .span-2 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.head-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.head-right .substatus {
+  margin-top: 0;
 }
 .substatus .kv-label {
   color: var(--text-3);
