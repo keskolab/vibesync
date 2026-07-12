@@ -3,7 +3,29 @@
 // be filled from a backend call or left empty until one succeeds.
 
 const tauri = window.__TAURI__;
-const invoke = (cmd, args) => tauri.core.invoke(cmd, args);
+// Every user action flows through invoke — tap it so the debug log traces
+// ANY button, current or future. Passive reads stay silent; commands that
+// carry credentials log their name only.
+const TRACE_SILENT = new Set([
+	"log_ui",
+	"get_status",
+	"get_settings",
+	"is_syncing",
+	"engine_version",
+	"fit_popover",
+	"position_popover",
+]);
+const TRACE_NAME_ONLY = new Set(["set_store", "test_store"]);
+const logUi = (action) => {
+	tauri.core.invoke("log_ui", { action }).catch(() => {});
+};
+const invoke = (cmd, args) => {
+	if (!TRACE_SILENT.has(cmd)) {
+		const safe = TRACE_NAME_ONLY.has(cmd) || !args ? "" : ` ${JSON.stringify(args)}`;
+		logUi(`${cmd}${safe}`);
+	}
+	return tauri.core.invoke(cmd, args);
+};
 const $ = (id) => document.getElementById(id);
 const IS_MAC = /Mac/i.test(navigator.platform || navigator.userAgent);
 const DEVICE = IS_MAC ? "Mac" : "PC";
@@ -101,6 +123,7 @@ function statCards(el, items) {
 let currentPage = 0;
 
 function goTo(page) {
+	logUi(`navigate ${["main", "tool detail", "settings"][page] || page}`);
 	currentPage = page;
 	$("pages").style.transform = `translateX(${-page * (100 / 3)}%)`;
 	fitWindow();

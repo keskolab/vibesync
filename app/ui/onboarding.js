@@ -2,6 +2,11 @@
 // to the chosen storage: folders skip the passphrase; cloud requires one.
 
 const tauri = window.__TAURI__;
+// Same UI trace tap as the main window (see main.js): name-only for
+// credential-carrying commands.
+const obLogUi = (action) => {
+	tauri?.core.invoke("log_ui", { action: `onboarding: ${action}` }).catch(() => {});
+};
 const IS_MAC = /Mac/i.test(navigator.platform || navigator.userAgent);
 const DEVICE = IS_MAC ? "Mac" : "PC";       // "this Mac" / "this PC"
 const DEVICES = IS_MAC ? "Macs" : "computers"; // "your Macs" / "your computers"
@@ -187,6 +192,7 @@ function renderConfigure() {
     if (!store) { r.textContent = "Fill in all fields first"; r.style.color = "var(--destructive)"; r.classList.add("show"); return; }
     r.textContent = "Testing\u2026"; r.style.color = "var(--text-2)"; r.classList.add("show");
     try {
+      obLogUi("test_store");
       const hasData = await tauri?.core.invoke("test_store", { store, passphrase: chosen.passphrase || "test" });
       r.textContent = hasData ? "\u2713 Connected \u2014 existing sync data found" : "\u2713 Connected \u2014 empty store, ready for first sync";
       r.style.color = "var(--ok)";
@@ -338,6 +344,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   $("ob-next").addEventListener("click", () => {
     if (step === STEPS - 1) {
+      obLogUi(`finish setup (storage: ${storage})`);
       tauri?.event.emit("setup-complete", {
         store: buildStore(),
         passphrase: needsPassphrase() ? chosen.passphrase || null : null,

@@ -366,7 +366,7 @@ pub fn default_config() -> Result<AppConfig> {
     })
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolStatus {
     pub id: &'static str,
@@ -590,66 +590,40 @@ pub fn status(paths: &Paths) -> Result<Status> {
             let (vs_sessions, vs_bytes, vs_projects, vs_last) = engine::vscode::light_counts();
             vec![
                 ToolStatus {
-                    id: CLAUDE_CODE.id,
-                    name: CLAUDE_CODE.name,
-                    installed,
-                    enabled: claude_enabled,
-                    sessions,
-                    plans,
-                    projects: claude_projects,
-                    bytes,
-                    agents: claude_agents,
-                    skills: claude_skills,
-                    last_activity_ms: claude_last,
-                    new_items: 0,
-                    new_ms: None,
-                    new_seen: false,
-                    new_sources: Default::default(),
+                    id: CLAUDE_CODE.id, name: CLAUDE_CODE.name, installed,
+                    enabled: claude_enabled, sessions, plans, projects: claude_projects,
+                    bytes, agents: claude_agents, skills: claude_skills,
+                    last_activity_ms: claude_last, ..Default::default()
                 },
                 ToolStatus {
-                    id: "vscode",
-                    name: "VS Code",
-                    installed: engine::vscode::detect(),
-                    enabled: enabled_for("vscode"),
-                    sessions: vs_sessions,
-                    plans: 0,
-                    projects: vs_projects,
-                    bytes: vs_bytes,
-                    agents: 0,
-                    skills: 0,
-                    last_activity_ms: vs_last,
-                    new_items: 0,
-                    new_ms: None,
-                    new_seen: false,
-                    new_sources: Default::default(),
+                    id: "vscode", name: "VS Code", installed: engine::vscode::detect(),
+                    enabled: enabled_for("vscode"), sessions: vs_sessions,
+                    projects: vs_projects, bytes: vs_bytes, last_activity_ms: vs_last,
+                    ..Default::default()
                 },
                 {
                     let (n, b, p, last) = engine::codex::light_counts(&home);
                     ToolStatus { id: "codex", name: "Codex", installed: engine::codex::detect(&home),
-                        enabled: enabled_for("codex"), sessions: n, plans: 0, projects: p,
-                        bytes: b, agents: 0, skills: 0, last_activity_ms: last,
-                        new_items: 0, new_ms: None, new_seen: false, new_sources: Default::default() }
+                        enabled: enabled_for("codex"), sessions: n, projects: p, bytes: b,
+                        last_activity_ms: last, ..Default::default() }
                 },
                 {
                     let (n, b, p, last) = engine::opencode::light_counts(&home);
                     ToolStatus { id: "opencode", name: "OpenCode", installed: engine::opencode::detect(&home),
-                        enabled: enabled_for("opencode"), sessions: n, plans: 0, projects: p,
-                        bytes: b, agents: 0, skills: 0, last_activity_ms: last,
-                        new_items: 0, new_ms: None, new_seen: false, new_sources: Default::default() }
+                        enabled: enabled_for("opencode"), sessions: n, projects: p, bytes: b,
+                        last_activity_ms: last, ..Default::default() }
                 },
                 {
                     let (n, b, p) = engine::zed::light_counts();
                     ToolStatus { id: "zed", name: "Zed", installed: engine::zed::detect(),
-                        enabled: enabled_for("zed"), sessions: n, plans: 0, projects: p,
-                        bytes: b, agents: 0, skills: 0, last_activity_ms: None,
-                        new_items: 0, new_ms: None, new_seen: false, new_sources: Default::default() }
+                        enabled: enabled_for("zed"), sessions: n, projects: p, bytes: b,
+                        ..Default::default() }
                 },
                 {
                     let (n, b, last) = engine::copilot::light_counts(&home);
                     ToolStatus { id: "copilot", name: "Copilot CLI", installed: engine::copilot::detect(&home),
-                        enabled: enabled_for("copilot"), sessions: n, plans: 0, projects: 0,
-                        bytes: b, agents: 0, skills: 0, last_activity_ms: last,
-                        new_items: 0, new_ms: None, new_seen: false, new_sources: Default::default() }
+                        enabled: enabled_for("copilot"), sessions: n, bytes: b,
+                        last_activity_ms: last, ..Default::default() }
                 },
             ]
         },
@@ -752,37 +726,34 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // Codex/... host it never was. Purge undetected tools from sync state so
     // installing the tool later re-pulls everything fresh.
     dlog.info("step: detecting installed tools");
-    let claude_inst = home.join(".claude").is_dir();
-    let vscode_inst = engine::vscode::detect();
-    let codex_inst = engine::codex::detect(&home);
-    let opencode_inst = engine::opencode::detect(&home);
-    let zed_inst = engine::zed::detect();
-    let copilot_inst = engine::copilot::detect(&home);
-    for (inst, prefix) in [
-        (claude_inst, "claude/"),
-        (vscode_inst, "vscode/"),
-        (codex_inst, "codex/"),
-        (opencode_inst, "opencode/"),
-        (zed_inst, "zed/"),
-        (copilot_inst, "copilot/"),
-    ] {
+    let tools = tool_runs();
+    // (installed, enabled) per table entry, table order.
+    let tool_state: Vec<(bool, bool)> = tools
+        .iter()
+        .map(|t| {
+            let inst = (t.detect)(&home);
+            let enabled = match t.scope {
+                Some(scope) => !config.disabled_scopes.iter().any(|s| s == scope),
+                None => on(t.id),
+            };
+            (inst, enabled)
+        })
+        .collect();
+    for (t, (inst, enabled)) in tools.iter().zip(&tool_state) {
+        // Never sync a tool onto a machine where it isn't installed; purge
+        // its sync state so a later install re-pulls fresh.
         if !inst {
-            state.files.retain(|k, _| !k.starts_with(prefix));
+            if let Some(prefix) = t.purge_prefix {
+                state.files.retain(|k, _| !k.starts_with(prefix));
+            }
         }
-    }
-    for (id, inst, enabled) in [
-        ("claude-code", claude_inst, on("claude-code")),
-        ("vscode", vscode_inst, on("vscode")),
-        ("codex", codex_inst, on("codex")),
-        ("opencode", opencode_inst, on("opencode")),
-        ("zed", zed_inst, on("zed")),
-        ("copilot", copilot_inst, on("copilot")),
-    ] {
         dlog.info(format!(
-            "tool {id}: installed={} switch={}{}",
-            if inst { "yes" } else { "no" },
-            if enabled { "on" } else { "OFF" },
-            if inst && enabled { " -> syncing" } else { " -> skipped" }
+            "tool {} ({}): installed={} switch={}{}",
+            t.id,
+            t.name,
+            if *inst { "yes" } else { "no" },
+            if *enabled { "on" } else { "OFF" },
+            if *inst && *enabled { " -> syncing" } else { " -> skipped" }
         ));
     }
     dlog.info(format!(
@@ -793,59 +764,36 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         if config.sync_registry { "on" } else { "off" },
         config.disabled_scopes
     ));
-    let claude_on = on("claude-code") && claude_inst;
-    let vscode_on = on("vscode") && vscode_inst;
-    let codex_on = on("codex") && codex_inst;
-    let opencode_on = on("opencode") && opencode_inst;
-    let zed_on = on("zed") && zed_inst;
-    let copilot_on = on("copilot") && copilot_inst;
+    let runs = |id: &str| {
+        tools
+            .iter()
+            .zip(&tool_state)
+            .find(|(t, _)| t.id == id)
+            .map(|(_, (i, e))| *i && *e)
+            .unwrap_or(false)
+    };
+    let claude_on = runs("claude-code");
     // All config dirs: ~/.claude plus auto-detected ~/.claude-* profiles.
     let dirs = engine::adapters::Adapter::detect_config_dirs(&home);
     dlog.info("step: scanning local files");
     let scan_t0 = std::time::Instant::now();
     let mut entries = Vec::new();
-    let mut scan_mark = 0usize;
-    let scan_clock = std::cell::Cell::new(std::time::Instant::now());
-    let scan_log = |dlog: &DebugLog, label: &str, entries: &Vec<engine::FileEntry>, mark: &mut usize| {
-        dlog.info(format!(
-            "scan {label}: {} files in {} ms",
-            entries.len() - *mark,
-            scan_clock.get().elapsed().as_millis()
-        ));
-        *mark = entries.len();
-        scan_clock.set(std::time::Instant::now());
-    };
-    if claude_on {
-        for dir in &dirs {
-            entries.extend(CLAUDE_CODE.scan_dir(&home, dir, &tok, include_plugins)?);
+    let scan_env = ScanEnv { home: &home, dirs: &dirs, tok: &tok, include_plugins };
+    for (t, (inst, enabled)) in tools.iter().zip(&tool_state) {
+        let Some(scan) = t.scan else { continue };
+        if !(*inst && *enabled) {
+            continue;
         }
+        let before = entries.len();
+        let t0 = std::time::Instant::now();
+        entries.extend(scan(&scan_env, &mut state)?);
+        dlog.info(format!(
+            "scan {}: {} files in {} ms",
+            t.id,
+            entries.len() - before,
+            t0.elapsed().as_millis()
+        ));
     }
-    scan_log(&dlog, "claude", &entries, &mut scan_mark);
-    if vscode_on {
-        entries.extend(engine::vscode::scan(&home)?);
-    }
-    scan_log(&dlog, "vscode", &entries, &mut scan_mark);
-    if codex_on {
-        entries.extend(engine::codex::scan(&home)?);
-        state.mark_deletions(engine::codex::SESSIONS_PREFIX, &entries);
-    }
-    scan_log(&dlog, "codex", &entries, &mut scan_mark);
-    if opencode_on {
-        entries.extend(engine::opencode::scan(&home)?);
-        state.mark_deletions(engine::opencode::PREFIX, &entries);
-    }
-    scan_log(&dlog, "opencode", &entries, &mut scan_mark);
-    if copilot_on {
-        entries.extend(engine::copilot::scan(&home)?);
-        state.mark_deletions(engine::copilot::PREFIX, &entries);
-    }
-    scan_log(&dlog, "copilot", &entries, &mut scan_mark);
-    let shared_on = !config.disabled_scopes.iter().any(|s| s == "shared");
-    if shared_on {
-        entries.extend(engine::adapters::SHARED_SKILLS.scan(&home, &tok, false)?);
-        state.mark_deletions("shared/skills", &entries);
-    }
-    scan_log(&dlog, "shared skills", &entries, &mut scan_mark);
     // Per-scope switches: drop disabled scopes from the push set.
     let off: Vec<String> = config.disabled_scopes.clone();
     entries.retain(|e| scope_of(&e.logical).map(|s| !off.iter().any(|o| o == s)).unwrap_or(true));
@@ -861,7 +809,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             }
         }
     }
-    if vscode_on {
+    if runs("vscode") {
         state.mark_deletions("vscode/ws", &entries);
     }
 
@@ -945,7 +893,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     let pulled_bytes = std::sync::atomic::AtomicU64::new(0);
     let mut pull = engine::Report::default();
     // Provenance: every pulled object's store meta names the machine that
-    // uploaded it. Applies call record_pull(logical) on each real apply.
+    // uploaded it. Applies call record(logical) on each real apply.
     let source_of: std::collections::HashMap<&str, (&str, u64)> =
         listing.iter().map(|(l, m)| (l.as_str(), (m.source.as_str(), m.size))).collect();
     let this_machine = canon_machine(&engine::machine_name());
@@ -976,108 +924,66 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         }
         *registry_arrivals.lock().unwrap().entry(src).or_default() += 1;
     };
-    if codex_on {
-        if let Err(e) = engine::codex::push_index(&home, &engine::machine_name(), &mut state, store.as_ref()) {
-            dlog.error(format!("codex: publishing session index failed: {e:#}"));
+    // ONE loop for every tool: publish, apply, count, log — identically.
+    let apply_env = ApplyEnv {
+        home: &home,
+        dirs: &dirs,
+        tok: &tok,
+        include_plugins,
+        off_scopes: &off,
+        vscode_index: !config.disabled_scopes.iter().any(|s| s == "vscode-index"),
+        machine: &machine,
+        store: store.as_ref(),
+        listing: &listing,
+        tick: &tick,
+        record: &record_pull,
+    };
+    let mut tool_errors: Vec<String> = Vec::new();
+    for (t, (inst, enabled)) in tools.iter().zip(&tool_state) {
+        if !(*inst && *enabled) {
+            continue;
         }
-        match engine::codex::apply(&home, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
-            Err(e) => dlog.error(format!("codex: apply failed: {e:#}")),
-            Ok(r) => {
-                pull.pulled += r.pulled;
-                pull.unchanged += r.unchanged;
-                pull.skipped_newer_local += r.skipped_newer_local;
-            }
-        }
-    }
-    if opencode_on {
-        match engine::opencode::apply(&home, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
-            Err(e) => dlog.error(format!("opencode: file-layer apply failed: {e:#}")),
-            Ok(r) => {
-                pull.pulled += r.pulled;
-                pull.unchanged += r.unchanged;
-                pull.skipped_newer_local += r.skipped_newer_local;
-            }
-        }
-        // db layer: modern OpenCode keeps sessions ONLY in opencode.db.
-        if let Err(e) = engine::opencode::db_push(&home, &tok, &mut state, store.as_ref(), &engine::machine_name()) {
-            dlog.error(format!("opencode: exporting sessions from opencode.db failed: {e:#}"));
-        }
-        match engine::opencode::db_apply(&home, &tok, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
-            Err(e) => dlog.error(format!("opencode: merging sessions into opencode.db failed: {e:#}")),
-            Ok(r) => {
-                pull.pulled += r.applied;
-                pull.unchanged += r.unchanged;
-                pull.skipped_newer_local += r.skipped_newer_local;
-                if r.parked > 0 {
-                    dlog.warn(format!(
-                        "opencode: {} sessions parked (project folder not on this machine yet)",
-                        r.parked
-                    ));
+        if let Some(publish) = t.publish {
+            match publish(&apply_env, &mut state) {
+                Ok(n) => push.pushed += n,
+                Err(e) => {
+                    dlog.error(format!("{}: publish failed: {e:#}", t.id));
+                    tool_errors.push(format!("{}: publish failed", t.id));
                 }
             }
         }
-    }
-    if copilot_on {
-        match engine::copilot::apply(&home, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
-            Err(e) => dlog.error(format!("copilot: apply failed: {e:#}")),
+        let t0 = std::time::Instant::now();
+        match (t.apply)(&apply_env, &mut state) {
+            Err(e) => {
+                dlog.error(format!("{}: apply failed: {e:#}", t.id));
+                tool_errors.push(format!("{}: {e:#}", t.id));
+            }
             Ok(r) => {
+                if r.pulled > 0 {
+                    dlog.info(format!(
+                        "{}: {} applied, {} unchanged in {} ms",
+                        t.id,
+                        r.pulled,
+                        r.unchanged,
+                        t0.elapsed().as_millis()
+                    ));
+                }
+                if r.parked > 0 {
+                    dlog.warn(format!(
+                        "{}: {} items parked (project not on this machine yet)",
+                        t.id, r.parked
+                    ));
+                }
+                for err in &r.errors {
+                    dlog.error(format!("{}: {err}", t.id));
+                    tool_errors.push(format!("{}: {err}", t.id));
+                }
                 pull.pulled += r.pulled;
                 pull.unchanged += r.unchanged;
                 pull.skipped_newer_local += r.skipped_newer_local;
+                pull.skipped_deleted += r.skipped_deleted;
             }
         }
-    }
-    if zed_on {
-        // Zed rows are pushed here, not via the generic entry scan — its scan
-        // yields db rows, not files. This call was missing entirely: no
-        // machine ever published a thread, so the store's zed/ namespace
-        // stayed empty fleet-wide.
-        match engine::zed::push(&home, &mut state, store.as_ref(), &engine::machine_name()) {
-            Err(e) => dlog.error(format!("zed: publishing threads failed: {e:#}")),
-            Ok(n) => push.pushed += n,
-        }
-        match engine::zed::apply(&home, &mut state, store.as_ref(), &listing, &tick, &record_pull) {
-            Err(e) => dlog.error(format!("zed: merging threads failed: {e:#}")),
-            Ok(r) => {
-                pull.pulled += r.applied;
-                pull.unchanged += r.unchanged;
-                pull.skipped_newer_local += r.skipped_newer_local;
-            }
-        }
-    }
-    if vscode_on {
-        let r = engine::vscode::apply(
-            store.as_ref(),
-            &mut state,
-            &home,
-            !config.disabled_scopes.iter().any(|s| s == "vscode-index"),
-            &listing,
-            &tick,
-            &record_pull,
-        )?;
-        pull.pulled += r.applied;
-        pull.unchanged += r.unchanged;
-        pull.skipped_newer_local += r.skipped_newer_local;
-    }
-    if shared_on {
-        let r = engine::sync::pull_dir(
-            &engine::adapters::SHARED_SKILLS, &home, ".claude", &tok, &mut state,
-            store.as_ref(), false, &|_| false, &listing, &tick, &record_pull,
-        )?;
-        pull.pulled += r.pulled;
-        pull.unchanged += r.unchanged;
-        pull.skipped_newer_local += r.skipped_newer_local;
-    }
-    for dir in dirs.iter().filter(|_| claude_on) {
-        let r = engine::sync::pull_dir(
-            &CLAUDE_CODE, &home, dir, &tok, &mut state, store.as_ref(), include_plugins,
-            &|logical| scope_of(logical).map(|s| off.iter().any(|o| o == s)).unwrap_or(false),
-            &listing, &tick, &record_pull,
-        )?;
-        pull.pulled += r.pulled;
-        pull.skipped_newer_local += r.skipped_newer_local;
-        pull.skipped_deleted += r.skipped_deleted;
-        pull.unchanged += r.unchanged;
     }
     {
         let ms = pull_t0.elapsed().as_millis().max(1);
@@ -1165,6 +1071,12 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     ));
     engine::dlog::set_sink(None);
 
+    // Partial failure: everything that could sync did (and is recorded), but
+    // the outcome must say so instead of a green "Synced".
+    if !tool_errors.is_empty() {
+        anyhow::bail!("{} tool(s) failed to sync: {}", tool_errors.len(), tool_errors.join("; "));
+    }
+
     Ok(SyncOutcome {
         pushed: push.pushed,
         pulled: pull.pulled,
@@ -1209,20 +1121,264 @@ fn canon_machine(name: &str) -> String {
     name.to_string()
 }
 
+// ---------------------------------------------------------------- tools
+//
+// ONE table drives everything per-tool: detection (and state purge when a
+// tool isn't installed), the enable switch, scanning, push-side publishing
+// (db exports, index publish), and applying. Adding an adapter = adding one
+// entry; the sync loop gives it the same tracing, timing, and error
+// surfacing as every other tool automatically.
+
+/// Store-namespace prefix -> tool id (badges, provenance, the table below).
+const TOOL_PREFIXES: &[(&str, &str)] = &[
+    ("claude", "claude-code"),
+    ("vscode", "vscode"),
+    ("codex", "codex"),
+    ("opencode", "opencode"),
+    ("zed", "zed"),
+    ("copilot", "copilot"),
+    ("shared", "shared"),
+];
+
 /// Which tool card a store path belongs to (for badges/provenance).
-/// NOTE: new adapters must be added here too, or their arrivals silently get
-/// no badge/provenance.
 fn tool_of(logical: &str) -> Option<&'static str> {
-    Some(match logical.split('/').next()? {
-        "claude" => "claude-code",
-        "vscode" => "vscode",
-        "codex" => "codex",
-        "opencode" => "opencode",
-        "zed" => "zed",
-        "copilot" => "copilot",
-        "shared" => "shared",
-        _ => return None,
+    let ns = logical.split('/').next()?;
+    TOOL_PREFIXES.iter().find(|(p, _)| *p == ns).map(|(_, id)| *id)
+}
+
+#[derive(Debug, Default)]
+struct GenReport {
+    pulled: usize,
+    unchanged: usize,
+    skipped_newer_local: usize,
+    skipped_deleted: usize,
+    parked: usize,
+    /// Step-specific failures where the tool still made partial progress
+    /// (e.g. opencode file layer ok, db merge failed). Logged per line and
+    /// counted toward the sync's overall failure.
+    errors: Vec<String>,
+}
+
+struct ScanEnv<'a> {
+    home: &'a std::path::Path,
+    dirs: &'a [String],
+    tok: &'a engine::Tokenizer,
+    include_plugins: bool,
+}
+
+struct ApplyEnv<'a> {
+    home: &'a std::path::Path,
+    dirs: &'a [String],
+    tok: &'a engine::Tokenizer,
+    include_plugins: bool,
+    off_scopes: &'a [String],
+    vscode_index: bool,
+    machine: &'a str,
+    store: &'a dyn engine::SyncStore,
+    listing: &'a [(String, engine::RemoteMeta)],
+    tick: &'a (dyn Fn() + Sync),
+    record: &'a (dyn Fn(&str) + Sync),
+}
+
+struct ToolRun {
+    id: &'static str,
+    name: &'static str,
+    /// Purged from sync state when the tool isn't installed (None = never,
+    /// e.g. shared skills are cross-tool by design).
+    purge_prefix: Option<&'static str>,
+    /// Enabled by a scope instead of a tool switch (shared skills).
+    scope: Option<&'static str>,
+    detect: fn(&std::path::Path) -> bool,
+    scan: Option<fn(&ScanEnv, &mut engine::SyncState) -> Result<Vec<engine::FileEntry>>>,
+    publish: Option<fn(&ApplyEnv, &mut engine::SyncState) -> Result<usize>>,
+    apply: fn(&ApplyEnv, &mut engine::SyncState) -> Result<GenReport>,
+}
+
+fn d_claude(home: &std::path::Path) -> bool {
+    home.join(".claude").is_dir()
+}
+fn d_vscode(_: &std::path::Path) -> bool {
+    engine::vscode::detect()
+}
+fn d_zed(_: &std::path::Path) -> bool {
+    engine::zed::detect()
+}
+fn d_always(_: &std::path::Path) -> bool {
+    true
+}
+
+fn scan_claude(env: &ScanEnv, _state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
+    let mut out = Vec::new();
+    for dir in env.dirs {
+        out.extend(CLAUDE_CODE.scan_dir(env.home, dir, env.tok, env.include_plugins)?);
+    }
+    Ok(out)
+}
+fn scan_vscode(env: &ScanEnv, _state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
+    engine::vscode::scan(env.home)
+}
+fn scan_codex(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
+    let out = engine::codex::scan(env.home)?;
+    state.mark_deletions(engine::codex::SESSIONS_PREFIX, &out);
+    Ok(out)
+}
+fn scan_opencode(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
+    let out = engine::opencode::scan(env.home)?;
+    state.mark_deletions(engine::opencode::PREFIX, &out);
+    Ok(out)
+}
+fn scan_copilot(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
+    let out = engine::copilot::scan(env.home)?;
+    state.mark_deletions(engine::copilot::PREFIX, &out);
+    Ok(out)
+}
+fn scan_shared(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
+    let out = engine::adapters::SHARED_SKILLS.scan(env.home, env.tok, false)?;
+    state.mark_deletions("shared/skills", &out);
+    Ok(out)
+}
+
+fn publish_codex(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
+    engine::codex::push_index(env.home, env.machine, state, env.store)?;
+    Ok(0)
+}
+fn publish_opencode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
+    engine::opencode::db_push(env.home, env.tok, state, env.store, env.machine)
+}
+fn publish_zed(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
+    engine::zed::push(env.home, state, env.store, env.machine)
+}
+
+fn apply_claude(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
+    let mut g = GenReport::default();
+    for dir in env.dirs {
+        let r = engine::sync::pull_dir(
+            &CLAUDE_CODE,
+            env.home,
+            dir,
+            env.tok,
+            state,
+            env.store,
+            env.include_plugins,
+            &|logical| {
+                scope_of(logical)
+                    .map(|s| env.off_scopes.iter().any(|o| o == s))
+                    .unwrap_or(false)
+            },
+            env.listing,
+            env.tick,
+            env.record,
+        )?;
+        g.pulled += r.pulled;
+        g.unchanged += r.unchanged;
+        g.skipped_newer_local += r.skipped_newer_local;
+        g.skipped_deleted += r.skipped_deleted;
+    }
+    Ok(g)
+}
+fn apply_vscode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
+    let r = engine::vscode::apply(
+        env.store,
+        state,
+        env.home,
+        env.vscode_index,
+        env.listing,
+        env.tick,
+        env.record,
+    )?;
+    Ok(GenReport {
+        pulled: r.applied,
+        unchanged: r.unchanged,
+        skipped_newer_local: r.skipped_newer_local,
+        ..Default::default()
     })
+}
+fn apply_codex(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
+    let r = engine::codex::apply(env.home, state, env.store, env.listing, env.tick, env.record)?;
+    Ok(GenReport {
+        pulled: r.pulled,
+        unchanged: r.unchanged,
+        skipped_newer_local: r.skipped_newer_local,
+        ..Default::default()
+    })
+}
+fn apply_opencode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
+    // The two layers are independent: a failure in one must not skip the
+    // other or discard its counts.
+    let mut g = GenReport::default();
+    match engine::opencode::apply(env.home, state, env.store, env.listing, env.tick, env.record) {
+        Ok(f) => {
+            g.pulled += f.pulled;
+            g.unchanged += f.unchanged;
+            g.skipped_newer_local += f.skipped_newer_local;
+        }
+        Err(e) => g.errors.push(format!("file-layer apply failed: {e:#}")),
+    }
+    match engine::opencode::db_apply(
+        env.home, env.tok, state, env.store, env.listing, env.tick, env.record,
+    ) {
+        Ok(d) => {
+            g.pulled += d.applied;
+            g.unchanged += d.unchanged;
+            g.skipped_newer_local += d.skipped_newer_local;
+            g.parked += d.parked;
+        }
+        Err(e) => g.errors.push(format!("merging into opencode.db failed: {e:#}")),
+    }
+    Ok(g)
+}
+fn apply_copilot(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
+    let r = engine::copilot::apply(env.home, state, env.store, env.listing, env.tick, env.record)?;
+    Ok(GenReport {
+        pulled: r.pulled,
+        unchanged: r.unchanged,
+        skipped_newer_local: r.skipped_newer_local,
+        ..Default::default()
+    })
+}
+fn apply_zed(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
+    let r = engine::zed::apply(env.home, state, env.store, env.listing, env.tick, env.record)?;
+    Ok(GenReport {
+        pulled: r.applied,
+        unchanged: r.unchanged,
+        skipped_newer_local: r.skipped_newer_local,
+        ..Default::default()
+    })
+}
+fn apply_shared(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
+    let r = engine::sync::pull_dir(
+        &engine::adapters::SHARED_SKILLS,
+        env.home,
+        ".claude",
+        env.tok,
+        state,
+        env.store,
+        false,
+        &|_| false,
+        env.listing,
+        env.tick,
+        env.record,
+    )?;
+    Ok(GenReport {
+        pulled: r.pulled,
+        unchanged: r.unchanged,
+        skipped_newer_local: r.skipped_newer_local,
+        skipped_deleted: r.skipped_deleted,
+        ..Default::default()
+    })
+}
+
+/// The one list the sync loop walks — scan order and apply order alike.
+fn tool_runs() -> Vec<ToolRun> {
+    vec![
+        ToolRun { id: "claude-code", name: "Claude Code", purge_prefix: Some("claude/"), scope: None, detect: d_claude, scan: Some(scan_claude), publish: None, apply: apply_claude },
+        ToolRun { id: "vscode", name: "VS Code", purge_prefix: Some("vscode/"), scope: None, detect: d_vscode, scan: Some(scan_vscode), publish: None, apply: apply_vscode },
+        ToolRun { id: "codex", name: "Codex", purge_prefix: Some("codex/"), scope: None, detect: engine::codex::detect, scan: Some(scan_codex), publish: Some(publish_codex), apply: apply_codex },
+        ToolRun { id: "opencode", name: "OpenCode", purge_prefix: Some("opencode/"), scope: None, detect: engine::opencode::detect, scan: Some(scan_opencode), publish: Some(publish_opencode), apply: apply_opencode },
+        ToolRun { id: "copilot", name: "Copilot CLI", purge_prefix: Some("copilot/"), scope: None, detect: engine::copilot::detect, scan: Some(scan_copilot), publish: None, apply: apply_copilot },
+        ToolRun { id: "zed", name: "Zed", purge_prefix: Some("zed/"), scope: None, detect: d_zed, scan: None, publish: Some(publish_zed), apply: apply_zed },
+        ToolRun { id: "shared", name: "Global skills", purge_prefix: None, scope: Some("shared"), detect: d_always, scan: Some(scan_shared), publish: None, apply: apply_shared },
+    ]
 }
 
 // ---------------------------------------------------------------- registry
