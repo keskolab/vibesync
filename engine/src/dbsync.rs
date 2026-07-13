@@ -54,15 +54,6 @@ fn table_cols(conn: &rusqlite::Connection, table: &str) -> Result<Vec<String>> {
     Ok(cols)
 }
 
-pub(crate) fn insert_map(
-    conn: &rusqlite::Connection,
-    table: &str,
-    map: &serde_json::Map<String, serde_json::Value>,
-    or_replace: bool,
-) -> Result<()> {
-    insert_map_pk(conn, table, map, or_replace, &[])
-}
-
 /// Like [`insert_map`], but when replacing an EXISTING row (looked up by
 /// `pk` columns) the incoming map is OVERLAID on the current row first —
 /// a sender on an older tool schema must never wipe columns it doesn't
