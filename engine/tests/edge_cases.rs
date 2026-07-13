@@ -358,6 +358,163 @@ fn vscode_index_reconcile_restores_clobbered_entries() {
     );
 }
 
+/// Live catch (VS Code Windows verification): a running VS Code holds
+/// state.vscdb, so the index merge hits SQLITE_BUSY. The apply must still
+/// place the session files without erroring, and the index must converge
+/// on the next sync once the db is free again.
+#[test]
+fn vscode_locked_index_converges_after_release() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = FolderStore::new(tmp.path().join("store"));
+    let home = tmp.path().join("home");
+    let tok = Tokenizer::with_case_sensitivity(&home.to_string_lossy(), cfg!(windows));
+
+    let root = tmp.path().join("ws_root");
+    let ws = root.join("bbbb0000");
+    std::fs::create_dir_all(ws.join("chatSessions")).unwrap();
+    std::fs::write(
+        ws.join("workspace.json"),
+        format!(
+            "{{\"folder\": \"file://{}/proj\"}}",
+            home.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+    {
+        let conn = rusqlite::Connection::open(ws.join("state.vscdb")).unwrap();
+        conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)", []).unwrap();
+    }
+    let session = "{\"chat\":1}\n";
+    store
+        .put(
+            "vscode/ws/${HOME}/proj/chatSessions/locked-1.jsonl",
+            session.as_bytes(),
+            &RemoteMeta {
+                hash: vibesync_engine::scanner::hash_bytes(session.as_bytes()),
+                mtime_ms: 123,
+                size: session.len() as u64,
+                source: "a".into(),
+            },
+        )
+        .unwrap();
+
+    // "VS Code is running": hold the db exclusively through the whole sync.
+    let lock = rusqlite::Connection::open(ws.join("state.vscdb")).unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let mut st = SyncState::default();
+    let r = vibesync_engine::vscode::apply_roots(&[root.clone()], &store, &mut st, &tok).unwrap();
+    assert_eq!(r.applied, 1, "files must land even when the index db is locked");
+    assert!(ws.join("chatSessions/locked-1.jsonl").exists());
+    drop(lock);
+
+    // Next sync with the db free: nothing new to pull, index converges.
+    let r = vibesync_engine::vscode::apply_roots(&[root], &store, &mut st, &tok).unwrap();
+    assert_eq!(r.applied, 0);
+    let conn = rusqlite::Connection::open(ws.join("state.vscdb")).unwrap();
+    let v: String = conn
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key='chat.ChatSessionStore.index'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let idx: serde_json::Value = serde_json::from_str(&v).unwrap();
+    assert!(
+        idx["entries"]["locked-1"].is_object(),
+        "index must converge on the sync after the lock clears: {idx}"
+    );
+}
+
+/// Live catch: Windows workspace URIs decode with a lowercase drive letter
+/// (`file:///c%3A/Temp/repo`) while the gitmap may have learned the root
+/// with an uppercase one. Both must produce the identical sanitized
+/// ${GIT} store key, or every cross-machine session parks forever.
+#[test]
+fn vscode_drive_case_still_maps_to_git_identity_key() {
+    let mut map = vibesync_engine::gitmap::GitMap::default();
+    map.roots
+        .insert("github.com/johnkesko/test-repo".into(), "C:\\Temp\\test-repo".into());
+    // Windows tokenizers are case-insensitive; model that regardless of host.
+    let tok = Tokenizer::with_case_sensitivity("C:\\Users\\you", true).with_gitmap(&map);
+
+    // The native shape scan/apply derive from the decoded URI — note the
+    // lowercase drive letter (URI decoding always yields one).
+    let key = tok
+        .tokenize_plain("c:\\Temp\\test-repo")
+        .replace('\\', "/")
+        .replace(':', "%3A");
+    assert_eq!(key, "${GIT%3Agithub.com%3Ajohnkesko%3Atest-repo}");
+
+    // A Mac clone of the same repo must produce the same key.
+    let mut mac_map = vibesync_engine::gitmap::GitMap::default();
+    mac_map
+        .roots
+        .insert("github.com/johnkesko/test-repo".into(), "/Users/anna/dev/test-repo".into());
+    let mac_tok = Tokenizer::with_case_sensitivity("/Users/anna", false).with_gitmap(&mac_map);
+    let mac_key = mac_tok
+        .tokenize_plain("/Users/anna/dev/test-repo")
+        .replace('\\', "/")
+        .replace(':', "%3A");
+    assert_eq!(mac_key, key, "both OSes must key the workspace identically");
+}
+
+/// The panel entry's title is how the user recognizes a synced chat.
+/// A session with a customTitle must surface it; a title-less session
+/// must fall back to a placeholder instead of failing the merge.
+#[test]
+fn vscode_index_titles_come_from_session_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = FolderStore::new(tmp.path().join("store"));
+    let home = tmp.path().join("home");
+    let tok = Tokenizer::with_case_sensitivity(&home.to_string_lossy(), cfg!(windows));
+
+    let root = tmp.path().join("ws_root");
+    let ws = root.join("cccc0000");
+    std::fs::create_dir_all(ws.join("chatSessions")).unwrap();
+    std::fs::write(
+        ws.join("workspace.json"),
+        format!(
+            "{{\"folder\": \"file://{}/proj\"}}",
+            home.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+    {
+        let conn = rusqlite::Connection::open(ws.join("state.vscdb")).unwrap();
+        conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)", []).unwrap();
+    }
+    let titled = "{\"kind\":0,\"v\":{\"version\":3,\"customTitle\":\"Test message from ComputerA\",\"requests\":[{}]}}\n";
+    let untitled = "{\"kind\":0,\"v\":{\"version\":3,\"requests\":[]}}\n";
+    for (name, body) in [("titled-1", titled), ("untitled-1", untitled)] {
+        store
+            .put(
+                &format!("vscode/ws/${{HOME}}/proj/chatSessions/{name}.jsonl"),
+                body.as_bytes(),
+                &RemoteMeta {
+                    hash: vibesync_engine::scanner::hash_bytes(body.as_bytes()),
+                    mtime_ms: 123,
+                    size: body.len() as u64,
+                    source: "a".into(),
+                },
+            )
+            .unwrap();
+    }
+    let mut st = SyncState::default();
+    let r = vibesync_engine::vscode::apply_roots(&[root], &store, &mut st, &tok).unwrap();
+    assert_eq!(r.applied, 2);
+    let conn = rusqlite::Connection::open(ws.join("state.vscdb")).unwrap();
+    let v: String = conn
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key='chat.ChatSessionStore.index'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let idx: serde_json::Value = serde_json::from_str(&v).unwrap();
+    assert_eq!(idx["entries"]["titled-1"]["title"], "Test message from ComputerA");
+    assert_eq!(idx["entries"]["untitled-1"]["title"], "Synced chat");
+}
+
 // ---------------------------------------------------------------- registry
 
 /// The sidebar heal's core: entries snap to canonical local paths, and an
