@@ -127,8 +127,12 @@ pub fn push_sessions(
         .map(|(k, m)| (k.as_str(), m.hash.as_str()))
         .collect();
     // One-time migration: pre-tokenization state records raw-content hashes
-    // whose mtime fast path would suppress the re-encode forever.
-    const FMT_KEY: &str = "codex/sessions#tokenized-v2";
+    // whose mtime fast path would suppress the re-encode forever. v3: the
+    // v2 pass ran with a broken transform (its positional gate skipped
+    // every re-serialized session_meta line), stamped itself done, and left
+    // raw rollouts in the store — a migration marker must change name
+    // whenever the encoding it vouches for changes.
+    const FMT_KEY: &str = "codex/sessions#tokenized-v3";
     let migrated = state.files.contains_key(FMT_KEY);
     let mut pushed = 0;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
