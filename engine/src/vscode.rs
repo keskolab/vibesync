@@ -213,8 +213,6 @@ pub fn apply_roots_opts(
     let mut report = crate::sync::ApplyReport::default();
     let map = local_workspace_map(roots, tok);
     let prefix = format!("{LOGICAL_PREFIX}/");
-    // Workspace dir -> chat sessions newly applied there (uuid, mtime).
-    let mut to_index: HashMap<PathBuf, Vec<(String, i64)>> = HashMap::new();
 
     for (logical, meta) in listing {
         let Some(rest) = logical.strip_prefix(&prefix) else { continue };
@@ -285,25 +283,43 @@ pub fn apply_roots_opts(
         );
         on_pulled(logical);
         report.applied += 1;
-        // Chat session files (not editing sidecars) must also be registered
-        // in the workspace's index or the panel never lists them.
-        if comps[marker] == "chatSessions" {
-            if let Some(uuid) = abs.file_stem().and_then(|s| s.to_str()) {
-                to_index
-                    .entry(ws_dir.clone())
-                    .or_default()
-                    .push((uuid.to_string(), meta.mtime_ms));
-            }
-        }
     }
-    for (ws_dir, sessions) in to_index.into_iter().filter(|_| merge_index) {
-        match merge_chat_index(&ws_dir, &sessions) {
-            Ok(n) => {
-                if n > 0 {
-                    crate::dlog::debug(|| format!("vscode: {n} chats merged into the panel index"));
+    // Index reconcile — every sync, not just for newly-applied files.
+    // VS Code holds state.vscdb open and flushes its in-memory index over
+    // our external merges whenever it likes (live case on Windows: entries
+    // merged mid-sync were gone minutes later, and nothing ever re-added
+    // them because the files already counted as applied). Rather than fight
+    // the write race, converge: any session file missing from its
+    // workspace's panel index is re-added; a no-op when nothing was
+    // clobbered.
+    if merge_index {
+        for ws_dir in map.values() {
+            let Ok(rd) = std::fs::read_dir(ws_dir.join("chatSessions")) else { continue };
+            let mut all: Vec<(String, i64)> = Vec::new();
+            for e in rd.flatten() {
+                let p = e.path();
+                let ok = matches!(
+                    p.extension().and_then(|x| x.to_str()),
+                    Some("json") | Some("jsonl")
+                );
+                if !ok {
+                    continue;
                 }
+                let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+                all.push((stem.to_string(), mtime_ms(&p).unwrap_or(0)));
             }
-            Err(_) => {} // db locked or absent: files are placed; index next sync
+            if all.is_empty() {
+                continue;
+            }
+            match merge_chat_index(ws_dir, &all) {
+                Ok(n) if n > 0 => {
+                    crate::dlog::info(|| {
+                        format!("vscode: {n} chats merged into the panel index")
+                    });
+                }
+                Ok(_) => {}
+                Err(_) => {} // db locked or absent: files are placed; index next sync
+            }
         }
     }
     Ok(report)
@@ -527,9 +543,15 @@ mod tests {
         let a_home = tmp.path().join("a_home");
         let b_home = tmp.path().join("b_home");
         let mut map_a = crate::gitmap::GitMap::default();
-        map_a.roots.insert(ID.into(), a_home.join("Desktop/app").to_string_lossy().into_owned());
+        map_a.roots.insert(
+            ID.into(),
+            a_home.join("Desktop").join("app").to_string_lossy().into_owned(),
+        );
         let mut map_b = crate::gitmap::GitMap::default();
-        map_b.roots.insert(ID.into(), b_home.join("dev/x/app").to_string_lossy().into_owned());
+        map_b.roots.insert(
+            ID.into(),
+            b_home.join("dev").join("x").join("app").to_string_lossy().into_owned(),
+        );
         let tok_a = crate::tokenizer::Tokenizer::with_case_sensitivity(&a_home.to_string_lossy(), false)
             .with_gitmap(&map_a);
         let tok_b = crate::tokenizer::Tokenizer::with_case_sensitivity(&b_home.to_string_lossy(), false)

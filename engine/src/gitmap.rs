@@ -328,9 +328,10 @@ mod tests {
         )
         .with_gitmap(&map);
         assert_eq!(t.tokenize_plain(&second.join("x").to_string_lossy()), "${GIT:github.com:o:r}/x");
+        // Component-wise: expansion keeps the token tail's separator style.
         assert_eq!(
-            t.expand_plain("${GIT:github.com:o:r}/x"),
-            first.join("x").to_string_lossy()
+            std::path::Path::new(&t.expand_plain("${GIT:github.com:o:r}/x")),
+            first.join("x").as_path()
         );
     }
 
