@@ -182,7 +182,10 @@ impl GitMap {
             });
             return false;
         };
+        // Extended-length Windows prefixes come in via tool-recorded cwds;
+        // stored verbatim they never prefix-match a stripped input path.
         let root = root.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+        let root = root.strip_prefix("\\\\?\\").unwrap_or(&root).to_string();
         match self.roots.get(&id) {
             Some(existing) if *existing == root => false,
             Some(existing) if Path::new(existing).exists() => {
