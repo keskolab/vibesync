@@ -60,28 +60,38 @@ fn uri_to_norm(uri: &str) -> Option<String> {
     Some(p)
 }
 
-fn home_norm(home: &Path) -> String {
-    home.to_string_lossy().replace('\\', "/").trim_end_matches('/').to_string()
-}
-
-/// Tokenize a normalized folder path against this machine's home.
-/// Case-insensitive prefix match (Windows drive-letter case varies).
-fn tokenize_folder(norm: &str, home: &str) -> String {
-    if norm.len() >= home.len() && norm[..home.len()].eq_ignore_ascii_case(home) {
-        let rest = &norm[home.len()..];
-        if rest.is_empty() || rest.starts_with('/') {
-            return format!("${{HOME}}{rest}");
-        }
-    }
-    norm.to_string()
+/// Tokenize a workspace folder through the REAL tokenizer — git identity
+/// first, then ${HOME} — so the same repo maps across machines regardless
+/// of clone location or OS. File URIs decode with forward slashes; the
+/// tokenizer matches native shapes, so normalize first; the resulting KEY
+/// canonicalizes tail separators to '/' so both OSes produce identical
+/// store keys.
+fn tokenize_folder(norm: &str, tok: &crate::tokenizer::Tokenizer) -> String {
+    let native = crate::dbsync::normalize_path_shape(norm);
+    tok.tokenize_plain(&native).replace('\\', "/")
 }
 
 #[allow(dead_code)] // used by the upcoming state.vscdb index merge
-fn expand_folder(tokenized: &str, home: &str) -> String {
-    match tokenized.strip_prefix("${HOME}") {
-        Some(rest) => format!("{home}{rest}"),
-        None => tokenized.to_string(),
+fn expand_folder(tokenized: &str, tok: &crate::tokenizer::Tokenizer) -> String {
+    crate::dbsync::normalize_path_shape(&tok.expand_plain(tokenized))
+}
+
+/// Workspace folders on this machine — fed to the project map so repos
+/// used only through VS Code still gain their git identity.
+pub fn local_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for root in storage_roots() {
+        let Ok(dirs) = std::fs::read_dir(&root) else { continue };
+        for ws in dirs.flatten() {
+            if let Some(folder) = workspace_folder(&ws.path()) {
+                let p = PathBuf::from(crate::dbsync::normalize_path_shape(&folder));
+                if p.is_dir() {
+                    out.push(p);
+                }
+            }
+        }
     }
+    out
 }
 
 /// Store-safe path components (':' is illegal in Windows file names).
@@ -99,12 +109,11 @@ fn workspace_folder(ws_dir: &Path) -> Option<String> {
 }
 
 /// Scan every variant's workspaces for chat files.
-pub fn scan(home: &Path) -> Result<Vec<FileEntry>> {
-    scan_roots(&storage_roots(), home)
+pub fn scan(tok: &crate::tokenizer::Tokenizer) -> Result<Vec<FileEntry>> {
+    scan_roots(&storage_roots(), tok)
 }
 
-pub fn scan_roots(roots: &[PathBuf], home: &Path) -> Result<Vec<FileEntry>> {
-    let home = home_norm(home);
+pub fn scan_roots(roots: &[PathBuf], tok: &crate::tokenizer::Tokenizer) -> Result<Vec<FileEntry>> {
     let mut out = Vec::new();
     for root in roots {
         let Ok(dirs) = std::fs::read_dir(root) else { continue };
@@ -113,7 +122,7 @@ pub fn scan_roots(roots: &[PathBuf], home: &Path) -> Result<Vec<FileEntry>> {
                 continue;
             }
             let Some(folder) = workspace_folder(&ws.path()) else { continue };
-            let ws_key = sanitize(&tokenize_folder(&folder, &home));
+            let ws_key = sanitize(&tokenize_folder(&folder, tok));
             for sub in SESSION_DIRS {
                 let dir = ws.path().join(sub);
                 if !dir.exists() {
@@ -154,13 +163,13 @@ pub fn scan_roots(roots: &[PathBuf], home: &Path) -> Result<Vec<FileEntry>> {
 }
 
 /// folder-path (tokenized, sanitized) → local workspace hash dir.
-fn local_workspace_map(roots: &[PathBuf], home: &str) -> HashMap<String, PathBuf> {
+fn local_workspace_map(roots: &[PathBuf], tok: &crate::tokenizer::Tokenizer) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
     for root in roots {
         let Ok(dirs) = std::fs::read_dir(root) else { continue };
         for ws in dirs.flatten() {
             if let Some(folder) = workspace_folder(&ws.path()) {
-                map.insert(sanitize(&tokenize_folder(&folder, home)), ws.path());
+                map.insert(sanitize(&tokenize_folder(&folder, tok)), ws.path());
             }
         }
     }
@@ -172,38 +181,37 @@ fn local_workspace_map(roots: &[PathBuf], home: &str) -> HashMap<String, PathBuf
 pub fn apply(
     store: &dyn SyncStore,
     state: &mut SyncState,
-    home: &Path,
+    tok: &crate::tokenizer::Tokenizer,
     merge_index: bool,
     listing: &[(String, RemoteMeta)],
     on_file: &dyn Fn(),
     on_pulled: &dyn Fn(&str),
 ) -> Result<crate::sync::ApplyReport> {
-    apply_roots_opts(&storage_roots(), store, state, home, merge_index, listing, on_file, on_pulled)
+    apply_roots_opts(&storage_roots(), store, state, tok, merge_index, listing, on_file, on_pulled)
 }
 
 pub fn apply_roots(
     roots: &[PathBuf],
     store: &dyn SyncStore,
     state: &mut SyncState,
-    home: &Path,
+    tok: &crate::tokenizer::Tokenizer,
 ) -> Result<crate::sync::ApplyReport> {
     let listing = store.list()?;
-    apply_roots_opts(roots, store, state, home, true, &listing, &|| {}, &|_| {})
+    apply_roots_opts(roots, store, state, tok, true, &listing, &|| {}, &|_| {})
 }
 
 pub fn apply_roots_opts(
     roots: &[PathBuf],
     store: &dyn SyncStore,
     state: &mut SyncState,
-    home: &Path,
+    tok: &crate::tokenizer::Tokenizer,
     merge_index: bool,
     listing: &[(String, RemoteMeta)],
     on_file: &dyn Fn(),
     on_pulled: &dyn Fn(&str),
 ) -> Result<crate::sync::ApplyReport> {
     let mut report = crate::sync::ApplyReport::default();
-    let home = home_norm(home);
-    let map = local_workspace_map(roots, &home);
+    let map = local_workspace_map(roots, tok);
     let prefix = format!("{LOGICAL_PREFIX}/");
     // Workspace dir -> chat sessions newly applied there (uuid, mtime).
     let mut to_index: HashMap<PathBuf, Vec<(String, i64)>> = HashMap::new();
@@ -447,7 +455,8 @@ mod tests {
         std::fs::create_dir_all(ws_a.join("chatSessions")).unwrap();
         std::fs::write(ws_a.join("chatSessions/s1.jsonl"), "{\"chat\":1}\n").unwrap();
 
-        let entries = scan_roots(&[a_root.clone()], &a_home).unwrap();
+        let tok_a = crate::tokenizer::Tokenizer::with_case_sensitivity(&a_home.to_string_lossy(), false);
+        let entries = scan_roots(&[a_root.clone()], &tok_a).unwrap();
         assert_eq!(entries.len(), 1);
         assert!(
             entries[0].logical.starts_with("vscode/ws/${HOME}/dev/app/chatSessions/"),
@@ -479,7 +488,8 @@ mod tests {
             ).unwrap();
         }
         let mut state_b = SyncState::default();
-        let report = apply_roots(&[b_root.clone()], &store, &mut state_b, &b_home).unwrap();
+        let tok_b = crate::tokenizer::Tokenizer::with_case_sensitivity(&b_home.to_string_lossy(), false);
+        let report = apply_roots(&[b_root.clone()], &store, &mut state_b, &tok_b).unwrap();
         assert_eq!(report.applied, 1);
 
         let landed = ws_b.join("chatSessions/s1.jsonl");
@@ -498,9 +508,60 @@ mod tests {
         let c_root = tmp.path().join("c_ws");
         std::fs::create_dir_all(&c_root).unwrap();
         let mut state_c = SyncState::default();
-        let report = apply_roots(&[c_root], &store, &mut state_c, &tmp.path().join("c_home")).unwrap();
+        let tok_c = crate::tokenizer::Tokenizer::with_case_sensitivity(
+            &tmp.path().join("c_home").to_string_lossy(),
+            false,
+        );
+        let report = apply_roots(&[c_root], &store, &mut state_c, &tok_c).unwrap();
         assert_eq!(report.parked, 1);
         assert_eq!(report.applied, 0);
+    }
+
+    #[test]
+    fn git_identity_maps_workspaces_across_clone_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FolderStore::new(tmp.path().join("store"));
+        const ID: &str = "github.com/o/app";
+
+        // A keeps the repo at <a_home>/Desktop/app; B at <b_home>/dev/x/app.
+        let a_home = tmp.path().join("a_home");
+        let b_home = tmp.path().join("b_home");
+        let mut map_a = crate::gitmap::GitMap::default();
+        map_a.roots.insert(ID.into(), a_home.join("Desktop/app").to_string_lossy().into_owned());
+        let mut map_b = crate::gitmap::GitMap::default();
+        map_b.roots.insert(ID.into(), b_home.join("dev/x/app").to_string_lossy().into_owned());
+        let tok_a = crate::tokenizer::Tokenizer::with_case_sensitivity(&a_home.to_string_lossy(), false)
+            .with_gitmap(&map_a);
+        let tok_b = crate::tokenizer::Tokenizer::with_case_sensitivity(&b_home.to_string_lossy(), false)
+            .with_gitmap(&map_b);
+
+        let a_root = tmp.path().join("a_ws2");
+        let ws_a = make_ws(
+            &a_root,
+            "aaaa9999",
+            &format!("file://{}/Desktop/app", a_home.to_string_lossy().replace('\\', "/")),
+        );
+        std::fs::create_dir_all(ws_a.join("chatSessions")).unwrap();
+        std::fs::write(ws_a.join("chatSessions/g1.jsonl"), "{\"chat\":9}\n").unwrap();
+        let entries = scan_roots(&[a_root], &tok_a).unwrap();
+        assert!(
+            entries[0].logical.starts_with("vscode/ws/${GIT%3Agithub.com%3Ao%3Aapp}/chatSessions/"),
+            "{}",
+            entries[0].logical
+        );
+        let mut st_a = SyncState::default();
+        crate::sync::push(&entries, &mut st_a, &store, "a").unwrap();
+
+        let b_root = tmp.path().join("b_ws2");
+        let ws_b = make_ws(
+            &b_root,
+            "bbbb9999",
+            &format!("file://{}/dev/x/app", b_home.to_string_lossy().replace('\\', "/")),
+        );
+        let mut st_b = SyncState::default();
+        let report = apply_roots(&[b_root], &store, &mut st_b, &tok_b).unwrap();
+        assert_eq!(report.applied, 1);
+        assert!(ws_b.join("chatSessions/g1.jsonl").exists());
     }
 
     #[test]
@@ -510,8 +571,12 @@ mod tests {
             "c:/Users/you/dev"
         );
         assert_eq!(uri_to_norm("file:///Users/anna/dev").unwrap(), "/Users/anna/dev");
-        let t = tokenize_folder("c:/Users/you/dev", "C:/Users/you");
+        // Cross-OS: a Windows URI-decoded folder tokenizes against a
+        // Windows home and expands on a Mac — through the real tokenizer.
+        let tok_w = crate::tokenizer::Tokenizer::with_case_sensitivity("C:\\Users\\you", true);
+        let t = tokenize_folder("c:/Users/you/dev", &tok_w);
         assert_eq!(t, "${HOME}/dev");
-        assert_eq!(expand_folder(&t, "/Users/anna"), "/Users/anna/dev");
+        let tok_m = crate::tokenizer::Tokenizer::with_case_sensitivity("/Users/anna", false);
+        assert_eq!(expand_folder(&t, &tok_m), "/Users/anna/dev");
     }
 }

@@ -736,7 +736,11 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // them so clones living at different paths per machine share one
     // ${GIT} identity, exactly like Claude sidebar cwds.
     if let Some(h) = dirs::home_dir() {
-        for dir in engine::opencode::local_dirs(&h).into_iter().chain(engine::codex::local_dirs(&h)) {
+        for dir in engine::opencode::local_dirs(&h)
+            .into_iter()
+            .chain(engine::codex::local_dirs(&h))
+            .chain(engine::vscode::local_dirs())
+        {
             if learned_cwds.insert(dir.to_string_lossy().into_owned()) {
                 gitmap_changed |= gitmap.learn(&dir);
             }
@@ -1424,7 +1428,7 @@ fn scan_claude(env: &ScanEnv, _state: &mut engine::SyncState) -> Result<Vec<engi
     Ok(out)
 }
 fn scan_vscode(env: &ScanEnv, _state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
-    engine::vscode::scan(env.home)
+    engine::vscode::scan(env.tok)
 }
 fn scan_opencode(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
     let out = engine::opencode::scan(env.home)?;
@@ -1531,7 +1535,7 @@ fn apply_claude(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenRepo
 }
 fn apply_vscode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
     Ok(engine::vscode::apply(
-        env.store, state, env.home, env.vscode_index, env.listing, env.tick, env.record,
+        env.store, state, env.tok, env.vscode_index, env.listing, env.tick, env.record,
     )?
     .into())
 }
