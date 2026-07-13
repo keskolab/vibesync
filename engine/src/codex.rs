@@ -69,16 +69,12 @@ fn transform_rollout(bytes: &[u8], f: &dyn Fn(&str) -> String) -> Vec<u8> {
             continue;
         }
         let mapped = (|| -> Option<Vec<u8>> {
-            // Cheap gate before parsing potentially huge lines: the type
-            // field sits near the start, but field order isn't guaranteed —
-            // scan a generous window. A false positive just costs one parse.
-            let head = match std::str::from_utf8(&line[..line.len().min(2000)]) {
-                Ok(h) => h,
-                Err(e) => std::str::from_utf8(&line[..e.valid_up_to()]).unwrap_or(""),
-            };
-            if !head.contains("session_meta") && !head.contains("turn_context") {
-                return None;
-            }
+            // No positional gate: raw Codex lines put "type" early, but
+            // RE-SERIALIZED lines sort keys, pushing it behind multi-KB
+            // instruction text (a 2000-byte prefix scan silently missed
+            // every tokenized session_meta line). Parsing each line is the
+            // only reliable filter; non-JSON lines bail out immediately and
+            // non-target lines cost one parse with no re-serialization.
             let mut v: serde_json::Value = serde_json::from_slice(line).ok()?;
             let t = v.get("type")?.as_str()?.to_string();
             if t != "session_meta" && t != "turn_context" {
