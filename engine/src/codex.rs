@@ -94,9 +94,13 @@ fn transform_rollout(bytes: &[u8], f: &dyn Fn(&str) -> String) -> Vec<u8> {
     out
 }
 
-/// tokenize direction for rollout content.
+/// tokenize direction for rollout content. The tokenized form is CANONICAL
+/// (forward-slash tails): rollouts diff by hash, and a Windows machine
+/// re-tokenizing a localized file with native `\` tails would otherwise
+/// produce different bytes than the Mac that pushed it — an infinite
+/// re-upload loop across every Mac<->Windows hop.
 fn rollout_tokenize<'a>(tok: &'a crate::tokenizer::Tokenizer) -> impl Fn(&str) -> String + 'a {
-    move |p| tok.tokenize_plain(p)
+    move |p| tok.tokenize_plain(p).replace('\\', "/")
 }
 
 /// expand direction: local paths, local separators, foreign homes adopted.
@@ -1030,7 +1034,11 @@ mod db_tests {
         apply(&b, &tok_b, &mut st_b, &store, &listing, &|| {}, &|_| {}).unwrap();
         let local =
             std::fs::read_to_string(b.join(".codex/sessions/2026/07/12/rollout-r1.jsonl")).unwrap();
-        assert!(local.contains(&format!("{b_home}/proj")), "{local}");
+        let v: serde_json::Value = serde_json::from_str(local.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            v["payload"]["cwd"],
+            crate::dbsync::normalize_path_shape(&format!("{b_home}/proj"))
+        );
         assert!(!local.contains("${HOME}"), "{local}");
         assert!(local.contains(garbage));
 
@@ -1058,7 +1066,11 @@ mod db_tests {
         let mut st = SyncState::default();
         apply(&b, &tok_b, &mut st, &store, &[], &|| {}, &|_| {}).unwrap();
         let fixed = std::fs::read_to_string(dir.join("rollout-rz.jsonl")).unwrap();
-        assert!(fixed.contains(&format!("{b_home}/proj")), "{fixed}");
+        let v: serde_json::Value = serde_json::from_str(fixed.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            v["payload"]["cwd"],
+            crate::dbsync::normalize_path_shape(&format!("{b_home}/proj"))
+        );
         assert!(!fixed.contains("${HOME}"), "{fixed}");
     }
 
@@ -1184,8 +1196,10 @@ mod db_tests {
                 "INSERT INTO threads VALUES ('th1', ?1, 100, 200, 'vscode', 'openai', ?2,
                    'Test thread', ?3, 'on-request', 100000, 200000, 200000, NULL)",
                 rusqlite::params![
-                    format!("{a_home}/.codex/sessions/2026/07/12/rollout-th1.jsonl"),
-                    format!("{a_home}/proj"),
+                    crate::dbsync::normalize_path_shape(&format!(
+                        "{a_home}/.codex/sessions/2026/07/12/rollout-th1.jsonl"
+                    )),
+                    crate::dbsync::normalize_path_shape(&format!("{a_home}/proj")),
                     serde_json::json!({
                         "type": "workspace-write",
                         "writable_roots": [format!("{a_home}/proj")],
