@@ -172,6 +172,9 @@ impl GitMap {
     /// First mapping wins; a stored root replaced only once its path is gone
     /// — and the replaced root is kept as a tokenize-only alias so existing
     /// transcript dirs (named after the old path) keep their canonical keys.
+    /// A SECOND living clone of an already-mapped repo also becomes a
+    /// tokenize-only alias: its sessions join the repo's one identity, while
+    /// expansion keeps targeting the primary clone.
     pub fn learn(&mut self, cwd: &Path) -> bool {
         let Some((root, id)) = discover(cwd) else {
             crate::dlog::debug(|| {
@@ -181,8 +184,18 @@ impl GitMap {
         };
         let root = root.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
         match self.roots.get(&id) {
-            Some(existing) if Path::new(existing).exists() => false,
             Some(existing) if *existing == root => false,
+            Some(existing) if Path::new(existing).exists() => {
+                let aliases = self.aliases.entry(id.clone()).or_default();
+                if aliases.contains(&root) {
+                    return false;
+                }
+                crate::dlog::info(|| {
+                    format!("project map: second clone of {id} at {root} (tokenize-only alias)")
+                });
+                aliases.push(root);
+                true
+            }
             old => {
                 if let Some(old_root) = old.cloned() {
                     let aliases = self.aliases.entry(id.clone()).or_default();
@@ -279,6 +292,43 @@ mod tests {
         assert!(map.learn(&deep));
         assert!(!map.learn(&deep)); // already known, root still exists
         assert_eq!(map.roots["github.com/owner/proj"], repo.to_string_lossy().trim_end_matches(['/', '\\']));
+    }
+
+    #[test]
+    fn second_clone_becomes_tokenize_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |name: &str| {
+            let r = tmp.path().join(name);
+            std::fs::create_dir_all(r.join(".git")).unwrap();
+            std::fs::write(
+                r.join(".git/config"),
+                "[remote \"origin\"]\n\turl = git@github.com:o/r.git\n",
+            )
+            .unwrap();
+            r
+        };
+        let first = mk("first-clone");
+        let second = mk("second-clone");
+        let mut map = GitMap::default();
+        assert!(map.learn(&first));
+        assert!(map.learn(&second)); // living primary stays, second aliases
+        let id = "github.com/o/r";
+        assert_eq!(map.roots[id], first.to_string_lossy().to_string());
+        assert_eq!(map.aliases[id], vec![second.to_string_lossy().to_string()]);
+        assert!(!map.learn(&second)); // idempotent
+
+        // Both clones tokenize to the one identity; expansion targets the
+        // primary clone only.
+        let t = crate::tokenizer::Tokenizer::with_case_sensitivity(
+            &tmp.path().to_string_lossy(),
+            false,
+        )
+        .with_gitmap(&map);
+        assert_eq!(t.tokenize_plain(&second.join("x").to_string_lossy()), "${GIT:github.com:o:r}/x");
+        assert_eq!(
+            t.expand_plain("${GIT:github.com:o:r}/x"),
+            first.join("x").to_string_lossy()
+        );
     }
 
     #[test]
