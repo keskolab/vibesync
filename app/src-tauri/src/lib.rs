@@ -742,6 +742,21 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Self-healing login item: the LaunchAgent records an absolute
+            // executable path, which goes stale when the binary is renamed,
+            // moved, or rebuilt elsewhere — launchd then resurrects an
+            // ancient build as a frozen tray icon (live case: a two-day-old
+            // `vibesync-app` started at login long after the rename to
+            // `VibeSync`). Re-enabling rewrites the entry with the CURRENT
+            // executable on every launch.
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                let l = app.autolaunch();
+                if l.is_enabled().unwrap_or(false) {
+                    let _ = l.enable();
+                }
+            }
+
             let window = app.get_webview_window("main").expect("main window");
             // Belt-and-suspenders against the startup flash: stay hidden until
             // the positioner places us under the tray icon on first open.
