@@ -294,6 +294,48 @@ pub fn push_index(
 pub fn apply(home: &Path, tok: &crate::tokenizer::Tokenizer, state: &mut SyncState, store: &dyn SyncStore, listing: &[(String, RemoteMeta)], on_file: &dyn Fn(), on_pulled: &dyn Fn(&str)) -> Result<crate::sync::ApplyReport> {
     let mut report = crate::sync::ApplyReport::default();
     let sessions_root = root(home).join("sessions");
+    // Localization guard: a rollout written by an older build (or while its
+    // repo was still unknown here) can hold TOKENIZED cwds inside its
+    // content — invisible to Codex's folder matching, and state's "synced"
+    // record would never revisit it. Verify content, not just existence:
+    // the token marker sits in the first line, which is cheap to read, and
+    // a file is rewritten only when expansion actually changes it (an
+    // unexpandable token stays put and is retried next sync).
+    if sessions_root.is_dir() {
+        let mut localized = 0usize;
+        for entry in walkdir::WalkDir::new(&sessions_root).follow_links(false).into_iter().flatten() {
+            if !entry.file_type().is_file()
+                || entry.path().extension().and_then(|e| e.to_str()) != Some("jsonl")
+            {
+                continue;
+            }
+            let first_line_has_token = std::fs::File::open(entry.path())
+                .ok()
+                .and_then(|f| {
+                    use std::io::BufRead;
+                    let mut line = String::new();
+                    std::io::BufReader::new(f).read_line(&mut line).ok()?;
+                    Some(line.contains("\"cwd\":\"${"))
+                })
+                .unwrap_or(false);
+            if !first_line_has_token {
+                continue;
+            }
+            let raw = std::fs::read(entry.path())?;
+            let fixed = transform_rollout(&raw, &rollout_expand(tok));
+            if fixed != raw {
+                let tmp = entry.path().with_extension("vibesync-tmp");
+                std::fs::write(&tmp, &fixed)?;
+                std::fs::rename(&tmp, entry.path())?;
+                localized += 1;
+            }
+        }
+        if localized > 0 {
+            crate::dlog::info(|| {
+                format!("codex: localized {localized} session file(s) written by an older build")
+            });
+        }
+    }
     let index_prefix = format!("{INDEX_PREFIX}/");
     let session_prefix = format!("{SESSIONS_PREFIX}/");
 
@@ -996,6 +1038,28 @@ mod db_tests {
         assert_eq!(push_sessions(&b, &tok_b, &mut st_b, &store, "b", &store.list().unwrap()).unwrap(), 0);
         // A also stays settled.
         assert_eq!(push_sessions(&a, &tok_a, &mut st_a, &store, "a", &store.list().unwrap()).unwrap(), 0);
+    }
+
+    #[test]
+    fn stale_tokenized_rollout_is_relocalized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FolderStore::new(tmp.path().join("store"));
+        let b = tmp.path().join("b");
+        let b_home = b.to_string_lossy().into_owned();
+        let dir = b.join(".codex/sessions/2026/07/13");
+        std::fs::create_dir_all(&dir).unwrap();
+        // An older build wrote the store's tokenized bytes verbatim.
+        let stale = format!(
+            "{}\n",
+            serde_json::json!({"timestamp":"t","type":"session_meta","payload":{"id":"rz","cwd":"${HOME}/proj"}}),
+        );
+        std::fs::write(dir.join("rollout-rz.jsonl"), &stale).unwrap();
+        let tok_b = Tokenizer::with_case_sensitivity(&b_home, false);
+        let mut st = SyncState::default();
+        apply(&b, &tok_b, &mut st, &store, &[], &|| {}, &|_| {}).unwrap();
+        let fixed = std::fs::read_to_string(dir.join("rollout-rz.jsonl")).unwrap();
+        assert!(fixed.contains(&format!("{b_home}/proj")), "{fixed}");
+        assert!(!fixed.contains("${HOME}"), "{fixed}");
     }
 
     #[test]
