@@ -62,7 +62,9 @@ A project name is a label you give a folder, under **Project mappings** in VibeS
 | Windows PC | `D:\misc\stuff` | `stuff` |
 | MacBook | `/Volumes/Data/stuff` | `stuff` |
 
-That's the entire feature. The name itself can be anything — it just has to be the same everywhere. From then on, VibeSync treats those folders as one project, exactly as if they were clones of the same git repo, and sessions started in one appear in the other. Most people never need this: git projects and home-folder projects already match on their own.
+That's the entire feature. The name itself can be anything — it just has to be the same everywhere. From then on, VibeSync treats those folders as one project, exactly as if they were clones of the same git repo, and sessions started in one appear in the other.
+
+Two things worth knowing: a mapping covers **everything beneath the folder**, so naming a parent like `D:\Code` once takes care of every project inside it. And most people never need any of this — git projects and home-folder projects already match on their own.
 
 A concrete example with three computers — a MacBook, an iMac, and a Windows PC:
 
@@ -82,7 +84,9 @@ A concrete example with three computers — a MacBook, an iMac, and a Windows PC
 └── scraper/     ← plain folder, no git
 ```
 
-Nothing to configure: `website` matches by its repository address, and the plain folders match because Dropbox sits at the same spot inside the home folder on every machine (`~/Dropbox` on a Mac *is* `C:\Users\you\Dropbox` on a PC — same place relative to home). The only setup you'd ever do is if one computer keeps Dropbox somewhere unusual, like `D:\Dropbox` — then the plain folders stop matching, and a project name per folder puts them back in sync.
+Nothing to configure: `website` matches by its repository address, and the plain folders match because Dropbox sits at the same spot inside the home folder on every machine (`~/Dropbox` on a Mac *is* `C:\Users\you\Dropbox` on a PC — same place relative to home). This is the simplest answer for projects that never got a git repo: keep them together in one folder that exists on all your computers, and they all follow you.
+
+And if one computer keeps Dropbox somewhere unusual, like `D:\Dropbox`? Still just **one** mapping, not one per project: give the `Projects` folder itself a project name (the same name on each computer), and everything inside it is covered — including folders you create next month. A mapping applies to the whole tree beneath it.
 
 Worth spelling out: Dropbox already syncs those folders' *files*, but your AI sessions never live inside the project folder — each tool keeps them in its own data folder (`~/.claude`, `~/.codex`, VS Code's storage, …), which Dropbox doesn't cover. Dropbox moves your code; VibeSync moves the conversations about it.
 
