@@ -16,10 +16,26 @@ AI coding tools keep sessions on the machine where they happened. Vendors don't 
 
 ### How it works
 
+In plain english: every computer runs the same small app, and they never talk to each other directly. They all talk to one shared place — your storage. Each computer regularly does two things: *"upload anything new I have"* and *"download anything new the others left for me."* That's the whole idea.
+
 1. Start with any computer, for example computer A.
 2. Computer A looks through your sessions and sends anything new to the storage you chose.
 3. Computer B (and C, and D…) does the same — and downloads anything it doesn't have yet.
 4. Auto-sync repeats this in the background (every 15 minutes by default, adjustable in Settings).
+
+One sync, step by step:
+
+```mermaid
+flowchart TD
+    A["Sync starts<br/>(timer fires, or you press Sync)"] --> B["Scan this computer's tools<br/>for new or changed sessions"]
+    B --> C["Upload anything new to your storage<br/>(encrypted first, if it's a cloud bucket)"]
+    C --> D["Look in storage for sessions<br/>uploaded by your other computers"]
+    D --> E{"Does this computer know<br/>which project a session belongs to?"}
+    E -- "Yes — repo is cloned here,<br/>or the folder path matches" --> F["Download it and place it<br/>where the tool expects it"]
+    E -- "No — project doesn't<br/>exist here yet" --> G["Leave it waiting in storage —<br/>it appears the moment the project does"]
+    F --> H["Done. Show a '+N new' badge<br/>and wait for the next sync"]
+    G --> H
+```
 
 The rules every sync follows:
 
@@ -28,6 +44,25 @@ The rules every sync follows:
 - **Works across your computers with zero setup.** A session from `C:\Github\app` on your PC lands in `~/dev/app` on your Mac — same project, different folders, nothing to configure. Git projects are recognized by the repository itself; everything else follows your home folder layout automatically. If a computer doesn't have a project yet, that project's sessions just wait in your storage until it shows up — clone the repo and they're there.
 - **Only changes transfer.** After the first sync, routine syncs finish in seconds.
 - Adding another computer is just: install VibeSync, point it at the same place, enter the same passphrase, press Sync.
+
+### Git repo or just a folder? Why it matters
+
+When VibeSync moves a session from one computer to another, it has to answer one question: **"which project does this session belong to on the new computer?"** How it answers depends on whether your project folder is a git repository or just an ordinary folder.
+
+- **A git repository** (cloned from GitHub, GitLab, etc.) carries its own ID card: the repository's address, like `github.com/you/todo-app`. VibeSync uses that address as the project's identity, so it **doesn't matter where the folder lives** on each computer. Clone it anywhere — sessions find it.
+- **An ordinary folder** has no ID card. VibeSync falls back to the folder's location *inside your home folder*. `~/Documents/notes` on one Mac matches `~/Documents/notes` on another Mac and `C:\Users\you\Documents\notes` on Windows — same spot relative to home, so sessions still follow you.
+- **An ordinary folder at a random location** (an external drive, or a different spot on every machine) matches nothing automatically. Fix: give the folder a **project name** in VibeSync on each computer ("this folder is project *notes*") — from then on it behaves like a git repo.
+
+A concrete example with three computers — a MacBook, an iMac, and a Windows PC:
+
+| Project | MacBook (macOS) | iMac (macOS) | Windows PC | Do sessions follow you? |
+|---|---|---|---|---|
+| Git repo `todo-app` | `~/Development/todo-app` | `~/Code/todo-app` | `C:\Github\todo-app` | ✅ Yes — the repo is the ID; three different locations, zero setup |
+| Plain folder `notes` | `~/Documents/notes` | `~/Documents/notes` | `C:\Users\you\Documents\notes` | ✅ Yes — same spot inside the home folder on every machine |
+| Plain folder `stuff` | `~/Desktop/stuff` | `/Volumes/Data/stuff` | `D:\misc\stuff` | ⚠️ Not automatically — give it a project name in VibeSync on each machine, then yes |
+| Git repo `todo-app`, not yet cloned on the iMac | `~/Development/todo-app` | *(not cloned)* | `C:\Github\todo-app` | ⏸ Sessions wait safely in storage; the moment you clone the repo on the iMac, they appear |
+
+Rule of thumb: **if your project is a git repo, put it wherever you like. If it's just a folder, keep it at the same place inside your home folder on every computer — or give it a project name in VibeSync.**
 
 ### The passphrase (cloud storage)
 
@@ -50,20 +85,28 @@ The rules every sync follows:
 
 Works on macOS and Windows, in any mix. Each app has its own on/off switch, per-area scopes, a "+N new" badge when a sync brings something in, and the main window shows when the next auto-sync will run.
 
-### Getting started (development builds)
+### How to run VibeSync
+
+There are no installers yet — you build and run it from source. You need two free tools installed first: [Rust](https://rustup.rs) and [Node.js](https://nodejs.org). Then:
 
 ```sh
+# 1. Get the code
 git clone https://github.com/JohnKesko/vibesync
 cd vibesync
 
-# run the engine tests
-cargo test -p vibesync-engine
-
-# run the app
+# 2. Start the app
 cd app && npm install && npm run tauri dev
 ```
 
-The app appears in your menu bar. Open the Setup Assistant, choose which tools to sync and where your sessions should live, and run your first sync.
+That's it. VibeSync appears in your **menu bar** (macOS) or **system tray** (Windows). Open it, walk through the Setup Assistant — pick which tools to sync and where your sessions should live — and press **Sync**.
+
+To sync between computers, repeat the same steps on each one and point them all at the same storage location (with the same passphrase, if it's a cloud bucket).
+
+Optional health check — run the engine's test suite:
+
+```sh
+cargo test -p vibesync-engine
+```
 
 <details>
 <summary><b>Every file VibeSync touches</b> — full transparency list</summary>
