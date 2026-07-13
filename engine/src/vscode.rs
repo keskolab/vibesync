@@ -317,8 +317,21 @@ pub fn apply_roots_opts(
                         format!("vscode: {n} chats merged into the panel index")
                     });
                 }
-                Ok(_) => {}
-                Err(_) => {} // db locked or absent: files are placed; index next sync
+                Ok(_) => {
+                    crate::dlog::debug(|| {
+                        format!(
+                            "vscode: panel index already complete ({} sessions) in {}",
+                            all.len(),
+                            ws_dir.display()
+                        )
+                    });
+                }
+                // db locked or absent: files are placed; index next sync
+                Err(e) => {
+                    crate::dlog::debug(|| {
+                        format!("vscode: index reconcile skipped ({e}) in {}", ws_dir.display())
+                    });
+                }
             }
         }
     }
