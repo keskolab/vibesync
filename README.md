@@ -51,7 +51,18 @@ When VibeSync moves a session from one computer to another, it has to answer one
 
 - **A git repository** (cloned from GitHub, GitLab, etc.) carries its own ID card: the repository's address, like `github.com/you/todo-app`. VibeSync uses that address as the project's identity, so it **doesn't matter where the folder lives** on each computer. Clone it anywhere — sessions find it.
 - **An ordinary folder** has no ID card. VibeSync falls back to the folder's location *inside your home folder*. `~/Documents/notes` on one Mac matches `~/Documents/notes` on another Mac and `C:\Users\you\Documents\notes` on Windows — same spot relative to home, so sessions still follow you.
-- **An ordinary folder at a random location** (an external drive, or a different spot on every machine) matches nothing automatically. Fix: give the folder a **project name** in VibeSync on each computer ("this folder is project *notes*") — from then on it behaves like a git repo.
+- **An ordinary folder at a random location** (an external drive, or a different spot on every machine) matches nothing automatically. This is the one case you fix by hand, with a **project name** — explained next.
+
+#### What's a "project name"?
+
+A project name is a label you give a folder, under **Project mappings** in VibeSync's settings. It's you writing the ID card that the folder doesn't have: on each computer, add a mapping with the **same name**, pointing at **that computer's** copy of the folder.
+
+| Computer | Folder on that computer | Project name you type |
+|---|---|---|
+| Windows PC | `D:\misc\stuff` | `stuff` |
+| MacBook | `/Volumes/Data/stuff` | `stuff` |
+
+That's the entire feature. The name itself can be anything — it just has to be the same everywhere. From then on, VibeSync treats those folders as one project, exactly as if they were clones of the same git repo, and sessions started in one appear in the other. Most people never need this: git projects and home-folder projects already match on their own.
 
 A concrete example with three computers — a MacBook, an iMac, and a Windows PC:
 
@@ -59,8 +70,21 @@ A concrete example with three computers — a MacBook, an iMac, and a Windows PC
 |---|---|---|---|---|
 | Git repo `todo-app` | `~/Development/todo-app` | `~/Code/todo-app` | `C:\Github\todo-app` | ✅ Yes — the repo is the ID; three different locations, zero setup |
 | Plain folder `notes` | `~/Documents/notes` | `~/Documents/notes` | `C:\Users\you\Documents\notes` | ✅ Yes — same spot inside the home folder on every machine |
-| Plain folder `stuff` | `~/Desktop/stuff` | `/Volumes/Data/stuff` | `D:\misc\stuff` | ⚠️ Not automatically — give it a project name in VibeSync on each machine, then yes |
+| Plain folder `stuff` | `~/Desktop/stuff` | `/Volumes/Data/stuff` | `D:\misc\stuff` | ⚠️ Not automatically — give it the same project name on each machine (see above), then yes |
 | Git repo `todo-app`, not yet cloned on the iMac | `~/Development/todo-app` | *(not cloned)* | `C:\Github\todo-app` | ⏸ Sessions wait safely in storage; the moment you clone the repo on the iMac, they appear |
+
+**A realistic mixed case — everything in one Dropbox folder.** Say every computer runs Dropbox, and `~/Dropbox/Projects` is where all your work lives — a few git repos, and plenty of folders that never got one:
+
+```
+~/Dropbox/Projects/
+├── website/     ← git repo
+├── recipes/     ← plain folder, no git
+└── scraper/     ← plain folder, no git
+```
+
+Nothing to configure: `website` matches by its repository address, and the plain folders match because Dropbox sits at the same spot inside the home folder on every machine (`~/Dropbox` on a Mac *is* `C:\Users\you\Dropbox` on a PC — same place relative to home). The only setup you'd ever do is if one computer keeps Dropbox somewhere unusual, like `D:\Dropbox` — then the plain folders stop matching, and a project name per folder puts them back in sync.
+
+Worth spelling out: Dropbox already syncs those folders' *files*, but your AI sessions never live inside the project folder — each tool keeps them in its own data folder (`~/.claude`, `~/.codex`, VS Code's storage, …), which Dropbox doesn't cover. Dropbox moves your code; VibeSync moves the conversations about it.
 
 Rule of thumb: **if your project is a git repo, put it wherever you like. If it's just a folder, keep it at the same place inside your home folder on every computer — or give it a project name in VibeSync.**
 
@@ -76,11 +100,10 @@ Rule of thumb: **if your project is a git repo, put it wherever you like. If it'
 |---|---|
 | Claude Code | Sessions, subagents, memory, plans, tasks, history, agents, skills, rules, settings — and synced sessions appear in the Claude desktop sidebar. Extra accounts (`~/.claude-work`) sync separately. Plugins only if you opt in |
 | VS Code Copilot Chat | Chat history per project, visible in the Chat panel on every machine |
-| Codex | Session transcripts; every machine's session list shows all of them |
+| Codex | Session transcripts and the thread database (modern builds) — every machine's session list shows all of them; backup taken before the first database write |
 | OpenCode | Sessions sync at the database level, with a backup taken before the first write |
-| Codex | Threads sync at the database level too (modern builds), with the same backup-first rule |
 | Zed | Agent threads (best synced while Zed is closed) |
-| Copilot CLI | Standalone `copilot` sessions |
+| Copilot CLI | Standalone `copilot` sessions, conversations included — resume them from any machine |
 | All tools | Global skills in `~/.agents/skills` ([Agent Skills spec](https://agentskills.io)) |
 
 Works on macOS and Windows, in any mix. Each app has its own on/off switch, per-area scopes, a "+N new" badge when a sync brings something in, and the main window shows when the next auto-sync will run.
@@ -133,6 +156,7 @@ Nothing outside this list is read or written. `~` is your home folder (`C:\Users
 | OpenCode | `~/.local/share/opencode/storage/` | Syncs (legacy records) |
 | Zed | `.../Zed/threads/threads.db` ³ | Syncs thread rows, newest wins |
 | Copilot CLI | `~/.copilot/session-state/` | Syncs |
+| Copilot CLI | `~/.copilot/session-store.db` | Merges synced conversations in (insert/update-newer only, never deletes); one-time backup before the first write |
 | Copilot CLI | `~/.copilot/config.json`, `settings.json`, `logs/` | Never touched — auth/trust stays local |
 | All tools | `~/.agents/skills/` | Syncs global skills |
 
