@@ -66,7 +66,7 @@ pub(crate) fn insert_map_pk(
     or_replace: bool,
     pk: &[&str],
 ) -> Result<()> {
-    let mut merged;
+    let merged;
     let map = if or_replace && !pk.is_empty() && pk.iter().all(|k| map.contains_key(*k)) {
         let cond = pk
             .iter()
