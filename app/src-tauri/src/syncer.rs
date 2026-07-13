@@ -740,6 +740,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             .into_iter()
             .chain(engine::codex::local_dirs(&h))
             .chain(engine::vscode::local_dirs())
+            .chain(engine::copilot::local_dirs(&h))
         {
             if learned_cwds.insert(dir.to_string_lossy().into_owned()) {
                 gitmap_changed |= gitmap.learn(&dir);
@@ -1458,6 +1459,9 @@ fn publish_codex(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize>
 fn publish_opencode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
     engine::opencode::db_push(env.home, env.tok, state, env.store, env.machine, env.listing)
 }
+fn publish_copilot(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
+    engine::copilot::db_push(env.home, env.tok, state, env.store, env.machine, env.listing)
+}
 fn publish_zed(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
     engine::zed::push(env.home, state, env.store, env.machine)
 }
@@ -1572,7 +1576,20 @@ fn apply_opencode(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenRe
     Ok(g)
 }
 fn apply_copilot(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
-    Ok(engine::copilot::apply(env.home, state, env.store, env.listing, env.tick, env.record)?.into())
+    // File layer first so session-state dirs land before the db merge
+    // checks for them; the layers stay independent like Codex/OpenCode.
+    let mut g = GenReport::default();
+    match engine::copilot::apply(env.home, state, env.store, env.listing, env.tick, env.record) {
+        Ok(f) => g.absorb(f),
+        Err(e) => g.errors.push(format!("file-layer apply failed: {e:#}")),
+    }
+    match engine::copilot::db_apply(
+        env.home, env.tok, state, env.store, env.listing, env.tick, env.record,
+    ) {
+        Ok(d) => g.absorb(d),
+        Err(e) => g.errors.push(format!("merging into session-store.db failed: {e:#}")),
+    }
+    Ok(g)
 }
 fn apply_zed(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenReport> {
     Ok(engine::zed::apply(env.home, state, env.store, env.listing, env.tick, env.record)?.into())
@@ -1608,7 +1625,7 @@ fn tool_runs() -> Vec<ToolRun> {
         ToolRun { id: "vscode", name: "VS Code", purge_prefix: Some("vscode/"), scope: None, detect: d_vscode, paths: p_vscode, scan: Some(scan_vscode), publish: None, apply: apply_vscode },
         ToolRun { id: "codex", name: "Codex", purge_prefix: Some("codex/"), scope: None, detect: engine::codex::detect, paths: p_codex, scan: None, publish: Some(publish_codex), apply: apply_codex },
         ToolRun { id: "opencode", name: "OpenCode", purge_prefix: Some("opencode/"), scope: None, detect: engine::opencode::detect, paths: p_opencode, scan: Some(scan_opencode), publish: Some(publish_opencode), apply: apply_opencode },
-        ToolRun { id: "copilot", name: "Copilot CLI", purge_prefix: Some("copilot/"), scope: None, detect: engine::copilot::detect, paths: p_copilot, scan: Some(scan_copilot), publish: None, apply: apply_copilot },
+        ToolRun { id: "copilot", name: "Copilot CLI", purge_prefix: Some("copilot/"), scope: None, detect: engine::copilot::detect, paths: p_copilot, scan: Some(scan_copilot), publish: Some(publish_copilot), apply: apply_copilot },
         ToolRun { id: "zed", name: "Zed", purge_prefix: Some("zed/"), scope: None, detect: d_zed, paths: p_zed, scan: None, publish: Some(publish_zed), apply: apply_zed },
         ToolRun { id: "shared", name: "Global skills", purge_prefix: None, scope: Some("shared"), detect: d_always, paths: p_shared, scan: Some(scan_shared), publish: None, apply: apply_shared },
     ]
