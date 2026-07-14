@@ -32,15 +32,43 @@ fn set_tray_busy(app: &tauri::AppHandle, busy: bool) {
     }
 }
 
-/// Notify only when the sync actually moved something — silence is health.
+/// The popover is on screen — the user is watching badges and counters
+/// update live, so a toast would only repeat what they can already see.
+fn popover_visible(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false)
+}
+
+/// Notify only when the sync brought NEWS the user isn't already looking
+/// at: arrivals while the popover is closed. Uploads are this machine's
+/// own routine work — never worth a toast (silence is health) — and when
+/// a receiving app needs a restart to show the arrivals, the toast says
+/// so instead of just counting.
 fn notify_outcome(app: &tauri::AppHandle, outcome: &syncer::SyncOutcome) {
     use tauri_plugin_notification::NotificationExt;
-    let body = match (outcome.pushed, outcome.pulled) {
-        (0, 0) => return,
-        (p, 0) => format!("Sync complete — {p} file{} uploaded", if p == 1 { "" } else { "s" }),
-        (0, q) => format!("Sync complete — {q} file{} arrived", if q == 1 { "" } else { "s" }),
-        (p, q) => format!("Sync complete — {p} up, {q} down"),
-    };
+    if outcome.pulled == 0 || popover_visible(app) {
+        return;
+    }
+    let q = outcome.pulled;
+    let mut body = format!("{q} new item{} arrived", if q == 1 { "" } else { "s" });
+    if let Ok(paths) = syncer::paths(app) {
+        let ledger = syncer::load_ledger(&paths);
+        let names: Vec<&str> = ledger
+            .0
+            .iter()
+            .filter(|(_, e)| e.restart_pid.is_some())
+            .filter_map(|(id, _)| match id.as_str() {
+                "claude-code" => Some("Claude Code"),
+                "vscode" => Some("VS Code"),
+                "zed" => Some("Zed"),
+                _ => None,
+            })
+            .collect();
+        if !names.is_empty() {
+            body.push_str(&format!(" — restart {} to see them", names.join(" and ")));
+        }
+    }
     let _ = app.notification().builder().title("VibeSync").body(body).show();
 }
 
@@ -507,23 +535,29 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
                 }
                 Ok(Err(e)) => {
                     syncer::debug_log_error(&paths, &format!("autosync failed: {e:#}"));
-                    use tauri_plugin_notification::NotificationExt;
-                    let _ = app
-                        .notification()
-                        .builder()
-                        .title("VibeSync")
-                        .body(format!("Sync failed: {e:#}"))
-                        .show();
+                    // Failures matter enough to toast — but an open popover
+                    // already shows the error via the event below.
+                    if !popover_visible(&app) {
+                        use tauri_plugin_notification::NotificationExt;
+                        let _ = app
+                            .notification()
+                            .builder()
+                            .title("VibeSync")
+                            .body(format!("Sync failed: {e:#}"))
+                            .show();
+                    }
                     let _ = app.emit("autosync-error", format!("{e:#}"));
                 }
                 Err(_) => {
-                    use tauri_plugin_notification::NotificationExt;
-                    let _ = app
-                        .notification()
-                        .builder()
-                        .title("VibeSync")
-                        .body("Sync crashed — will retry in 15 minutes")
-                        .show();
+                    if !popover_visible(&app) {
+                        use tauri_plugin_notification::NotificationExt;
+                        let _ = app
+                            .notification()
+                            .builder()
+                            .title("VibeSync")
+                            .body("Sync crashed — will retry next interval")
+                            .show();
+                    }
                     let _ = app.emit("autosync-error", "sync crashed".to_string());
                 }
             }
