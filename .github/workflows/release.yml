@@ -26,12 +26,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Bundle formats come from tauri.conf.json ("targets": "all") —
+          # the CLI has no --bundle flag (first live run failed on it).
           - platform: macos-latest
-            args: --target universal-apple-darwin --bundle all
+            args: --target universal-apple-darwin
           - platform: ubuntu-22.04
-            args: --bundle all
+            args: ''
           - platform: windows-latest
-            args: --bundle all
+            args: ''
 
     runs-on: ${{ matrix.platform }}
 
