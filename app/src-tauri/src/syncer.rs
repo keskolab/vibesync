@@ -198,6 +198,25 @@ fn save_ledger(paths: &Paths, ledger: &NewLedger) -> Result<()> {
     Ok(std::fs::write(ledger_path(paths), serde_json::to_vec(ledger)?)?)
 }
 
+/// Per-tool count of items the last sync left waiting in storage because
+/// their project isn't on this machine yet (repo not cloned, session
+/// scaffolding not delivered). Rewritten every sync — parked items are
+/// re-examined each pass, so the latest tally is the current truth.
+fn parked_path(paths: &Paths) -> PathBuf {
+    paths.state.with_file_name("parked.json")
+}
+
+pub fn load_parked(paths: &Paths) -> std::collections::BTreeMap<String, usize> {
+    std::fs::read(parked_path(paths))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_parked(paths: &Paths, parked: &std::collections::BTreeMap<String, usize>) -> Result<()> {
+    Ok(std::fs::write(parked_path(paths), serde_json::to_vec(parked)?)?)
+}
+
 /// Mark a tool's badge seen (hides it; provenance stays on the tool page).
 pub fn ack_new(paths: &Paths, id: &str) -> Result<()> {
     let mut ledger = load_ledger(paths);
@@ -521,6 +540,9 @@ pub struct ToolStatus {
     /// The tool's GUI was running when the items arrived and hasn't
     /// restarted since — it is still showing its launch-time view.
     pub needs_restart: bool,
+    /// Items the last sync left waiting in storage — their project isn't
+    /// on this machine yet, so they can't be placed anywhere.
+    pub parked: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -780,6 +802,7 @@ pub fn status(paths: &Paths) -> Result<Status> {
             ]
         },
     };
+    let parked = load_parked(paths);
     for t in &mut st.tools {
         if let Some(e) = ledger.0.get(t.id) {
             t.new_items = e.count;
@@ -788,6 +811,7 @@ pub fn status(paths: &Paths) -> Result<Status> {
             t.new_sources = e.sources.clone();
             t.needs_restart = e.restart_pid.is_some();
         }
+        t.parked = parked.get(t.id).copied().unwrap_or(0);
     }
     if let Some(e) = ledger.0.get("shared") {
         st.shared_new = e.count;
@@ -1223,6 +1247,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         record: &record_pull,
     };
     let mut tool_errors: Vec<String> = Vec::new();
+    let mut parked_counts: std::collections::BTreeMap<String, usize> = Default::default();
     for (t, (inst, enabled)) in tools.iter().zip(&tool_state) {
         if !(*inst && *enabled) {
             continue;
@@ -1252,6 +1277,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
                         "{}: {} items parked (project not on this machine yet)",
                         t.id, r.parked
                     ));
+                    parked_counts.insert(t.id.to_string(), r.parked);
                 }
                 for err in &r.errors {
                     dlog.error(format!("{}: {err}", t.id));
@@ -1346,6 +1372,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     }
     let ledger = rebuild_ledger(load_ledger(paths), arrivals, now_ms(), &gui_pid);
     let _ = save_ledger(paths, &ledger);
+    let _ = save_parked(paths, &parked_counts);
 
     dlog.info(format!(
         "sync done in {} ms — {} up, {} down",
