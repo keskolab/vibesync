@@ -2,12 +2,15 @@
 
 VibeSync is a small menu bar app that keeps your AI coding sessions in sync across all your computers. Start a Claude Code session on your desktop, open your laptop, and continue where you left off — history, plans, custom agents, skills, and settings included.
 
+It runs on **both macOS and Windows**, in any mix — a Mac at home and a Windows PC at work sync with each other just fine, and sessions translate across the two systems automatically.
+
 Your data lives in a place **you** control: a folder you already sync (iCloud Drive, OneDrive, Dropbox, Google Drive), your own cloud bucket (Cloudflare R2, Amazon S3, Azure), or a USB disk. There is no account, no middleman server — and anything sent to cloud storage is encrypted on your machine first.
 
 <p align="center">
-  <img src="assets/img/macOS-1.png" alt="VibeSync menu bar popover with sync status and tool toggles" width="30%" />
-  <img src="assets/img/macOS-2.png" alt="Per-tool sync scopes for Claude Code" width="30%" />
-  <img src="assets/img/macOS-3.png" alt="Settings with auto-sync, launch at login, and storage location" width="30%" />
+  <img src="assets/img/macOS-1.png" alt="VibeSync menu bar popover with sync status and tool toggles (macOS)" width="24%" />
+  <img src="assets/img/macOS-2.png" alt="Per-tool sync scopes for Claude Code (macOS)" width="24%" />
+  <img src="assets/img/macOS-3.png" alt="Settings with auto-sync, launch at login, and storage location (macOS)" width="24%" />
+  <img src="assets/img/windows-1.png" alt="VibeSync system tray app on Windows" width="24%" />
 </p>
 
 ### Why does this exist?
@@ -123,9 +126,16 @@ Here's the one thing worth knowing about how your AI apps behave: GUI tools (Cla
 
 VibeSync tells you when rule 2 applies: the badge changes to *"+N new · restart VS Code"* whenever items arrived while that app was running, and the hint disappears on its own once you've restarted it. Command-line tools (Codex, Copilot CLI, `claude`) are never affected — they read fresh on every run. And your data is never at risk either way — this is purely about what's on screen.
 
-### How to run VibeSync
+### How to install VibeSync
 
-There are no installers yet — you build and run it from source. You need two free tools installed first: [Rust](https://rustup.rs) and [Node.js](https://nodejs.org). Then:
+Grab the installer for your system from the [**Releases page**](https://github.com/JohnKesko/vibesync/releases) — a `.dmg` for macOS (works on both Apple Silicon and Intel), a `.exe` or `.msi` installer for Windows. The app updates itself after that.
+
+**A note on the Windows install warning, in the spirit of transparency:** when you run the Windows installer, Windows will warn you about an "unknown publisher" and ask for administrator permission. That's because the app isn't code-signed yet — a publisher certificate costs several hundred dollars *per year*, which is hard to justify for a free, open-source tool. The warning means "Windows doesn't know who built this," not "this is dangerous" — and since every line of the code is public in this repository, you can see exactly what you're running (or build it yourself from source below, which produces the identical app). Click **More info → Run anyway** to proceed. The macOS build is signed with an Apple developer certificate and opens like any other app.
+
+<details>
+<summary><b>Or build and run from source</b></summary>
+
+You need two free tools installed first: [Rust](https://rustup.rs) and [Node.js](https://nodejs.org). Then:
 
 ```sh
 # 1. Get the code
@@ -136,15 +146,17 @@ cd vibesync
 cd app && npm install && npm run tauri dev
 ```
 
-That's it. VibeSync appears in your **menu bar** (macOS) or **system tray** (Windows). Open it, walk through the Setup Assistant — pick which tools to sync and where your sessions should live — and press **Sync**.
-
-To sync between computers, repeat the same steps on each one and point them all at the same storage location (with the same passphrase, if it's a cloud bucket).
-
 Optional health check — run the engine's test suite:
 
 ```sh
 cargo test -p vibesync-engine
 ```
+
+</details>
+
+Once it's running, VibeSync appears in your **menu bar** (macOS) or **system tray** (Windows). Open it, walk through the Setup Assistant — pick which tools to sync and where your sessions should live — and press **Sync**.
+
+To sync between computers, repeat the same steps on each one and point them all at the same storage location (with the same passphrase, if it's a cloud bucket).
 
 <details>
 <summary><b>Every file VibeSync touches</b> — full transparency list</summary>
