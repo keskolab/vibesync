@@ -157,13 +157,15 @@ pub fn mtime_ms(path: &Path) -> Result<i64> {
 /// tokenized (so encoded-home directory names become portable).
 ///
 /// `exts` empty = all files. `exclude_dirs` are directory names skipped
-/// anywhere under the root. A root that is a single file yields one entry.
+/// anywhere under the root; `exclude_files` are file names (or `*.suffix`
+/// patterns) skipped anywhere. A root that is a single file yields one entry.
 pub fn scan_root(
     abs_root: &Path,
     logical_prefix: &str,
     tok: &Tokenizer,
     exts: &[&str],
     exclude_dirs: &[&str],
+    exclude_files: &[&str],
 ) -> Result<Vec<FileEntry>> {
     let mut out = Vec::new();
     if !abs_root.exists() {
@@ -194,6 +196,14 @@ pub fn scan_root(
             continue;
         }
         let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| crate::adapters::file_excluded(n, exclude_files))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let ext_ok = exts.is_empty()
             || path
                 .extension()

@@ -17,8 +17,24 @@ pub struct RootSpec {
     pub exts: &'static [&'static str],
     /// Directory names skipped anywhere under this root (e.g. plugin caches).
     pub exclude_dirs: &'static [&'static str],
+    /// File names skipped anywhere under this root. Exact basename match
+    /// (case-insensitive), or `*.suffix` for a suffix match. For files
+    /// whose CONTENT is machine-local — absolute install paths, atomic-
+    /// write temp residue — which must neither push nor apply.
+    pub exclude_files: &'static [&'static str],
     /// True when `home_rel` names a single file rather than a directory.
     pub is_file: bool,
+}
+
+/// Does `name` match an exclude_files entry?
+pub(crate) fn file_excluded(name: &str, exclude_files: &[&str]) -> bool {
+    exclude_files.iter().any(|x| {
+        if let Some(suffix) = x.strip_prefix('*') {
+            name.to_ascii_lowercase().ends_with(&suffix.to_ascii_lowercase())
+        } else {
+            name.eq_ignore_ascii_case(x)
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -34,11 +50,11 @@ pub struct Adapter {
 }
 
 const fn root(home_rel: &'static str, logical_prefix: &'static str, exts: &'static [&'static str]) -> RootSpec {
-    RootSpec { home_rel, logical_prefix, exts, exclude_dirs: &[], is_file: false }
+    RootSpec { home_rel, logical_prefix, exts, exclude_dirs: &[], exclude_files: &[], is_file: false }
 }
 
 const fn file_root(home_rel: &'static str, logical_prefix: &'static str) -> RootSpec {
-    RootSpec { home_rel, logical_prefix, exts: &[], exclude_dirs: &[], is_file: true }
+    RootSpec { home_rel, logical_prefix, exts: &[], exclude_dirs: &[], exclude_files: &[], is_file: true }
 }
 
 pub const CLAUDE_CODE: Adapter = Adapter {
@@ -60,12 +76,23 @@ pub const CLAUDE_CODE: Adapter = Adapter {
     ],
     optional_roots: &[
         // Plugins can be huge; never synced by default. The cache is
-        // re-downloadable and excluded even when the user opts in.
+        // re-downloadable and excluded even when the user opts in. The
+        // install registries are MACHINE-LOCAL: they carry absolute
+        // installPaths into this machine's cache/ — syncing them shows
+        // phantom "installed" plugins on other machines, and a plugin
+        // operation there could prune the origin's entries and clobber
+        // them back (live-caught 2026-07-14, Mac paths on Windows).
         RootSpec {
             home_rel: ".claude/plugins",
             logical_prefix: "plugins",
             exts: &[],
             exclude_dirs: &["cache"],
+            exclude_files: &[
+                "installed_plugins.json",
+                "known_marketplaces.json",
+                ".last_inuse_sweep",
+                "*.tmp",
+            ],
             is_file: false,
         },
     ],
@@ -119,7 +146,8 @@ impl Adapter {
         for root in self.active_roots(include_optional) {
             let rel = root.home_rel.replacen(".claude", dir, 1);
             let abs = join_home(home, &rel);
-            let mut entries = scan_root(&abs, root.logical_prefix, tok, root.exts, root.exclude_dirs)?;
+            let mut entries =
+                scan_root(&abs, root.logical_prefix, tok, root.exts, root.exclude_dirs, root.exclude_files)?;
             for e in &mut entries {
                 e.logical = format!("{ns}{}", e.logical);
             }
@@ -194,6 +222,16 @@ impl Adapter {
                     return Some(abs);
                 }
                 continue;
+            }
+            // Store residue for excluded files (pushed by older builds)
+            // must not apply either.
+            if rest
+                .rsplit('/')
+                .next()
+                .map(|n| file_excluded(n, root.exclude_files))
+                .unwrap_or(false)
+            {
+                return None;
             }
             let mut abs = abs;
             for comp in rest.split('/') {
