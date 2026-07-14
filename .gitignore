@@ -3,3 +3,4 @@ node_modules/
 app/src-tauri/gen/schemas/
 .DS_Store
 *.log
+app/bun.lock
