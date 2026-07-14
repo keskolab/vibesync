@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: JohnKesko.VibeSync
+PackageVersion: 0.2.0
+PackageLocale: en-US
+Publisher: JohnKesko
+PublisherUrl: https://github.com/JohnKesko
+PackageName: VibeSync
+PackageUrl: https://github.com/JohnKesko/vibesync
+License: GPL-3.0
+LicenseUrl: https://github.com/JohnKesko/vibesync/blob/main/LICENSE
+ShortDescription: Keep your AI coding sessions in sync across all your computers.
+Description: >-
+  VibeSync is a small system tray app that keeps AI coding sessions
+  (Claude Code, Codex, VS Code Copilot Chat, Copilot CLI, OpenCode, Zed)
+  in sync across macOS and Windows machines, using storage you control —
+  a synced folder, your own cloud bucket, or a USB disk. End-to-end
+  encrypted for cloud storage; no account, no middleman server.
+Tags:
+  - ai
+  - claude
+  - codex
+  - copilot
+  - sync
+  - developer-tools
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
