@@ -242,9 +242,12 @@ const esc = (s) =>
 	String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 // "+N new · 16:04" chip for a tool/shared card with unseen synced items.
-function newBadge(count, ms, seen) {
+// When the tool's GUI was running while they arrived (and hasn't restarted
+// since), the chip says what to do instead of when they came.
+function newBadge(count, ms, seen, restartName) {
 	if (!count || seen) return "";
-	return ` <span class="badge-new">+${count} new${ms ? ` · ${fmtClock(ms)}` : ""}</span>`;
+	const tail = restartName ? ` · restart ${esc(restartName)}` : ms ? ` · ${fmtClock(ms)}` : "";
+	return ` <span class="badge-new">+${count} new${tail}</span>`;
 }
 
 function renderStatusLine() {
@@ -300,7 +303,7 @@ function renderAll() {
       ${ICONS[t.id] || ""}
       <div class="tlabel">${t.name}<span class="tsub">${
 				t.installed
-					? `${t.sessions} sessions · ${t.plans} plans · ${fmtSizeStr(t.bytes)}${newBadge(t.newItems, t.newMs, t.newSeen)}`
+					? `${t.sessions} sessions · ${t.plans} plans · ${fmtSizeStr(t.bytes)}${newBadge(t.newItems, t.newMs, t.newSeen, t.needsRestart ? t.name : "")}`
 					: "Not installed"
 			}</span></div>
       ${
@@ -409,7 +412,9 @@ function openTool(t) {
 	if (t.newItems > 0) {
 		nl.style.display = "";
 		nv.style.display = "";
-		nl.textContent = `New in last sync${t.newMs ? ` · ${fmtClock(t.newMs)}` : ""}`;
+		nl.textContent = t.needsRestart
+			? `New — restart ${t.name} to see them`
+			: `New in last sync${t.newMs ? ` · ${fmtClock(t.newMs)}` : ""}`;
 		const pretty = (name) => name.replace(/\.(local|lan|home)$/i, "");
 		nv.innerHTML = sources.length
 			? sources

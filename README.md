@@ -112,6 +112,10 @@ Rule of thumb: **if your project is a git repo, put it wherever you like. If it'
 
 Works on macOS and Windows, in any mix. Each app has its own on/off switch, per-area scopes, a "+N new" badge when a sync brings something in, and the main window shows when the next auto-sync will run.
 
+### Synced sessions don't show up?
+
+Restart the app you're looking at. GUI tools (Claude Code, VS Code, Zed) read their session history **once, at launch** — anything VibeSync delivers while they're open stays invisible until the next restart. VibeSync tells you when this applies: the badge changes to *"+N new · restart VS Code"* whenever items arrived while that app was running, and the hint disappears on its own once you've restarted it. Command-line tools (Codex, Copilot CLI, `claude`) are never affected — they read fresh on every run. Your data is never at risk either way; this is purely about what's on screen.
+
 ### How to run VibeSync
 
 There are no installers yet — you build and run it from source. You need two free tools installed first: [Rust](https://rustup.rs) and [Node.js](https://nodejs.org). Then:
