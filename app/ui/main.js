@@ -428,6 +428,18 @@ function openTool(t) {
 		nl.style.display = "none";
 		nv.style.display = "none";
 	}
+	// Items the last sync left in storage because their project isn't on
+	// this machine yet — they land automatically once it appears.
+	const pl = $("tool-parked-label");
+	const pv = $("tool-parked");
+	if (t.parked > 0) {
+		pl.style.display = "";
+		pv.style.display = "";
+		pv.innerHTML = `<div><span>For projects not on this computer yet — they arrive when the project does (e.g. clone the repo)</span><b>${t.parked}</b></div>`;
+	} else {
+		pl.style.display = "none";
+		pv.style.display = "none";
+	}
 	const extra = $("tool-counts-extra");
 	if (t.id === "claude-code") {
 		extra.style.display = "";

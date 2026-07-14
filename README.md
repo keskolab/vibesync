@@ -110,7 +110,7 @@ Rule of thumb: **if your project is a git repo, put it wherever you like. If it'
 | Copilot CLI | Standalone `copilot` sessions, conversations included — resume them from any machine |
 | All tools | Global skills in `~/.agents/skills` ([Agent Skills spec](https://agentskills.io)) |
 
-Works on macOS and Windows, in any mix. Each app has its own on/off switch, per-area scopes, a "+N new" badge when a sync brings something in, and the main window shows when the next auto-sync will run.
+Works on macOS and Windows, in any mix. Each app has its own on/off switch, per-area scopes, a "+N new" badge when a sync brings something in, and the main window shows when the next auto-sync will run. Each app's page also shows how many items are **waiting in storage** for a project that isn't on this computer yet — clone the repo and they land on the next sync.
 
 ### Synced sessions don't show up?
 
