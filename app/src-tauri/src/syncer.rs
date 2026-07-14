@@ -72,6 +72,115 @@ pub struct NewEntry {
     /// Which machine each item came from: source -> count.
     #[serde(default)]
     pub sources: std::collections::BTreeMap<String, usize>,
+    /// PID of the tool's GUI process that was running when these items
+    /// arrived. That process read its session data at launch and won't see
+    /// the new items until it restarts — the UI shows "restart X to see
+    /// them" while this is set. None for CLI tools (they read fresh every
+    /// run) or when the app wasn't running during the sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_pid: Option<u32>,
+}
+
+/// PID of the running GUI app a tool's synced data is invisible to until
+/// restart. Only the apps that cache session data at launch are listed;
+/// CLI tools always read fresh and return None. Multiple processes (VS
+/// Code helpers, extra windows) resolve to the lowest pid — the main
+/// process, which lives exactly as long as the app itself.
+fn gui_pid(id: &str) -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        // (-x = exact executable name, -f = full command line for names
+        // too generic to match exactly, bound to the .app path. -a keeps
+        // ancestors in the match — BSD pgrep silently drops them, which
+        // hides the app entirely when the caller runs inside it.)
+        let (exact, frag): (&[&str], &[&str]) = match id {
+            "claude-code" => (&["Claude"], &[]),
+            "vscode" => (&[], &["Visual Studio Code.app/", "Code - Insiders.app/"]),
+            "zed" => (&["zed", "Zed"], &[]),
+            _ => return None,
+        };
+        let mut pids: Vec<u32> = Vec::new();
+        for (flag, pats) in [("-ax", exact), ("-af", frag)] {
+            for p in pats {
+                if let Ok(out) = std::process::Command::new("pgrep").arg(flag).arg(p).output() {
+                    pids.extend(
+                        String::from_utf8_lossy(&out.stdout)
+                            .lines()
+                            .filter_map(|l| l.trim().parse::<u32>().ok()),
+                    );
+                }
+            }
+        }
+        pids.into_iter().min()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let names: &[&str] = match id {
+            "claude-code" => &["Claude.exe"],
+            "vscode" => &["Code.exe", "Code - Insiders.exe"],
+            "zed" => &["Zed.exe"],
+            _ => return None,
+        };
+        let mut pids: Vec<u32> = Vec::new();
+        for n in names {
+            if let Ok(out) = std::process::Command::new("tasklist")
+                .args(["/FO", "CSV", "/NH", "/FI", &format!("IMAGENAME eq {n}")])
+                .output()
+            {
+                // CSV rows: "Code.exe","1234",... — no-match prints an
+                // INFO line that parses to nothing.
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    if let Some(pid) = line
+                        .split("\",\"")
+                        .nth(1)
+                        .and_then(|s| s.trim_matches('"').parse().ok())
+                    {
+                        pids.push(pid);
+                    }
+                }
+            }
+        }
+        pids.into_iter().min()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = id;
+        None
+    }
+}
+
+/// Rebuild the per-sync ledger. Fresh arrivals replace a tool's entry and
+/// stamp the GUI pid that must restart before they're visible. An old
+/// entry whose recorded process is STILL running carries forward — the
+/// user hasn't restarted the app, so those items stay invisible no matter
+/// how many quiet syncs pass, and the badge must not silently vanish.
+fn rebuild_ledger(
+    old: NewLedger,
+    arrivals: std::collections::BTreeMap<&'static str, std::collections::BTreeMap<String, usize>>,
+    now: i64,
+    pid_of: &dyn Fn(&str) -> Option<u32>,
+) -> NewLedger {
+    let mut ledger = NewLedger::default();
+    for (id, sources) in arrivals {
+        let count: usize = sources.values().sum();
+        if count > 0 {
+            ledger.0.insert(
+                id.to_string(),
+                NewEntry { count, ts_ms: now, seen: false, sources, restart_pid: pid_of(id) },
+            );
+        }
+    }
+    for (id, e) in old.0 {
+        if ledger.0.contains_key(&id) {
+            continue;
+        }
+        if let Some(pid) = e.restart_pid {
+            if pid_of(&id) == Some(pid) {
+                ledger.0.insert(id, e);
+            }
+        }
+    }
+    ledger
 }
 
 fn ledger_path(paths: &Paths) -> PathBuf {
@@ -409,6 +518,9 @@ pub struct ToolStatus {
     pub new_seen: bool,
     /// Which machine the items came from: source -> count.
     pub new_sources: std::collections::BTreeMap<String, usize>,
+    /// The tool's GUI was running when the items arrived and hasn't
+    /// restarted since — it is still showing its launch-time view.
+    pub needs_restart: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -583,7 +695,25 @@ pub fn status(paths: &Paths) -> Result<Status> {
     };
     let claude_last = newest(".claude/projects", Some("jsonl"));
 
-    let ledger = load_ledger(paths);
+    let ledger = {
+        // Resolve restart hints: a recorded pid that is no longer the
+        // running process means the app restarted (or quit) and re-read
+        // its data at launch — stop asking for a restart.
+        let mut ledger = load_ledger(paths);
+        let mut changed = false;
+        for (id, e) in ledger.0.iter_mut() {
+            if let Some(pid) = e.restart_pid {
+                if gui_pid(id) != Some(pid) {
+                    e.restart_pid = None;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            let _ = save_ledger(paths, &ledger);
+        }
+        ledger
+    };
     let mut st = Status {
         configured: config.is_some(),
         store_desc,
@@ -656,6 +786,7 @@ pub fn status(paths: &Paths) -> Result<Status> {
             t.new_ms = Some(e.ts_ms);
             t.new_seen = e.seen;
             t.new_sources = e.sources.clone();
+            t.needs_restart = e.restart_pid.is_some();
         }
     }
     if let Some(e) = ledger.0.get("shared") {
@@ -1213,14 +1344,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             *e = (*e).max(n);
         }
     }
-    let mut ledger = NewLedger::default();
-    let now = now_ms();
-    for (id, sources) in arrivals {
-        let count: usize = sources.values().sum();
-        if count > 0 {
-            ledger.0.insert(id.to_string(), NewEntry { count, ts_ms: now, seen: false, sources });
-        }
-    }
+    let ledger = rebuild_ledger(load_ledger(paths), arrivals, now_ms(), &gui_pid);
     let _ = save_ledger(paths, &ledger);
 
     dlog.info(format!(
@@ -2166,5 +2290,57 @@ mod tests {
         engine::dlog::debug(|| "should not appear either".to_string());
         let text2 = std::fs::read_to_string(debug_log_path(&paths)).unwrap();
         assert_eq!(text2.lines().count(), text.lines().count());
+    }
+
+    fn arrivals_of(
+        id: &'static str,
+        n: usize,
+    ) -> std::collections::BTreeMap<&'static str, std::collections::BTreeMap<String, usize>> {
+        let mut sources = std::collections::BTreeMap::new();
+        sources.insert("other-machine".to_string(), n);
+        let mut a = std::collections::BTreeMap::new();
+        a.insert(id, sources);
+        a
+    }
+
+    #[test]
+    fn restart_hint_survives_quiet_syncs_until_the_app_restarts() {
+        // Items arrive for VS Code while it's running (pid 42).
+        let ledger = rebuild_ledger(NewLedger::default(), arrivals_of("vscode", 3), 1000, &|id| {
+            (id == "vscode").then_some(42)
+        });
+        assert_eq!(ledger.0["vscode"].restart_pid, Some(42));
+        assert_eq!(ledger.0["vscode"].count, 3);
+
+        // A quiet sync while the same process is still running: the entry
+        // carries forward — the app still shows its launch-time view.
+        let ledger = rebuild_ledger(ledger, Default::default(), 2000, &|_| Some(42));
+        assert_eq!(ledger.0["vscode"].count, 3, "badge must not vanish while stale");
+        assert_eq!(ledger.0["vscode"].ts_ms, 1000, "original arrival time kept");
+
+        // The app restarts (new pid): the next quiet sync drops the entry.
+        let ledger = rebuild_ledger(ledger, Default::default(), 3000, &|_| Some(99));
+        assert!(ledger.0.is_empty(), "restarted app has seen everything");
+    }
+
+    #[test]
+    fn restart_hint_absent_for_cli_tools_and_closed_apps() {
+        // CLI tool (pid lookup returns None) — no hint, and the entry
+        // follows the original last-sync-only lifecycle.
+        let ledger = rebuild_ledger(NewLedger::default(), arrivals_of("copilot", 2), 1000, &|_| None);
+        assert_eq!(ledger.0["copilot"].restart_pid, None);
+        let ledger = rebuild_ledger(ledger, Default::default(), 2000, &|_| None);
+        assert!(ledger.0.is_empty(), "no restart pending: quiet sync clears as before");
+    }
+
+    #[test]
+    fn fresh_arrivals_replace_a_pending_restart_entry() {
+        let ledger = rebuild_ledger(NewLedger::default(), arrivals_of("vscode", 3), 1000, &|_| Some(42));
+        // More items arrive in a later sync, same process still running:
+        // fresh counts win, pid re-stamped.
+        let ledger = rebuild_ledger(ledger, arrivals_of("vscode", 5), 2000, &|_| Some(42));
+        assert_eq!(ledger.0["vscode"].count, 5);
+        assert_eq!(ledger.0["vscode"].ts_ms, 2000);
+        assert_eq!(ledger.0["vscode"].restart_pid, Some(42));
     }
 }
