@@ -66,14 +66,16 @@ That's the entire feature. The name itself can be anything — it just has to be
 
 Two things worth knowing: a mapping covers **everything beneath the folder**, so naming a parent like `D:\Code` once takes care of every project inside it. And most people never need any of this — git projects and home-folder projects already match on their own.
 
-A concrete example with three computers — a MacBook, an iMac, and a Windows PC:
+A concrete example — a Mac and a Windows PC:
 
-| Project | MacBook (macOS) | iMac (macOS) | Windows PC | Do sessions follow you? |
-|---|---|---|---|---|
-| Git repo `todo-app` | `~/Development/todo-app` | `~/Code/todo-app` | `C:\Github\todo-app` | ✅ Yes — the repo is the ID; three different locations, zero setup |
-| Plain folder `notes` | `~/Documents/notes` | `~/Documents/notes` | `C:\Users\you\Documents\notes` | ✅ Yes — same spot inside the home folder on every machine |
-| Plain folder `stuff` | `~/Desktop/stuff` | `/Volumes/Data/stuff` | `D:\misc\stuff` | ⚠️ Not automatically — give it the same project name on each machine (see above), then yes |
-| Git repo `todo-app`, not yet cloned on the iMac | `~/Development/todo-app` | *(not cloned)* | `C:\Github\todo-app` | ⏸ Sessions wait safely in storage; the moment you clone the repo on the iMac, they appear |
+| Project | On the Mac | On the Windows PC | Do sessions follow you? |
+|---|---|---|---|
+| Git repo `todo-app` | `~/dev/todo-app` | `C:\Github\todo-app` | ✅ Zero setup — the repo is the ID |
+| Plain folder `notes` | `~/Documents/notes` | `C:\Users\you\Documents\notes` | ✅ Same spot inside home |
+| Plain folder `stuff` | `~/Desktop/stuff` | `D:\misc\stuff` | ⚠️ Needs a project name (see above) |
+| Repo not cloned yet | `~/dev/todo-app` | *(not cloned)* | ⏸ Waits in storage until you clone |
+
+(The verdicts are short on purpose — the bullets above explain each case. And a third or fourth computer behaves exactly like the second: clone the repo, or keep the folder at the same home spot, and sessions follow.)
 
 **A realistic mixed case — everything in one Dropbox folder.** Say every computer runs Dropbox, and `~/Dropbox/Projects` is where all your work lives — a few git repos, and plenty of folders that never got one:
 
