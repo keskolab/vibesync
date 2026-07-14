@@ -43,7 +43,7 @@ The rules every sync follows:
 - **Nothing comes back from the dead.** When a tool cleans up old sessions (Claude does after ~30 days), your storage keeps them forever — but they're never pushed back onto a computer that already cleaned them up.
 - **Works across your computers with zero setup.** A session from `C:\Github\app` on your PC lands in `~/dev/app` on your Mac — same project, different folders, nothing to configure. Git projects are recognized by the repository itself; everything else follows your home folder layout automatically. If a computer doesn't have a project yet, that project's sessions just wait in your storage until it shows up — clone the repo and they're there.
 - **Only changes transfer.** After the first sync, routine syncs finish in seconds.
-- Adding another computer is just: install VibeSync, point it at the same place, enter the same passphrase, press Sync.
+- Adding another computer is just: install VibeSync, point it at the same place, enter the same passphrase, press Sync. One habit worth forming: **sync first, open your AI apps after** — they read their history when they start (details in ["Synced sessions don't show up?"](#synced-sessions-dont-show-up)).
 
 ### Git repo or just a folder? Why it matters
 
@@ -114,7 +114,12 @@ Works on macOS and Windows, in any mix. Each app has its own on/off switch, per-
 
 ### Synced sessions don't show up?
 
-Restart the app you're looking at. GUI tools (Claude Code, VS Code, Zed) read their session history **once, at launch** — anything VibeSync delivers while they're open stays invisible until the next restart. VibeSync tells you when this applies: the badge changes to *"+N new · restart VS Code"* whenever items arrived while that app was running, and the hint disappears on its own once you've restarted it. Command-line tools (Codex, Copilot CLI, `claude`) are never affected — they read fresh on every run. Your data is never at risk either way; this is purely about what's on screen.
+Here's the one thing worth knowing about how your AI apps behave: GUI tools (Claude Code, VS Code, Zed) read their session history **once, when they start** — they never check the disk again while running. Two practical rules follow:
+
+1. **Let the sync finish before you open the app.** Sitting down at a computer? Press Sync (or wait for the auto-sync — the main window shows when the next one runs), let it complete, *then* open Claude Code or VS Code. An app opened mid-sync shows whatever was on disk at that half-way moment.
+2. **App was already open while the sync ran? Restart it.** Anything delivered while it was running is on disk but invisible. Quit it fully — Cmd+Q on macOS, not just closing the window — and reopen.
+
+VibeSync tells you when rule 2 applies: the badge changes to *"+N new · restart VS Code"* whenever items arrived while that app was running, and the hint disappears on its own once you've restarted it. Command-line tools (Codex, Copilot CLI, `claude`) are never affected — they read fresh on every run. And your data is never at risk either way — this is purely about what's on screen.
 
 ### How to run VibeSync
 
