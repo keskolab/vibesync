@@ -500,6 +500,14 @@ header {
 .kv b {
   font-weight: 500;
 }
+/* explanatory footnote row inside a kv block — full width, no value */
+.kv .kv-note {
+  justify-content: flex-start;
+}
+.kv .kv-note span {
+  font-size: 11px;
+  line-height: 1.35;
+}
 /* Left-aligned variant: label + value flow together instead of the value
    being pushed to the card's far edge (awkward with long values). */
 .kv-left div {
