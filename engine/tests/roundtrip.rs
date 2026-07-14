@@ -164,7 +164,8 @@ fn expanded_scopes_and_plugin_opt_in() {
     w("skills/deploy/SKILL.md", "skill");
     w("rules/style.md", "rule");
     w("tasks/t1.json", "{}");
-    w("plugins/installed_plugins.json", "{}");
+    w("plugins/marketplaces/official/manifest.json", "{}");
+    w("plugins/installed_plugins.json", "{}"); // machine-local — never syncs
     w("plugins/cache/huge/blob.bin", "xxxxxxxx");
 
     let tok = &a.tok;
@@ -184,11 +185,13 @@ fn expanded_scopes_and_plugin_opt_in() {
     // Plugins never sync by default.
     assert!(!logicals.iter().any(|l| l.starts_with("claude/plugins/")));
 
-    // Opt-in includes the manifest but NEVER the cache.
+    // Opt-in includes marketplace content but NEVER the cache, and never
+    // the machine-local install registries (absolute cache paths inside).
     let with_plugins = CLAUDE_CODE.scan(&a.home, tok, true).unwrap();
     let logicals: Vec<&str> = with_plugins.iter().map(|e| e.logical.as_str()).collect();
-    assert!(logicals.contains(&"claude/plugins/installed_plugins.json"));
+    assert!(logicals.contains(&"claude/plugins/marketplaces/official/manifest.json"));
     assert!(!logicals.iter().any(|l| l.contains("cache")), "cache leaked: {logicals:?}");
+    assert!(!logicals.iter().any(|l| l.contains("installed_plugins")), "{logicals:?}");
 
     // File roots resolve back to the right absolute path on another machine.
     let b = Machine::new(tmp.path(), "machine_b");

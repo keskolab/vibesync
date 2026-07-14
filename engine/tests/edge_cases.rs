@@ -515,6 +515,65 @@ fn vscode_index_titles_come_from_session_content() {
     assert_eq!(idx["entries"]["untitled-1"]["title"], "Synced chat");
 }
 
+// ---------------------------------------------------------------- plugins
+
+/// Live catch (plugins opt-in, 2026-07-14): installed_plugins.json and
+/// known_marketplaces.json carry absolute installPaths into this machine's
+/// plugins/cache/ — machine-local by nature. Synced to Windows they showed
+/// phantom Mac installs, and a plugin operation there could prune + clobber
+/// the origin's registry. They must neither push nor apply; atomic-write
+/// temp residue (blocklist.json.<hex>.tmp) must not travel either.
+#[test]
+fn plugin_machine_local_registries_never_travel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let plugins = home.join(".claude/plugins");
+    std::fs::create_dir_all(plugins.join("marketplaces/official")).unwrap();
+    std::fs::create_dir_all(plugins.join("cache/official/x/1.0")).unwrap();
+    std::fs::write(plugins.join("blocklist.json"), "{}").unwrap();
+    std::fs::write(plugins.join("installed_plugins.json"), "{\"plugins\":{}}").unwrap();
+    std::fs::write(plugins.join("known_marketplaces.json"), "{}").unwrap();
+    std::fs::write(plugins.join(".last_inuse_sweep"), "1").unwrap();
+    std::fs::write(plugins.join("blocklist.json.817da9dc.tmp"), "{}").unwrap();
+    std::fs::write(plugins.join("marketplaces/official/manifest.json"), "{}").unwrap();
+    std::fs::write(plugins.join("cache/official/x/1.0/huge.bin"), "x").unwrap();
+
+    let tok = Tokenizer::with_case_sensitivity(&home.to_string_lossy(), cfg!(windows));
+    let entries =
+        vibesync_engine::adapters::CLAUDE_CODE.scan(home, &tok, true).unwrap();
+    let logicals: Vec<&str> = entries.iter().map(|e| e.logical.as_str()).collect();
+    assert!(logicals.contains(&"claude/plugins/blocklist.json"), "{logicals:?}");
+    assert!(
+        logicals.contains(&"claude/plugins/marketplaces/official/manifest.json"),
+        "{logicals:?}"
+    );
+    for banned in [
+        "installed_plugins.json",
+        "known_marketplaces.json",
+        ".last_inuse_sweep",
+        ".tmp",
+        "cache/",
+    ] {
+        assert!(
+            !logicals.iter().any(|l| l.contains(banned)),
+            "{banned} must not sync: {logicals:?}"
+        );
+    }
+
+    // Store residue pushed by older builds must not apply either.
+    assert!(vibesync_engine::adapters::CLAUDE_CODE
+        .resolve(
+            "claude/plugins/installed_plugins.json",
+            home,
+            &tok,
+            true
+        )
+        .is_none());
+    assert!(vibesync_engine::adapters::CLAUDE_CODE
+        .resolve("claude/plugins/marketplaces/official/manifest.json", home, &tok, true)
+        .is_some());
+}
+
 // ---------------------------------------------------------------- registry
 
 /// The sidebar heal's core: entries snap to canonical local paths, and an

@@ -158,7 +158,7 @@ Nothing outside this list is read or written. `~` is your home folder (`C:\Users
 | Claude Code | `~/.claude/projects/` (sessions, transcripts, memory) | Syncs |
 | Claude Code | `~/.claude/plans/`, `tasks/`, `agents/`, `skills/`, `rules/` | Syncs |
 | Claude Code | `~/.claude/history.jsonl`, `settings.json`, `settings.local.json`, `CLAUDE.md` | Syncs |
-| Claude Code | `~/.claude/plugins/` | Only if you opt in; caches never |
+| Claude Code | `~/.claude/plugins/` | Only if you opt in; caches and per-machine install registries never — marketplaces follow you, installs stay local (`/plugin install` once per machine) |
 | Claude Code | `~/.claude-<profile>/` (extra accounts) | Same as above, per profile |
 | Claude Code | Desktop app sidebar registry ¹ | Adds/heals entries for synced sessions; natives backed up first |
 | VS Code | `.../Code/User/workspaceStorage/<id>/chatSessions/` ² | Syncs Copilot chats per project |
