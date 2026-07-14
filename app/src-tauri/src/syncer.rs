@@ -123,8 +123,15 @@ fn gui_pid(id: &str) -> Option<u32> {
         };
         let mut pids: Vec<u32> = Vec::new();
         for n in names {
+            // CREATE_NO_WINDOW: without it, a GUI app spawning a console
+            // process pops a real console window that STEALS FOCUS — and
+            // the tray popover hides on focus loss, so every popover open
+            // flashed a terminal and slammed the popover shut (live-hit
+            // on the installed 0.2.0; looked like the app crashing).
+            use std::os::windows::process::CommandExt;
             if let Ok(out) = std::process::Command::new("tasklist")
                 .args(["/FO", "CSV", "/NH", "/FI", &format!("IMAGENAME eq {n}")])
+                .creation_flags(0x0800_0000)
                 .output()
             {
                 // CSV rows: "Code.exe","1234",... — no-match prints an
