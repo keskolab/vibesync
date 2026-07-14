@@ -112,34 +112,69 @@ fn scan_db(db: &Path, home: &Path) -> Result<Vec<(String, String, Vec<u8>)>> {
     Ok(out)
 }
 
-pub fn push(home: &Path, state: &mut SyncState, store: &dyn SyncStore, machine: &str) -> Result<usize> {
+pub fn push(
+    home: &Path,
+    state: &mut SyncState,
+    store: &dyn SyncStore,
+    machine: &str,
+    listing: &[(String, RemoteMeta)],
+) -> Result<usize> {
     let Some(db) = db_path() else { return Ok(0) };
-    push_db(&db, home, state, store, machine)
+    push_db(&db, home, state, store, machine, listing)
 }
 
+/// Two memories per thread, in separate state slots (the Codex one-shot
+/// re-publish rule): the store version SEEN (main slot, written by apply)
+/// and our OWN canonical serialization (#own slot, written here). Machines
+/// on different Zed schema generations never serialize identically, so
+/// diffing publish against the apply-recorded hash re-exported every
+/// thread after every apply, forever — live-caught on the first Windows
+/// round (same thread uploaded on consecutive syncs from both sides).
 fn push_db(
     db: &Path,
     home: &Path,
     state: &mut SyncState,
     store: &dyn SyncStore,
     machine: &str,
+    listing: &[(String, RemoteMeta)],
 ) -> Result<usize> {
+    let prefix = format!("{PREFIX}/");
+    let remote: std::collections::HashMap<&str, (&str, i64)> = listing
+        .iter()
+        .filter(|(k, _)| k.starts_with(&prefix))
+        .map(|(k, m)| (k.as_str(), (m.hash.as_str(), m.mtime_ms)))
+        .collect();
     let mut pushed = 0;
     for (id, updated, json) in scan_db(db, home)? {
         let hash = hash_bytes(&json);
         let logical = format!("{PREFIX}/{id}.json");
-        if state.files.get(&logical).map(|s| s.hash == hash).unwrap_or(false) {
+        let eff = crate::dbsync::iso_ms(&updated);
+        let own_slot = format!("{logical}#own");
+        let own_prev = state.files.get(&own_slot).map(|s| s.hash == hash).unwrap_or(false)
+            || state.files.get(&logical).map(|s| s.hash == hash).unwrap_or(false);
+        state.files.insert(
+            own_slot,
+            FileState { hash: hash.clone(), mtime_ms: eff, size: 0, deleted_locally: false },
+        );
+        if let Some((rhash, rmtime)) = remote.get(logical.as_str()) {
+            // A strictly newer store copy always wins; at EQUAL version we
+            // re-publish only when our own canonical bytes changed since
+            // we last pushed — a deterministic local fact, so cross-schema
+            // drift settles in one bounded hop instead of ping-ponging.
+            if *rmtime > 0 && (*rhash == hash || *rmtime > eff || (*rmtime >= eff && own_prev)) {
+                continue;
+            }
+        } else if state.files.get(&logical).map(|s| s.hash == hash).unwrap_or(false) {
             continue;
         }
-        let mtime_ms = crate::dbsync::iso_ms(&updated);
         store.put(
             &logical,
             &json,
-            &RemoteMeta { hash: hash.clone(), mtime_ms, size: json.len() as u64, source: machine.to_string() },
+            &RemoteMeta { hash: hash.clone(), mtime_ms: eff, size: json.len() as u64, source: machine.to_string() },
         )?;
         state.files.insert(
             logical,
-            FileState { hash, mtime_ms, size: json.len() as u64, deleted_locally: false },
+            FileState { hash, mtime_ms: eff, size: json.len() as u64, deleted_locally: false },
         );
         pushed += 1;
     }
@@ -343,7 +378,7 @@ mod tests {
             .unwrap();
         }
         let mut st_a = SyncState::default();
-        assert_eq!(push_db(&a_db, &a_home, &mut st_a, &store, "a").unwrap(), 1);
+        assert_eq!(push_db(&a_db, &a_home, &mut st_a, &store, "a", &store.list().unwrap()).unwrap(), 1);
         // Store form: tokenized folder path, hex blob, versioned meta.
         let (json, meta) = store.get("zed/threads/t1.json").unwrap().unwrap();
         let text = String::from_utf8(json).unwrap();
@@ -371,7 +406,7 @@ mod tests {
         // Reverse: B's copy pushes back and the OLD schema accepts it
         // (missing worktree_branch hits the column default).
         let mut st_b2 = SyncState::default();
-        assert_eq!(push_db(&b_db, &b_home, &mut st_b2, &store, "b").unwrap(), 1);
+        assert_eq!(push_db(&b_db, &b_home, &mut st_b2, &store, "b", &store.list().unwrap()).unwrap(), 1);
         let a2_db = make_db_old(&tmp.path().join("a2_zed"));
         let mut st_a2 = SyncState::default();
         let r = apply_db(&a2_db, &a_home, &mut st_a2, &store, &store.list().unwrap(), &|| {}, &|_| {})
@@ -394,7 +429,7 @@ mod tests {
             .unwrap();
         }
         let mut st = SyncState::default();
-        push_db(&a_db, tmp.path(), &mut st, &store, "a").unwrap();
+        push_db(&a_db, tmp.path(), &mut st, &store, "a", &store.list().unwrap()).unwrap();
 
         let b_db = make_db_new(&tmp.path().join("b_zed"));
         {
@@ -415,6 +450,61 @@ mod tests {
             .query_row("SELECT summary FROM threads WHERE id='t2'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(s, "newer local");
+    }
+
+    #[test]
+    fn cross_schema_republish_settles_in_one_hop() {
+        // Live catch (Windows, 2026-07-14): after applying B's thread,
+        // Windows re-exported its own serialization every sync, and B
+        // mirrored it back — the codex ping-pong, reborn in zed.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FolderStore::new(tmp.path().join("store"));
+        let a_db = make_db_old(&tmp.path().join("a_zed"));
+        {
+            let conn = rusqlite::Connection::open(&a_db).unwrap();
+            conn.execute(
+                "INSERT INTO threads VALUES ('t4','Chat','2026-07-14T10:00:00+00:00',
+                 'zstd', x'0102', NULL, 'main', NULL, NULL, NULL)",
+                [],
+            )
+            .unwrap();
+        }
+        let mut st_a = SyncState::default();
+        assert_eq!(push_db(&a_db, tmp.path(), &mut st_a, &store, "a", &store.list().unwrap()).unwrap(), 1);
+
+        // B (different schema) applies, then re-publishes its own
+        // serialization ONCE — the bounded hop.
+        let b_db = make_db_new(&tmp.path().join("b_zed"));
+        let mut st_b = SyncState::default();
+        apply_db(&b_db, tmp.path(), &mut st_b, &store, &store.list().unwrap(), &|| {}, &|_| {})
+            .unwrap();
+        assert_eq!(
+            push_db(&b_db, tmp.path(), &mut st_b, &store, "b", &store.list().unwrap()).unwrap(),
+            1,
+            "first cross-schema re-publish is the one allowed hop"
+        );
+        let (_, meta_b) = store.get("zed/threads/t4.json").unwrap().unwrap();
+
+        // A sees B's copy: apply keeps the local row (equal version),
+        // records the store version — and its next publish must NOT push
+        // its own serialization back (own bytes unchanged since its push).
+        let r = apply_db(&a_db, tmp.path(), &mut st_a, &store, &store.list().unwrap(), &|| {}, &|_| {})
+            .unwrap();
+        assert_eq!(r.skipped_newer_local, 1);
+        assert_eq!(
+            push_db(&a_db, tmp.path(), &mut st_a, &store, "a", &store.list().unwrap()).unwrap(),
+            0,
+            "equal version + unchanged own bytes must settle, not ping-pong"
+        );
+        // And B stays settled too.
+        apply_db(&b_db, tmp.path(), &mut st_b, &store, &store.list().unwrap(), &|| {}, &|_| {})
+            .unwrap();
+        assert_eq!(
+            push_db(&b_db, tmp.path(), &mut st_b, &store, "b", &store.list().unwrap()).unwrap(),
+            0
+        );
+        let (_, meta_after) = store.get("zed/threads/t4.json").unwrap().unwrap();
+        assert_eq!(meta_after.hash, meta_b.hash, "store object stops churning");
     }
 
     #[test]

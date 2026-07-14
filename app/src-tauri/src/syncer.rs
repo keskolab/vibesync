@@ -1614,7 +1614,7 @@ fn publish_copilot(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usiz
     engine::copilot::db_push(env.home, env.tok, state, env.store, env.machine, env.listing)
 }
 fn publish_zed(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<usize> {
-    engine::zed::push(env.home, state, env.store, env.machine)
+    engine::zed::push(env.home, state, env.store, env.machine, env.listing)
 }
 
 /// The `<dirtok>` of a `claude/projects/<dirtok>/...` (or profiles/...) key.
