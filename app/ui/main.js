@@ -435,7 +435,9 @@ function openTool(t) {
 	if (t.parked > 0) {
 		pl.style.display = "";
 		pv.style.display = "";
-		pv.innerHTML = `<div><span>For projects not on this computer yet — they arrive when the project does (e.g. clone the repo)</span><b>${t.parked}</b></div>`;
+		pv.innerHTML =
+			`<div><span>Items for projects not on this computer</span><b>${t.parked}</b></div>` +
+			`<div class="kv-note"><span>They arrive automatically once the project exists here — e.g. after you clone the repo.</span></div>`;
 	} else {
 		pl.style.display = "none";
 		pv.style.display = "none";
