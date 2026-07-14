@@ -728,6 +728,16 @@ fn tray_icon_ex(busy: bool) -> Image<'static> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be first: a second launch (double-clicking the icon while
+        // the app already sits in the tray) hands off to the running
+        // instance and exits, instead of crashing on the shared WebView
+        // data dir (live-hit installing 0.2.0 over a running instance).
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
