@@ -163,35 +163,8 @@ fn open_ro(db: &Path) -> Result<rusqlite::Connection> {
     Ok(conn)
 }
 
-/// Copilot timestamps are ISO-8601 TEXT (`2026-07-13T12:41:13.292Z`, or
-/// SQLite's `2026-07-13 12:41:13` default form) — parse to epoch ms so
-/// they can version store objects. Unparseable → 0 (never blocks a merge).
-fn iso_ms(s: &str) -> i64 {
-    let b = s.as_bytes();
-    if b.len() < 19 {
-        return 0;
-    }
-    let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse().ok() };
-    let (Some(y), Some(mo), Some(d), Some(h), Some(mi), Some(sec)) = (
-        num(0..4),
-        num(5..7),
-        num(8..10),
-        num(11..13),
-        num(14..16),
-        num(17..19),
-    ) else {
-        return 0;
-    };
-    let ms = if b.len() >= 23 && b[19] == b'.' { num(20..23).unwrap_or(0) } else { 0 };
-    // Days-from-civil (Howard Hinnant's algorithm).
-    let y2 = y - if mo <= 2 { 1 } else { 0 };
-    let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
-    let yoe = y2 - era * 400;
-    let doy = (153 * (mo + if mo > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    (((days * 24 + h) * 60 + mi) * 60 + sec) * 1000 + ms
-}
+
+use crate::dbsync::iso_ms;
 
 fn map_iso(m: &serde_json::Map<String, serde_json::Value>, key: &str) -> i64 {
     m.get(key).and_then(|v| v.as_str()).map(iso_ms).unwrap_or(0)
