@@ -4,7 +4,7 @@ VibeSync is a small menu bar app that keeps your AI coding sessions in sync acro
 
 It runs on **both macOS and Windows**, in any mix — a Mac at home and a Windows PC at work sync with each other just fine, and sessions translate across the two systems automatically.
 
-<p align="center"><b><a href="https://github.com/JohnKesko/vibesync/releases">⬇️&nbsp;&nbsp;Download VibeSync — installers for macOS and Windows</a></b><br/><sub>(details and a note about the Windows install warning in <a href="#how-to-install-vibesync">How to install</a>)</sub></p>
+<p align="left"><b><a href="https://github.com/JohnKesko/vibesync/releases">Download VibeSync — installers for macOS and Windows</a></b><br/><sub><a href="#how-to-install-vibesync">How to install</a></sub></p>
 
 Your data lives in a place **you** control: a folder you already sync (iCloud Drive, OneDrive, Dropbox, Google Drive), your own cloud bucket (Cloudflare R2, Amazon S3, Azure), or a USB disk. There is no account, no middleman server — and anything sent to cloud storage is encrypted on your machine first.
 
