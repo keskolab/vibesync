@@ -145,6 +145,22 @@ pub fn merge(local: &Value, remote: &Value) -> Value {
     for (k, v) in older_obj {
         out_obj.entry(k.clone()).or_insert_with(|| v.clone());
     }
+    // Archive state is a PER-MACHINE choice, never merged from remote:
+    // current Claude archives the ORIGINAL entry when it forks a synced
+    // session on resume (live-hit 2026-07-25) — syncing that flag would
+    // hide the untouched original on every other machine, and re-archive
+    // an entry the user just unarchived. The local side always wins;
+    // a machine's archive state changes only through its own app.
+    for key in ["isArchived", "archivedAt"] {
+        match local.get(key) {
+            Some(v) => {
+                out_obj.insert(key.to_string(), v.clone());
+            }
+            None => {
+                out_obj.remove(key);
+            }
+        }
+    }
     // Monotonic fields: take the max of both sides.
     for key in ["lastActivityAt", "lastFocusedAt", "completedTurns"] {
         let m = ts(local, key).max(ts(remote, key));
@@ -251,5 +267,41 @@ mod tests {
         let bob = Tokenizer::new("/home/bob");
         expand_paths(&mut e, &bob);
         assert_eq!(e["cwd"], "/home/bob/dev/proj");
+    }
+
+    /// Live catch (2026-07-25): Claude archives the ORIGINAL entry when it
+    /// forks a synced session on resume. Archive state must never merge
+    /// across machines — the untouched original would vanish everywhere.
+    #[test]
+    fn archive_state_is_machine_local() {
+        // Remote is NEWER and archived (the machine where the fork
+        // happened); local is untouched — local's visibility must survive.
+        let mut remote = entry("aaaa", 2000);
+        remote["isArchived"] = json!(true);
+        remote["archivedAt"] = json!(1999);
+        let mut local = entry("aaaa", 1000);
+        local["isArchived"] = json!(false);
+        let out = merge(&local, &remote);
+        assert_eq!(out["isArchived"], false, "remote fork-archive must not hide local");
+        assert!(out.get("archivedAt").is_none(), "archive timestamp is local-only too");
+        // Newer scalars still merge normally.
+        assert_eq!(ts(&out, "lastActivityAt"), 2000);
+
+        // Reverse: the user archived locally; an active remote copy must
+        // not resurrect the entry into the main list here.
+        let mut local2 = entry("bbbb", 1000);
+        local2["isArchived"] = json!(true);
+        let remote2 = entry("bbbb", 2000);
+        let out2 = merge(&local2, &remote2);
+        assert_eq!(out2["isArchived"], true, "local archive choice sticks");
+
+        // Local never had the key (older app): a remote archive flag must
+        // not sneak in through the newer-side base.
+        let mut local3 = entry("cccc", 1000);
+        local3.as_object_mut().unwrap().remove("isArchived");
+        let mut remote3 = entry("cccc", 2000);
+        remote3["isArchived"] = json!(true);
+        let out3 = merge(&local3, &remote3);
+        assert!(out3.get("isArchived").is_none(), "no local opinion = no flag");
     }
 }
