@@ -3,28 +3,39 @@ name: CI
 on:
   push:
     branches: [main]
+    # Docs/chore-only pushes don't touch code — don't spend runner money
+    # on them. If EVERY changed file matches, no run starts at all.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'assets/**'
+      - 'packaging/**'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'assets/**'
+      - 'packaging/**'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
+
+# Pushing twice in quick succession makes the first run stale — cancel it
+# instead of paying for both.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  engine:
-    name: Engine tests (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p vibesync-engine
-
-  app:
-    name: App tests (${{ matrix.os }})
+  # One job per OS: `cargo test --workspace` already runs the engine suite,
+  # so a separate engine job doubled the bill for zero extra coverage.
+  tests:
+    name: Tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
