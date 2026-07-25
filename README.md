@@ -128,6 +128,10 @@ Here's the one thing worth knowing about how your AI apps behave: GUI tools (Cla
 
 VibeSync tells you when rule 2 applies: the badge changes to *"+N new · restart VS Code"* whenever items arrived while that app was running, and the hint disappears on its own once you've restarted it. Command-line tools (Codex, Copilot CLI, `claude`) are never affected — they read fresh on every run. And your data is never at risk either way — this is purely about what's on screen.
 
+### Why did a "(fork)" copy of my session appear?
+
+That's the Claude app, not the sync. When you resume a session that arrived from another computer, current versions of Claude Code **branch it**: you continue in a new *"…(fork)"* session, and the original gets moved to the sidebar's **Archived** section — on that computer only; your other computers keep showing the original normally. Nothing is lost or duplicated: the fork shares the full history up to the moment you opened it. Keep working in the fork, unarchive the original if you want it back in the main list, and archive or delete a fork you don't want — archive choices and deletions stay on the computer where you make them.
+
 ### How to install VibeSync
 
 Grab the installer for your system from the [**Releases page**](https://github.com/JohnKesko/vibesync/releases) — a `.dmg` for macOS (works on both Apple Silicon and Intel), a `.exe` or `.msi` installer for Windows. The app updates itself after that.
