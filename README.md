@@ -130,7 +130,17 @@ VibeSync tells you when rule 2 applies: the badge changes to *"+N new · restart
 
 ### Why did a "(fork)" copy of my session appear?
 
-That's the Claude app, not the sync. When you resume a session that arrived from another computer, current versions of Claude Code **branch it**: you continue in a new *"…(fork)"* session, and the original gets moved to the sidebar's **Archived** section — on that computer only; your other computers keep showing the original normally. Nothing is lost or duplicated: the fork shares the full history up to the moment you opened it. Keep working in the fork, unarchive the original if you want it back in the main list, and archive or delete a fork you don't want — archive choices and deletions stay on the computer where you make them.
+Claude did that — not VibeSync. And nothing is lost.
+
+Here's what happens. You start a session on computer A. VibeSync brings it to computer B. You open it on B. Claude doesn't continue a conversation that was started on a different computer — instead it makes a copy and lets you carry on in the copy. The copy gets the same name plus "(fork)". At the same time, Claude moves the original into the sidebar's **Archived** list — on computer B only. Computer A keeps showing the original exactly as before.
+
+The fork contains the whole conversation up to the moment you opened it, and the original still exists too. Nothing disappeared; there's just one more entry in the list than you expected.
+
+What to do:
+
+- **Keep working in the fork.** It's the live one now.
+- **Want the original back in the list?** Open the Archived section and unarchive it — once. It stays that way: syncing never changes what you archive or unarchive on a computer.
+- **Don't want the fork?** Archive or delete it. That sticks too, on the computer where you did it.
 
 ### How to install VibeSync
 
