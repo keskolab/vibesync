@@ -1,10 +1,10 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
-PackageIdentifier: JohnKesko.VibeSync
+PackageIdentifier: keskolab.VibeSync
 PackageVersion: 0.2.0
 InstallerType: nullsoft
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/JohnKesko/vibesync/releases/download/v0.2.0/VibeSync_0.2.0_x64-setup.exe
+    InstallerUrl: https://github.com/keskolab/vibesync/releases/download/v0.2.0/VibeSync_0.2.0_x64-setup.exe
     InstallerSha256: 8BCC352B92AB6890876F4B1F5204E032DD873A2D513851797C1F54224B04FCA6
 ManifestType: installer
 ManifestVersion: 1.6.0

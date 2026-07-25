@@ -4,7 +4,7 @@ VibeSync is a small menu bar app that keeps your AI coding sessions in sync acro
 
 It runs on **both macOS and Windows**, in any mix — a Mac at home and a Windows PC at work sync with each other just fine, and sessions translate across the two systems automatically.
 
-<p align="left"><b><a href="https://github.com/JohnKesko/vibesync/releases">Download VibeSync — installers for macOS and Windows</a></b><br/><sub><a href="#how-to-install-vibesync">How to install</a></sub></p>
+<p align="left"><b><a href="https://github.com/keskolab/vibesync/releases">Download VibeSync — installers for macOS and Windows</a></b><br/><sub><a href="#how-to-install-vibesync">How to install</a></sub></p>
 
 Your data lives in a place **you** control: a folder you already sync (iCloud Drive, OneDrive, Dropbox, Google Drive), your own cloud bucket (Cloudflare R2, Amazon S3, Azure), or a USB disk. There is no account, no middleman server — and anything sent to cloud storage is encrypted on your machine first.
 
@@ -134,7 +134,7 @@ That's the Claude app, not the sync. When you resume a session that arrived from
 
 ### How to install VibeSync
 
-Grab the installer for your system from the [**Releases page**](https://github.com/JohnKesko/vibesync/releases) — a `.dmg` for macOS (works on both Apple Silicon and Intel), a `.exe` or `.msi` installer for Windows. The app updates itself after that.
+Grab the installer for your system from the [**Releases page**](https://github.com/keskolab/vibesync/releases) — a `.dmg` for macOS (works on both Apple Silicon and Intel), a `.exe` or `.msi` installer for Windows. The app updates itself after that.
 
 **A note on the Windows install warning, in the spirit of transparency:** when you run the Windows installer, Windows will warn you about an "unknown publisher" and ask for administrator permission. That's because the app isn't code-signed yet — a publisher certificate costs several hundred dollars *per year*, which is hard to justify for a free, open-source tool. The warning means "Windows doesn't know who built this," not "this is dangerous" — and since every line of the code is public in this repository, you can see exactly what you're running (or build it yourself from source below, which produces the identical app). Click **More info → Run anyway** to proceed. If **Microsoft Edge** additionally blocks the download itself ("Make sure you trust… before you open it"), the Keep option is hidden behind the **⋯ menu next to Delete → Keep → Show more → Keep anyway**. The macOS build is signed with an Apple developer certificate and opens like any other app.
 
@@ -145,7 +145,7 @@ You need two free tools installed first: [Rust](https://rustup.rs) and [Node.js]
 
 ```sh
 # 1. Get the code
-git clone https://github.com/JohnKesko/vibesync
+git clone https://github.com/keskolab/vibesync
 cd vibesync
 
 # 2. Start the app

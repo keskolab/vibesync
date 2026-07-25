@@ -1,13 +1,13 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
-PackageIdentifier: JohnKesko.VibeSync
+PackageIdentifier: keskolab.VibeSync
 PackageVersion: 0.2.0
 PackageLocale: en-US
-Publisher: JohnKesko
-PublisherUrl: https://github.com/JohnKesko
+Publisher: keskolab
+PublisherUrl: https://github.com/keskolab
 PackageName: VibeSync
-PackageUrl: https://github.com/JohnKesko/vibesync
+PackageUrl: https://github.com/keskolab/vibesync
 License: GPL-3.0
-LicenseUrl: https://github.com/JohnKesko/vibesync/blob/main/LICENSE
+LicenseUrl: https://github.com/keskolab/vibesync/blob/main/LICENSE
 ShortDescription: Keep your AI coding sessions in sync across all your computers.
 Description: >-
   VibeSync is a small system tray app that keeps AI coding sessions
