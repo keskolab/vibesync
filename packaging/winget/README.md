@@ -8,7 +8,7 @@ downloads the InstallerUrl, so it must be public):
 
 1. Fork https://github.com/microsoft/winget-pkgs
 2. Copy these three files to
-   `manifests/j/JohnKesko/VibeSync/0.2.0/` in the fork
+   `manifests/j/keskolab.VibeSync/0.2.0/` in the fork
 3. Open a PR — automated validation runs, a human moderator approves,
    and the package goes live in a few days.
 
@@ -18,4 +18,4 @@ the release URL — it builds and PRs the same manifests.
 
 For each new release: bump PackageVersion, InstallerUrl, and
 InstallerSha256 (`sha256sum` of the new setup.exe), then PR again —
-or let `wingetcreate update JohnKesko.VibeSync` do it.
+or let `wingetcreate update keskolab.VibeSync` do it.
