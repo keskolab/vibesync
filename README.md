@@ -78,7 +78,8 @@ A concrete example — a Mac and a Windows PC:
 | Git repo `todo-app` | `~/dev/todo-app` | `C:\Github\todo-app` | ✅ Zero setup — the repo is the ID |
 | Plain folder `notes` | `~/Documents/notes` | `C:\Users\you\Documents\notes` | ✅ Same spot inside home |
 | Plain folder `stuff` | `~/Desktop/stuff` | `D:\misc\stuff` | ⚠️ Needs a project name (see above) |
-| Repo not cloned yet | `~/dev/todo-app` | *(not cloned)* | ⏸ Waits in storage until you clone |
+| Repo not cloned yet | `~/dev/todo-app` | *(not cloned)* | ⏸ Waits in storage until you clone it |
+| Repo cloned somewhere unusual | `~/dev/todo-app` | `E:\Archive\todo-app` | ⏸ Waits until VibeSync finds the clone — see [below](#i-cloned-the-repo-but-its-sessions-didnt-arrive) |
 
 (The verdicts are short on purpose — the bullets above explain each case. And a third or fourth computer behaves exactly like the second: clone the repo, or keep the folder at the same home spot, and sessions follow.)
 
@@ -98,6 +99,22 @@ And if one computer keeps Dropbox somewhere unusual, like `D:\Dropbox`? Still ju
 Worth spelling out: Dropbox already syncs those folders' *files*, but your AI sessions never live inside the project folder — each tool keeps them in its own data folder (`~/.claude`, `~/.codex`, VS Code's storage, …), which Dropbox doesn't cover. Dropbox moves your code; VibeSync moves the conversations about it.
 
 Rule of thumb: **if your project is a git repo, put it wherever you like. If it's just a folder, keep it at the same place inside your home folder on every computer — or give it a project name in VibeSync.**
+
+#### "I cloned the repo, but its sessions didn't arrive"
+
+A git repo is recognized by its repository address, so its location never matters — but VibeSync still has to *find* your copy on this computer. It looks in two places: folders it has seen your other computers use, and the neighbours of repos it already knows about here. That covers most layouts. It does **not** cover a clone somewhere genuinely new — an external drive, or a tree unlike anything on your other machines.
+
+Until it finds the clone, those sessions wait in storage. Opening the project in one of your AI tools fixes it — but that's backwards, because the reason you wanted the history is to have it *before* you start working.
+
+**Code folders** (Settings → Code folders) fix that: point VibeSync at the folder your repositories live under, and it looks there for clones you haven't opened yet. Everything inside is covered, several levels deep, so one entry usually does a whole machine:
+
+| Computer | What you'd add |
+|---|---|
+| MacBook | `~/Development` |
+| Desktop with a code drive | `/Volumes/Backup/Development` |
+| Windows PC | `D:\Code` |
+
+This is not a project name and doesn't change any project's identity — your repos keep matching by repository address, and clone them anywhere you like. It only tells VibeSync where to look. Most people never need it: if your repos live under your home folder, they're already found.
 
 ### The passphrase (cloud storage)
 
@@ -217,7 +234,7 @@ Nothing outside this list is read or written. `~` is your home folder (`C:\Users
 | `new_items.json` | The "+N new" counts shown on each app's card |
 | `applied_registry.json`, `registry-backup/` | Sidebar entries VibeSync added, and backups of the originals |
 | `store_list_cache.json` | Cloud listing cache so routine syncs make a handful of requests instead of thousands |
-| `debug.log` | Only when the Settings toggle is on: per-sync phase timings for troubleshooting |
+| `debug.log` | Only when the Settings toggle is on: per-sync phase timings for troubleshooting. Capped at 5 MB, keeping one previous file (`debug.log.old`) |
 | `hash_cache.json`, `ghost_cache.json` | Speed caches: file fingerprints across app launches; known-stale sidebar entries so they aren't re-downloaded every sync |
 
 **Inside your storage** (all under `v1/files/`, each file with a small `.meta` sidecar; encrypted before upload on cloud backends): `claude/`, `vscode/ws/`, `codex/`, `opencode/`, `zed/threads/`, `copilot/session-state/`, `shared/skills/`.
