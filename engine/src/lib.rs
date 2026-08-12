@@ -3,6 +3,7 @@
 
 pub mod adapters;
 pub mod atlas;
+pub mod claude;
 pub mod codec;
 pub mod codex;
 pub(crate) mod dbsync;

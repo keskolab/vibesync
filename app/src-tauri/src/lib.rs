@@ -115,8 +115,10 @@ struct OnboardTool {
     sessions: usize,
 }
 
-/// Real detection for the setup assistant: probe each known tool's storage
-/// with the same engine detects the syncer uses, so the two can't drift.
+/// Real detection for the setup assistant: every tool here calls the SAME
+/// engine `detect` the syncer's tool table calls, so the wizard and the sync
+/// can't disagree about what's installed. (They did: this probed
+/// `.claude/projects` while the syncer probed `.claude`.)
 #[tauri::command]
 fn detect_onboarding_tools() -> Vec<OnboardTool> {
     let Some(home) = dirs::home_dir() else { return vec![] };
@@ -137,9 +139,8 @@ fn detect_onboarding_tools() -> Vec<OnboardTool> {
         }
         n
     };
-    let exists = |rel: &str| home.join(rel).exists();
     vec![
-        OnboardTool { id: "claude-code", name: "Claude Code", installed: exists(".claude/projects"), supported: true, sessions: count_jsonl(".claude/projects") },
+        OnboardTool { id: "claude-code", name: "Claude Code", installed: vibesync_engine::claude::detect(&home), supported: true, sessions: count_jsonl(".claude/projects") },
         OnboardTool { id: "codex", name: "Codex", installed: vibesync_engine::codex::detect(&home), supported: true, sessions: count_jsonl(".codex/sessions") },
         OnboardTool { id: "opencode", name: "OpenCode", installed: vibesync_engine::opencode::detect(&home), supported: true, sessions: vibesync_engine::opencode::light_counts(&home).0 },
         OnboardTool { id: "zed", name: "Zed", installed: vibesync_engine::zed::detect(), supported: true, sessions: vibesync_engine::zed::light_counts().0 },

@@ -157,15 +157,49 @@ pub struct GitMap {
 }
 
 impl GitMap {
-    pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+    /// Load the map, reporting whether the result can be TRUSTED as this
+    /// machine's full picture.
+    ///
+    /// Returns `(map, trusted)`. `trusted` is false when the file exists but
+    /// could not be read or parsed — a torn write, a bad disk, a partial
+    /// restore. This distinction matters more than it looks: a transcript's
+    /// logical key DEPENDS on this map (`${GIT:id}/...` with a root known,
+    /// `${EHOME}-...` without it). Silently falling back to an empty map
+    /// re-keys every file on the next scan, which `SyncState::mark_deletions`
+    /// then reads as "the user deleted all of them" — and `deleted_locally`
+    /// is one-way, so those sessions stop syncing to this machine forever.
+    /// Callers must suppress deletion marking when this is false.
+    pub fn load(path: &Path) -> (Self, bool) {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            // Absent is the normal first-run case, and it IS trustworthy:
+            // nothing has been learned yet, so nothing can be lost.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Self::default(), true),
+            Err(e) => {
+                crate::dlog::warn(|| {
+                    format!("project map: {} unreadable ({e}) — deletion marking suppressed this sync", path.display())
+                });
+                return (Self::default(), false);
+            }
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(m) => (m, true),
+            Err(e) => {
+                crate::dlog::warn(|| {
+                    format!("project map: {} is corrupt ({e}) — deletion marking suppressed this sync", path.display())
+                });
+                (Self::default(), false)
+            }
+        }
     }
 
+    /// Atomic write: a torn `git_roots.json` costs far more than the rename
+    /// (see [`GitMap::load`]), so never write the live path in place.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        Ok(std::fs::write(path, serde_json::to_vec_pretty(self)?)?)
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
     }
 
     /// Learn the repo containing `cwd`. Returns true if the map changed.
@@ -333,6 +367,47 @@ mod tests {
             std::path::Path::new(&t.expand_plain("${GIT:github.com:o:r}/x")),
             first.join("x").as_path()
         );
+    }
+
+    #[test]
+    fn absent_map_is_trusted_corrupt_map_is_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("git_roots.json");
+
+        // First run: nothing learned yet, so an empty map IS the truth.
+        let (map, trusted) = GitMap::load(&path);
+        assert!(trusted);
+        assert!(map.roots.is_empty());
+
+        let mut m = GitMap::default();
+        m.roots.insert("github.com/o/r".into(), "/repos/r".into());
+        m.save(&path).unwrap();
+        let (loaded, trusted) = GitMap::load(&path);
+        assert!(trusted);
+        assert_eq!(loaded.roots["github.com/o/r"], "/repos/r");
+
+        // A torn write must NOT read as "this machine knows no repos" — that
+        // silently re-keys every ${GIT} path and reads as a mass deletion.
+        std::fs::write(&path, b"{\"roots\":{\"github.com/o/r\"").unwrap();
+        let (map, trusted) = GitMap::load(&path);
+        assert!(!trusted);
+        assert!(map.roots.is_empty());
+    }
+
+    #[test]
+    fn save_leaves_no_partial_file_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("git_roots.json");
+        let mut m = GitMap::default();
+        m.roots.insert("github.com/o/r".into(), "/repos/r".into());
+        m.save(&path).unwrap();
+        m.roots.insert("github.com/o/r2".into(), "/repos/r2".into());
+        m.save(&path).unwrap();
+        // The temp sibling must not survive a successful save.
+        assert!(!path.with_extension("tmp").exists());
+        let (loaded, trusted) = GitMap::load(&path);
+        assert!(trusted);
+        assert_eq!(loaded.roots.len(), 2);
     }
 
     #[test]

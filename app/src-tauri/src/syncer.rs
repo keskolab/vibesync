@@ -868,7 +868,10 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // different paths on different machines still syncs as ONE project.
     let gitmap_path = paths.config.parent().unwrap().join("git_roots.json");
     let gitmap_t0 = std::time::Instant::now();
-    let mut gitmap = engine::gitmap::GitMap::load(&gitmap_path);
+    // `trusted` is false when git_roots.json exists but is unreadable: the
+    // empty fallback would re-key every ${GIT} path and read as a mass
+    // deletion below, so deletion marking is suppressed for this sync.
+    let (mut gitmap, gitmap_trusted) = engine::gitmap::GitMap::load(&gitmap_path);
     let mut gitmap_changed = false;
     let mut learned_cwds: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(dir) = registry_dir() {
@@ -923,12 +926,9 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // aliases, so a transcript recorded under a foreign clone path keys to
     // the one canonical ${GIT} identity — this is what merges duplicate
     // sidebar projects and retires legacy path-keyed store objects.
-    let atlas = engine::atlas::sync_atlas(
-        store.as_ref(),
-        &gitmap,
-        &dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default(),
-        &engine::machine_name(),
-    );
+    let home_s = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
+    let machine = engine::machine_name();
+    let mut atlas = engine::atlas::sync_atlas(store.as_ref(), &gitmap, &home_s, &machine);
     // Clone discovery: a freshly `git clone`d repo has no sessions yet, so
     // nothing feeds it into the project map — and the sessions parked for it
     // in the store would wait forever. When the atlas knows identities this
@@ -936,14 +936,25 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // against this home) and the siblings of every known local root; any
     // directory whose own git origin matches a missing identity is learned
     // on the spot, and its parked sessions land this very sync.
-    let missing: std::collections::HashSet<&str> = atlas
-        .keys()
-        .filter(|id| !gitmap.roots.contains_key(*id))
-        .map(|s| s.as_str())
-        .collect();
-    if !missing.is_empty() {
-        let home_s =
-            dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
+    //
+    // Runs to a FIXED POINT: every root learned makes its own parent a new
+    // place to look, so a whole tree of clones resolves in ONE sync. The
+    // earlier single pass computed the parent set once, up front, from the
+    // roots already known — so each sync advanced the frontier by exactly one
+    // hop and a fleet needed many alternating syncs to converge.
+    let mut discovered = false;
+    let mut scanned: std::collections::HashSet<std::path::PathBuf> = Default::default();
+    // Bound: a pathological layout must not walk the disk forever. Each round
+    // needs a NEW root to continue, so this only binds deeply nested trees.
+    for _round in 0..8 {
+        let missing: std::collections::HashSet<&str> = atlas
+            .keys()
+            .filter(|id| !gitmap.roots.contains_key(*id))
+            .map(|s| s.as_str())
+            .collect();
+        if missing.is_empty() {
+            break;
+        }
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
         for id in &missing {
             for r in &atlas[*id] {
@@ -954,13 +965,18 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
                 candidates.push(std::path::PathBuf::from(p));
             }
         }
+        // Includes the parents of roots learned in earlier rounds — that is
+        // what makes discovery transitive. `scanned` keeps each directory to
+        // one read_dir across all rounds.
         let parents: std::collections::HashSet<std::path::PathBuf> = gitmap
             .roots
             .values()
             .filter_map(|r| std::path::Path::new(r).parent().map(|p| p.to_path_buf()))
             .chain(candidates.iter().filter_map(|c| c.parent().map(|p| p.to_path_buf())))
+            .filter(|p| !scanned.contains(p))
             .collect();
         for parent in parents {
+            scanned.insert(parent.clone());
             if let Ok(rd) = std::fs::read_dir(&parent) {
                 for e in rd.flatten() {
                     if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -969,7 +985,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
                 }
             }
         }
-        let mut discovered = false;
+        let mut learned_this_round = false;
         for c in candidates {
             if !c.is_dir() {
                 continue;
@@ -979,13 +995,23 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             // repo here (that path isn't the clone root).
             if let Some((root, id)) = engine::gitmap::discover(&c) {
                 if root == c && missing.contains(id.as_str()) {
-                    discovered |= gitmap.learn(&c);
+                    learned_this_round |= gitmap.learn(&c);
                 }
             }
         }
-        if discovered {
-            let _ = gitmap.save(&gitmap_path);
+        if !learned_this_round {
+            break;
         }
+        discovered = true;
+    }
+    if discovered {
+        let _ = gitmap.save(&gitmap_path);
+        // Republish. The atlas above was built from the PRE-discovery map, so
+        // without this the clone locations just learned stay invisible to the
+        // fleet until the next sync — and the other machine can only act on
+        // them the sync after that. That two-sync-per-machine round-trip tax
+        // is what made convergence take repeated alternating syncs.
+        atlas = engine::atlas::sync_atlas(store.as_ref(), &gitmap, &home_s, &machine);
     }
     let tok = engine::Tokenizer::from_env()?
         .with_gitmap(&gitmap)
@@ -1060,7 +1086,8 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     dlog.info("step: scanning local files");
     let scan_t0 = std::time::Instant::now();
     let mut entries = Vec::new();
-    let scan_env = ScanEnv { home: &home, dirs: &dirs, tok: &tok, include_plugins };
+    let scan_env =
+        ScanEnv { home: &home, dirs: &dirs, tok: &tok, include_plugins, gitmap_trusted };
     for (t, (inst, enabled)) in tools.iter().zip(&tool_state) {
         let Some(scan) = t.scan else { continue };
         if !(*inst && *enabled) {
@@ -1079,7 +1106,14 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // Per-scope switches: drop disabled scopes from the push set.
     let off: Vec<String> = config.disabled_scopes.clone();
     entries.retain(|e| scope_of(&e.logical).map(|s| !off.iter().any(|o| o == s)).unwrap_or(true));
-    if claude_on {
+    // Deletion marking is one-way and permanently suppresses the pull, so it
+    // runs only when the inputs it depends on are sound. An unreadable
+    // project map re-keys every path (${GIT:id} -> ${EHOME}-...), which would
+    // otherwise present as "every file under this prefix was deleted".
+    if !gitmap_trusted {
+        dlog.warn("project map unreadable — skipping deletion marking this sync".to_string());
+    }
+    if claude_on && gitmap_trusted {
         for dir in &dirs {
             for prefix in CLAUDE_CODE.logical_prefixes(include_plugins) {
                 let p = if dir == ".claude" {
@@ -1091,7 +1125,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             }
         }
     }
-    if runs("vscode") {
+    if runs("vscode") && gitmap_trusted {
         state.mark_deletions("vscode/ws", &entries);
     }
 
@@ -1504,6 +1538,9 @@ struct ScanEnv<'a> {
     dirs: &'a [String],
     tok: &'a engine::Tokenizer,
     include_plugins: bool,
+    /// False when the project map failed to load: these scans key through it,
+    /// so deletion marking must be skipped (see `GitMap::load`).
+    gitmap_trusted: bool,
 }
 
 struct ApplyEnv<'a> {
@@ -1562,7 +1599,7 @@ fn p_shared(home: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 fn d_claude(home: &std::path::Path) -> bool {
-    home.join(".claude").is_dir()
+    engine::claude::detect(home)
 }
 fn d_vscode(_: &std::path::Path) -> bool {
     engine::vscode::detect()
@@ -1591,17 +1628,23 @@ fn scan_vscode(env: &ScanEnv, _state: &mut engine::SyncState) -> Result<Vec<engi
 }
 fn scan_opencode(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
     let out = engine::opencode::scan(env.home)?;
-    state.mark_deletions(engine::opencode::PREFIX, &out);
+    if env.gitmap_trusted {
+        state.mark_deletions(engine::opencode::PREFIX, &out);
+    }
     Ok(out)
 }
 fn scan_copilot(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
     let out = engine::copilot::scan(env.home)?;
-    state.mark_deletions(engine::copilot::PREFIX, &out);
+    if env.gitmap_trusted {
+        state.mark_deletions(engine::copilot::PREFIX, &out);
+    }
     Ok(out)
 }
 fn scan_shared(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
     let out = engine::adapters::SHARED_SKILLS.scan(env.home, env.tok, false)?;
-    state.mark_deletions("shared/skills", &out);
+    if env.gitmap_trusted {
+        state.mark_deletions("shared/skills", &out);
+    }
     Ok(out)
 }
 
