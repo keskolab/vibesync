@@ -368,3 +368,13 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
 
 });
+
+// The webview would otherwise serve the browser's own context menu (Reload,
+// Back, and Inspect Element in debug builds), which reads as a web page
+// rather than a native popover. Suppressed everywhere EXCEPT text inputs:
+// right-click paste is a real workflow for the passphrase and store-URL
+// fields. Selection itself is governed by CSS (`user-select`), not here.
+document.addEventListener("contextmenu", (e) => {
+	if (e.target instanceof Element && e.target.closest("input, textarea")) return;
+	e.preventDefault();
+});

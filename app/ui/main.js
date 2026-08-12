@@ -209,6 +209,24 @@ function applySettings(s) {
 		sel.appendChild(o);
 	}
 	sel.value = String(s.autosyncIntervalMins);
+	const cul = $("coderoot-list");
+	const roots = s.codeRoots || [];
+	cul.innerHTML = roots.length
+		? ""
+		: `<li class="muted"><div class="tlabel">No folders added<span class="tsub">Only needed for repos kept outside your home folder.</span></div></li>`;
+	for (const path of roots) {
+		const li = document.createElement("li");
+		li.innerHTML = `
+      <div class="tlabel coderoot-name"><span class="tsub coderoot-path"></span></div>
+      <button class="row-btn danger" aria-label="Remove code folder">Remove</button>`;
+		// Paths are user-chosen strings — never interpolate them into innerHTML.
+		li.querySelector(".coderoot-name").prepend(path.split(/[\\/]/).pop() || path);
+		li.querySelector(".coderoot-path").textContent = path;
+		li.querySelector("button").addEventListener("click", async () => {
+			applySettings(await invoke("remove_code_root", { path }));
+		});
+		cul.appendChild(li);
+	}
 	const ul = $("mapping-list");
 	const entries = Object.entries(s.projectMappings || {});
 	ul.innerHTML = entries.length
@@ -680,6 +698,16 @@ window.addEventListener("DOMContentLoaded", async () => {
 			`${done.toLocaleString()} / ${total.toLocaleString()} files`;
 	});
 
+	// Stage names cover the stretch BEFORE a file total exists (store open,
+	// scan, listing) — on a first sync against a cloud store that is most of
+	// the wait, and it used to show a bare spinner. Once counts start they
+	// take the label back over; "Uploading…"/"Downloading…" arrive just
+	// before their own ticks, so the handover is seamless.
+	tauri?.event.listen("sync-phase", (e) => {
+		if (!uiBusy) return;
+		$("sync-label").textContent = String(e.payload);
+	});
+
 	// Every open re-fetches status: events fired while the window was hidden
 	// (autosync finishing, badges arriving) may never have been delivered.
 	tauri?.event.listen("popover-shown", () => refreshStatus().catch(() => {}));
@@ -708,6 +736,16 @@ window.addEventListener("DOMContentLoaded", async () => {
 				renderStatusLine();
 			})
 			.catch(() => (e.target.value = String(autosyncMins)));
+	});
+	$("coderoot-browse").addEventListener("click", async () => {
+		const dir = await invoke("pick_folder").catch(() => null);
+		if (!dir) return;
+		try {
+			applySettings(await invoke("add_code_root", { path: dir }));
+			$("coderoot-msg").textContent = "";
+		} catch (e) {
+			$("coderoot-msg").textContent = String(e);
+		}
 	});
 	$("map-browse").addEventListener("click", async () => {
 		const dir = await invoke("pick_folder").catch(() => null);
@@ -812,4 +850,14 @@ window.addEventListener("DOMContentLoaded", async () => {
 	window.addEventListener("keydown", (e) => {
 		if (e.key === "Escape") tauri?.window.getCurrentWindow().hide();
 	});
+});
+
+// The webview would otherwise serve the browser's own context menu (Reload,
+// Back, and Inspect Element in debug builds), which reads as a web page
+// rather than a native popover. Suppressed everywhere EXCEPT text inputs:
+// right-click paste is a real workflow for the passphrase and store-URL
+// fields. Selection itself is governed by CSS (`user-select`), not here.
+document.addEventListener("contextmenu", (e) => {
+	if (e.target instanceof Element && e.target.closest("input, textarea")) return;
+	e.preventDefault();
 });
