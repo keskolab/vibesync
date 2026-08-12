@@ -16,6 +16,14 @@ static TRAY_SEEN: AtomicBool = AtomicBool::new(false);
 /// Background autosync switch, mirrored from config at startup and toggled
 /// from the UI. The worker thread polls it.
 static AUTOSYNC: AtomicBool = AtomicBool::new(false);
+/// True while a native file dialog is up.
+///
+/// The popover dismisses itself on blur, and opening a dialog blurs it — so
+/// the picker's own parent went away underneath it and the dialog closed
+/// instantly. Every folder picker reachable from the popover (Code folders,
+/// project mappings, Change storage) was unusable; only onboarding worked,
+/// because that is a separate window with no blur-hide rule.
+static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 
 const AUTOSYNC_INTERVAL_SECS: u64 = 15 * 60;
 
@@ -321,11 +329,25 @@ async fn set_store(
 #[tauri::command]
 async fn pick_folder(app: tauri::AppHandle) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
-    app.dialog()
+    // Hold the popover open for the lifetime of the dialog (see DIALOG_OPEN),
+    // and clear the flag on every path out — a picker that panicked or was
+    // cancelled must not leave the popover permanently un-dismissable.
+    DIALOG_OPEN.store(true, Ordering::SeqCst);
+    let picked = app
+        .dialog()
         .file()
         .blocking_pick_folder()
         .and_then(|p| p.into_path().ok())
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| p.to_string_lossy().into_owned());
+    DIALOG_OPEN.store(false, Ordering::SeqCst);
+    // Focus went to the dialog; hand it back so the NEXT click-away dismisses
+    // the popover normally instead of it sitting there visible but blurred.
+    if let Some(w) = app.get_webview_window("main") {
+        if w.is_visible().unwrap_or(false) {
+            let _ = w.set_focus();
+        }
+    }
+    picked
 }
 
 /// Open the store and LIST it — a real end-to-end connectivity check.
@@ -937,7 +959,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             match event {
                 // Popover behavior: dismiss when clicking elsewhere.
-                tauri::WindowEvent::Focused(false) if window.label() == "main" => {
+                tauri::WindowEvent::Focused(false)
+                    if window.label() == "main" && !DIALOG_OPEN.load(Ordering::SeqCst) =>
+                {
                     let _ = window.hide();
                 }
                 // Onboarding: closing hides so it can be reopened from Settings.
