@@ -613,3 +613,255 @@ fn registry_canonicalize_snaps_or_reverts() {
         "cwd": "${GIT:github.com:o:absent}"
     })));
 }
+
+// ------------------------------------------- cross-machine layout scenarios
+//
+// The shape these all share: ONE project, absolute paths that have nothing in
+// common across machines, and (mostly) not under `$HOME` — so `${HOME}` /
+// `${EHOME}` cannot unify them. Either the git origin does it automatically,
+// or a project name does it by hand. Written as string-level tokenizer tests
+// so the Windows cases run identically on both CI OSes.
+
+/// One machine's view: its home, its case rules, and where it keeps the repo.
+fn machine(home: &str, windows: bool, id: &str, root: &str) -> Tokenizer {
+    let mut map = GitMap::default();
+    map.roots.insert(id.to_string(), root.to_string());
+    Tokenizer::with_case_sensitivity(home, windows).with_gitmap(&map)
+}
+
+fn proj_map(name: &str, root: &str) -> std::collections::BTreeMap<String, String> {
+    let mut m = std::collections::BTreeMap::new();
+    m.insert(name.to_string(), root.to_string());
+    m
+}
+
+const STUFF: &str = "github.com/o/stuff";
+const STUFF_TOKEN: &str = "${GIT:github.com:o:stuff}";
+
+/// Scenario A — macOS `/Volumes/Data/stuff` ↔ Windows `D:\misc\stuff`.
+/// Different OS, different volume, nothing home-relative on either side.
+#[test]
+fn scenario_a_mac_volume_and_windows_drive_share_one_key() {
+    let mac = machine("/Users/alice", false, STUFF, "/Volumes/Data/stuff");
+    let win = machine("C:\\Users\\bob", true, STUFF, "D:\\misc\\stuff");
+
+    let from_mac = mac.tokenize_plain("/Volumes/Data/stuff/notes.md");
+    let from_win = win.tokenize_plain("D:\\misc\\stuff\\notes.md");
+    assert_eq!(from_mac, format!("{STUFF_TOKEN}/notes.md"));
+    assert_eq!(from_mac, from_win, "one project must produce one store key");
+
+    // Each machine expands the shared key back to its OWN location. The
+    // Windows tail keeps `/` — harmless for filesystem use, and registry
+    // entries get `normalize_separators` (see registry_canonicalize_*).
+    assert_eq!(mac.expand_plain(&from_mac), "/Volumes/Data/stuff/notes.md");
+    assert_eq!(win.expand_plain(&from_mac), "D:\\misc\\stuff/notes.md");
+}
+
+/// Scenario A, same folders but with NO git origin — the README's "plain
+/// folder at a random location" case. Nothing matches until a project name
+/// is set on both machines.
+#[test]
+fn scenario_a_plain_folder_needs_a_project_name_on_both_sides() {
+    let mac_bare = Tokenizer::with_case_sensitivity("/Users/alice", false);
+    let win_bare = Tokenizer::with_case_sensitivity("C:\\Users\\bob", true);
+    // Untokenizable: neither path is under its home, so both fall through
+    // to the literal path and the project splits in two.
+    assert_ne!(
+        mac_bare.tokenize_plain("/Volumes/Data/stuff/notes.md"),
+        win_bare.tokenize_plain("D:\\misc\\stuff\\notes.md"),
+    );
+
+    let mac = mac_bare.with_manual_projects(&proj_map("stuff", "/Volumes/Data/stuff"));
+    let win = win_bare.with_manual_projects(&proj_map("stuff", "D:\\misc\\stuff"));
+    let from_mac = mac.tokenize_plain("/Volumes/Data/stuff/notes.md");
+    let from_win = win.tokenize_plain("D:\\misc\\stuff\\notes.md");
+    assert_eq!(from_mac, "${PROJ:stuff}/notes.md");
+    assert_eq!(from_mac, from_win);
+    assert_eq!(win.expand_plain(&from_mac), "D:\\misc\\stuff/notes.md");
+}
+
+/// A mapping on only ONE machine is worse than none: that machine keys
+/// `${PROJ:...}` while the other keys `${GIT:...}`, silently splitting one
+/// project into two sets of store objects.
+#[test]
+fn scenario_a_one_sided_project_name_splits_the_project() {
+    let mac = machine("/Users/alice", false, STUFF, "/Volumes/Data/stuff")
+        .with_manual_projects(&proj_map("stuff", "/Volumes/Data/stuff"));
+    let win = machine("C:\\Users\\bob", true, STUFF, "D:\\misc\\stuff");
+    assert_eq!(mac.tokenize_plain("/Volumes/Data/stuff/notes.md"), "${PROJ:stuff}/notes.md");
+    assert_eq!(win.tokenize_plain("D:\\misc\\stuff\\notes.md"), format!("{STUFF_TOKEN}/notes.md"));
+    assert_ne!(
+        mac.tokenize_plain("/Volumes/Data/stuff/notes.md"),
+        win.tokenize_plain("D:\\misc\\stuff\\notes.md"),
+    );
+}
+
+/// Scenario B — two macOS machines, both off-home:
+/// `/Volumes/Data/Development/stuff` ↔ `/Volumes/Users/username/Development/stuff`.
+/// The second path merely LOOKS home-shaped; it is under /Volumes, not /Users.
+#[test]
+fn scenario_b_two_macs_on_different_volumes() {
+    let one = machine("/Users/alice", false, STUFF, "/Volumes/Data/Development/stuff");
+    let two = machine("/Users/username", false, STUFF, "/Volumes/Users/username/Development/stuff");
+
+    let a = one.tokenize_plain("/Volumes/Data/Development/stuff/src/lib.rs");
+    let b = two.tokenize_plain("/Volumes/Users/username/Development/stuff/src/lib.rs");
+    assert_eq!(a, format!("{STUFF_TOKEN}/src/lib.rs"));
+    assert_eq!(a, b);
+    assert_eq!(
+        two.expand_plain(&a),
+        "/Volumes/Users/username/Development/stuff/src/lib.rs"
+    );
+    // The look-alike home prefix must not be mistaken for `${HOME}`.
+    assert!(!b.contains("${HOME}"));
+}
+
+/// Scenario C — two Windows machines where ONE copy happens to sit under the
+/// user's home and the other doesn't. Without an identity these key
+/// differently (`${HOME}\...` vs a literal `D:\...`); the git origin outranks
+/// `${HOME}` and pulls both onto the same key.
+#[test]
+fn scenario_c_two_windows_one_home_relative_one_not() {
+    let home_two = "C:\\Users\\username";
+    let root_two = "C:\\Users\\username\\Development\\misc\\stuff";
+
+    // Without a project map: machine two goes home-relative, machine one
+    // cannot, so the keys diverge.
+    let bare_one = Tokenizer::with_case_sensitivity("C:\\Users\\alice", true);
+    let bare_two = Tokenizer::with_case_sensitivity(home_two, true);
+    // Note the tail keeps NATIVE separators here — the `${HOME}` branch does
+    // not normalize, unlike `${GIT}`/`${PROJ}` (see the dedicated test below).
+    assert_eq!(
+        bare_two.tokenize_plain(&format!("{root_two}\\README.md")),
+        "${HOME}\\Development\\misc\\stuff\\README.md"
+    );
+    assert_ne!(
+        bare_one.tokenize_plain("D:\\misc\\stuff\\README.md"),
+        bare_two.tokenize_plain(&format!("{root_two}\\README.md")),
+    );
+
+    // With the git origin known on both, the identity wins over `${HOME}`.
+    let one = machine("C:\\Users\\alice", true, STUFF, "D:\\misc\\stuff");
+    let two = machine(home_two, true, STUFF, root_two);
+    let a = one.tokenize_plain("D:\\misc\\stuff\\README.md");
+    let b = two.tokenize_plain(&format!("{root_two}\\README.md"));
+    assert_eq!(a, format!("{STUFF_TOKEN}/README.md"));
+    assert_eq!(a, b);
+    assert_eq!(one.expand_plain(&a), "D:\\misc\\stuff/README.md");
+    assert_eq!(two.expand_plain(&a), format!("{root_two}/README.md"));
+}
+
+/// `${HOME}` keeps the ORIGIN machine's separators in its tail, while the
+/// `${GIT}`/`${PROJ}` branches normalize theirs to `/`. That asymmetry is
+/// deliberate — content rewriting needs the native shape back on expansion
+/// (`dbsync::normalize_path_shape`, `registry::normalize_separators`) — but it
+/// means a home-relative path is NOT cross-OS canonical by itself. Every call
+/// site that turns one into a STORE KEY normalizes first (`codex.rs`,
+/// `vscode.rs`). Pinned here so a future call site that forgets can't quietly
+/// split one project into a Windows half and a macOS half.
+#[test]
+fn home_relative_keys_rely_on_call_site_separator_normalization() {
+    let win = Tokenizer::with_case_sensitivity("C:\\Users\\you", true);
+    let mac = Tokenizer::with_case_sensitivity("/Users/you", false);
+    let w = win.tokenize_plain("C:\\Users\\you\\Documents\\notes\\a.md");
+    let m = mac.tokenize_plain("/Users/you/Documents/notes/a.md");
+    assert_eq!(w, "${HOME}\\Documents\\notes\\a.md");
+    assert_eq!(m, "${HOME}/Documents/notes/a.md");
+    assert_ne!(w, m, "raw tails differ by separator — keys must not use these directly");
+    // What every key-producing call site actually does, and why it matters.
+    assert_eq!(w.replace('\\', "/"), m);
+
+    // The ENCODED form has no such problem: both separators become `-`, so
+    // Claude's projects/ dir names unify across OSes with no help.
+    assert_eq!(
+        win.tokenize_encoded("C--Users-you-Documents-notes"),
+        mac.tokenize_encoded("-Users-you-Documents-notes")
+    );
+}
+
+/// Drive-letter case varies in real recorded cwds; scenario C must survive a
+/// lowercase drive on the wire.
+#[test]
+fn scenario_c_lowercase_drive_still_matches() {
+    let one = machine("C:\\Users\\alice", true, STUFF, "D:\\misc\\stuff");
+    assert_eq!(
+        one.tokenize_plain("d:\\misc\\stuff\\README.md"),
+        format!("{STUFF_TOKEN}/README.md")
+    );
+}
+
+/// The same three scenarios in Claude's ENCODED `projects/` directory names,
+/// where every non-alphanumeric byte becomes `-` and a Windows path loses its
+/// drive colon (`D:\misc\stuff` -> `D--misc-stuff`).
+#[test]
+fn scenarios_hold_for_encoded_project_dir_names() {
+    let mac = machine("/Users/alice", false, STUFF, "/Volumes/Data/stuff");
+    let win = machine("C:\\Users\\bob", true, STUFF, "D:\\misc\\stuff");
+
+    let from_mac = mac.tokenize_encoded("-Volumes-Data-stuff-src");
+    let from_win = win.tokenize_encoded("D--misc-stuff-src");
+    assert_eq!(from_mac, format!("{STUFF_TOKEN}-src"));
+    assert_eq!(from_mac, from_win);
+    assert_eq!(mac.expand_encoded(&from_mac), "-Volumes-Data-stuff-src");
+    assert_eq!(win.expand_encoded(&from_mac), "D--misc-stuff-src");
+}
+
+/// A machine that does not know the repo must PARK, never materialize the
+/// token literally on disk — and must resolve the moment the root is learned.
+#[test]
+fn unknown_repo_parks_then_resolves_once_learned() {
+    let key = format!("{STUFF_TOKEN}/notes.md");
+    let cold = Tokenizer::with_case_sensitivity("/Users/alice", false);
+    // Unexpandable: expand is a no-op and the token is still there.
+    assert_eq!(cold.expand_plain(&key), key);
+    assert!(vibesync_engine::gitmap::has_unresolved_token(&cold.expand_plain(&key)));
+
+    let warm = machine("/Users/alice", false, STUFF, "/Volumes/Data/stuff");
+    let resolved = warm.expand_plain(&key);
+    assert_eq!(resolved, "/Volumes/Data/stuff/notes.md");
+    assert!(!vibesync_engine::gitmap::has_unresolved_token(&resolved));
+}
+
+/// End to end on the real filesystem: a clone at a location no other machine
+/// has published, never opened in a tool here, is found through a declared
+/// code folder and its sessions key identically to the origin machine's.
+#[test]
+fn declared_code_folder_resolves_a_scenario_b_clone() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Stand-in for /Volumes/Data/Development — deliberately NOT under home.
+    let drive = tmp.path().join("Volumes").join("Data").join("Development");
+    let proj = drive.join("stuff");
+    std::fs::create_dir_all(&proj).unwrap();
+    make_repo(&proj, "git@github.com:o/stuff.git");
+
+    // Cold machine: home elsewhere, nothing learned, so the key won't resolve.
+    let home = tmp.path().join("Users").join("alice");
+    std::fs::create_dir_all(&home).unwrap();
+    let home_s = home.to_string_lossy().into_owned();
+    let cold = Tokenizer::with_case_sensitivity(&home_s, cfg!(windows));
+    let key = format!("{STUFF_TOKEN}/notes.md");
+    assert_eq!(cold.expand_plain(&key), key, "cold machine must park");
+
+    // Declaring the code folder is the only thing that reaches this clone.
+    let mut map = GitMap::default();
+    for c in vibesync_engine::gitmap::find_clone_roots(&drive, 4) {
+        if let Some((root, _)) = vibesync_engine::gitmap::discover(&c) {
+            if root == c {
+                map.learn(&c);
+            }
+        }
+    }
+    assert_eq!(map.roots.len(), 1, "the clone must be discovered");
+
+    let warm = Tokenizer::with_case_sensitivity(&home_s, cfg!(windows)).with_gitmap(&map);
+    assert_eq!(
+        Path::new(&warm.expand_plain(&key)),
+        proj.join("notes.md").as_path()
+    );
+    // And the round trip is canonical: this machine's path keys back to the
+    // same token the origin machine produced.
+    assert_eq!(
+        warm.tokenize_plain(&proj.join("notes.md").to_string_lossy()),
+        key
+    );
+}
