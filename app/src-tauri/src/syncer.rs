@@ -43,6 +43,16 @@ pub struct AppConfig {
     /// automatic git-origin identity for the mapped folder.
     #[serde(default)]
     pub project_mappings: std::collections::BTreeMap<String, String>,
+    /// Folders where this machine keeps its code. Clone discovery walks
+    /// these, so a repo that is cloned but has never been opened in a tool
+    /// here is still found. Without one, discovery can only probe locations
+    /// the fleet already published or siblings of roots already learned — so
+    /// a clone on an external drive or an unrelated tree stays invisible,
+    /// and its sessions park until the user opens the project locally.
+    /// Unlike [`Self::project_mappings`] these do not become an identity:
+    /// the repo keeps its `${GIT:...}` origin, this only says where to look.
+    #[serde(default)]
+    pub code_roots: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -239,7 +249,66 @@ pub fn ack_new(paths: &Paths, id: &str) -> Result<()> {
 /// Troubleshooting log: every line goes through mini-log (its format, and
 /// its LOG_LEVEL-gated console output for dev runs) and — when the Settings
 /// toggle is on — is appended to debug.log next to the config file.
-pub struct DebugLog(Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>);
+/// Size cap for debug.log. Two generations are kept (the live file plus
+/// `debug.log.old`), so the trace costs at most twice this on disk.
+pub const DEBUG_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// The open log file plus enough state to cap ITSELF, mid-run.
+///
+/// Checking the size only at open was not a bound: the handle is then
+/// appended to for a whole sync, and the per-file DEBUG trace ("writing …",
+/// "parked …") scales with the fleet — a large store emits hundreds of
+/// thousands of lines in one run, all of it past the cap, with nothing
+/// reclaiming it until the next sync happened to look.
+struct RotatingLog {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+    written: u64,
+}
+
+impl RotatingLog {
+    fn open(path: std::path::PathBuf) -> Option<Self> {
+        let written = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok()?;
+        let mut log = Self { file, path, written };
+        log.rotate_if_full();
+        Some(log)
+    }
+
+    /// Keep exactly two generations: the live file and one `.old`. Rename is
+    /// atomic and replaces any existing `.old`, so disk use stays bounded.
+    fn rotate_if_full(&mut self) {
+        if self.written <= DEBUG_LOG_MAX_BYTES {
+            return;
+        }
+        let old = self.path.with_extension("log.old");
+        if std::fs::rename(&self.path, &old).is_err() {
+            return; // keep appending rather than lose the trace
+        }
+        match std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+            Ok(f) => {
+                self.file = f;
+                self.written = 0;
+            }
+            // Reopen failed: put it back so the next line still lands.
+            Err(_) => {
+                let _ = std::fs::rename(&old, &self.path);
+            }
+        }
+    }
+
+    fn write_line(&mut self, line: &str) {
+        use std::io::Write;
+        if writeln!(self.file, "{line}").is_ok() {
+            self.written += line.len() as u64 + 1;
+            self.rotate_if_full();
+        }
+    }
+}
+
+/// Troubleshooting log handle. Cloned into the engine's sink so both sides
+/// share one file, one lock, and one size budget.
+pub struct DebugLog(Option<std::sync::Arc<std::sync::Mutex<RotatingLog>>>);
 
 impl DebugLog {
     pub fn open(paths: &Paths, enabled: bool) -> Self {
@@ -247,25 +316,16 @@ impl DebugLog {
             engine::dlog::set_sink(None);
             return Self(None);
         }
-        let p = debug_log_path(paths);
-        // Verbose traces grow fast under 15-minute autosync: rotate at 5 MB
-        // (previous trace survives as debug.log.old).
-        if std::fs::metadata(&p).map(|m| m.len() > 5 * 1024 * 1024).unwrap_or(false) {
-            let _ = std::fs::rename(&p, p.with_extension("log.old"));
-        }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(p)
-            .ok()
+        let file = RotatingLog::open(debug_log_path(paths))
             .map(|f| std::sync::Arc::new(std::sync::Mutex::new(f)));
         // The engine does the actual file/network work — hand it the same
         // sink so its per-file trace lands in the same log, in order.
         if let Some(f) = &file {
             let sink = f.clone();
             engine::dlog::set_sink(Some(Box::new(move |line: &str| {
-                use std::io::Write;
-                let _ = writeln!(sink.lock().unwrap(), "{line}");
+                if let Ok(mut s) = sink.lock() {
+                    s.write_line(line);
+                }
             })));
         }
         Self(file)
@@ -278,8 +338,9 @@ impl DebugLog {
         }
         let line = mini_log::LogMessage::new(level, msg); // env-gated console
         if let Some(f) = &self.0 {
-            use std::io::Write;
-            let _ = writeln!(f.lock().unwrap(), "{line}");
+            if let Ok(mut s) = f.lock() {
+                s.write_line(&line.to_string());
+            }
         }
     }
 
@@ -308,17 +369,16 @@ pub fn debug_log_banner(paths: &Paths) {
     if !enabled {
         return;
     }
-    let p = debug_log_path(paths);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-        use std::io::Write;
-        let _ = writeln!(
-            f,
+    // Through RotatingLog like every other writer: opening the file directly
+    // here meant the one path that never checked the size cap.
+    if let Some(mut f) = RotatingLog::open(debug_log_path(paths)) {
+        f.write_line(&format!(
             "======================================\nNew Session Started — {}\n{} ({}) — VibeSync v{}\n======================================",
             mini_log::get_timestamp(),
             engine::machine_name(),
             std::env::consts::OS,
             env!("CARGO_PKG_VERSION"),
-        );
+        ));
     }
 }
 
@@ -359,6 +419,11 @@ pub fn paths(app: &tauri::AppHandle) -> Result<Paths> {
 fn default_interval_mins() -> u64 {
     15
 }
+
+/// How deep to walk a declared code folder looking for clone roots. Deep
+/// enough for the usual `<code>/<language>/<project>` nesting, shallow enough
+/// that pointing at a home directory can't turn a sync into a disk crawl.
+const CODE_ROOT_DEPTH: usize = 4;
 
 const KEYCHAIN_MARKER: &str = "@keychain";
 const KEYRING_SERVICE: &str = "VibeSync";
@@ -520,6 +585,7 @@ pub fn default_config() -> Result<AppConfig> {
         disabled_tools: Vec::new(),
         disabled_scopes: Vec::new(),
         project_mappings: std::collections::BTreeMap::new(),
+        code_roots: Vec::new(),
     })
 }
 
@@ -667,16 +733,19 @@ pub fn status(paths: &Paths) -> Result<Status> {
             let tail = comps.len().saturating_sub(3);
             let shown = comps[tail..].join("/");
             let prefix = if tail > 1 { "\u{2026}/" } else { "" };
-            format!("{prefix}{shown}{}", if *encrypted { " (encrypted)" } else { "" })
+            // Encryption is stated in the tooltip/detail, not here — the
+            // status line is for recognizing WHERE your data is at a glance.
+            let _ = encrypted;
+            format!("{prefix}{shown}")
         }
         engine::StoreConfig::S3 { endpoint, .. } => {
             if endpoint.contains("r2.cloudflarestorage") {
-                "R2 Cloudflare (encrypted)".to_string()
+                "R2 Cloudflare".to_string()
             } else {
-                "Amazon S3 (encrypted)".to_string()
+                "Amazon S3".to_string()
             }
         }
-        engine::StoreConfig::AzureSas { .. } => "Azure Blob (encrypted)".to_string(),
+        engine::StoreConfig::AzureSas { .. } => "Azure Blob".to_string(),
     });
     let store_detail = config.as_ref().map(|c| match &c.store {
         engine::StoreConfig::Folder { path, .. } => path.clone(),
@@ -847,7 +916,17 @@ pub struct SyncOutcome {
 
 /// `progress(done, total)` fires as push chunks complete; `total + 1` marks
 /// the pull phase, and the final call is `(total + 1, total + 1)`.
-pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) -> Result<SyncOutcome> {
+///
+/// `phase(label)` fires when the sync enters a new stage. It exists because
+/// `total` cannot be known until BOTH the local scan and the store listing
+/// are done — so on a first sync (large listing, cold network) every stage
+/// before that emitted nothing at all and the UI sat on a bare spinner.
+/// Labels are short enough to render on the sync button.
+pub fn sync_now(
+    paths: &Paths,
+    mut progress: impl FnMut(usize, usize) + Send,
+    mut phase: impl FnMut(&str) + Send,
+) -> Result<SyncOutcome> {
     let sync_t0 = std::time::Instant::now();
     let _ = engine::scanner::take_hash_stats(); // reset for this sync's report
     if let Some(dir) = paths.config.parent() {
@@ -857,6 +936,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     let dlog = DebugLog::open(paths, config.debug_logging);
     dlog.info(format!("sync start — storage: {}", store_label(&config.store)));
     dlog.info("step: unlocking credentials");
+    phase("Connecting…");
     resolve_secrets(&mut config)?;
     let cache_dir = paths.config.parent().map(|p| p.to_path_buf());
     let t = std::time::Instant::now();
@@ -942,11 +1022,37 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // earlier single pass computed the parent set once, up front, from the
     // roots already known — so each sync advanced the frontier by exactly one
     // hop and a fleet needed many alternating syncs to converge.
+    //
+    // Declared code folders are the seed a cold machine otherwise has none of:
+    // the probes below only reach places the fleet already published or
+    // siblings of roots already learned, so a clone on an external drive or an
+    // unrelated tree is invisible until the project is opened in a tool here.
+    // Walked once, before the loop — the cost is one bounded directory walk,
+    // and only when the atlas knows identities this machine hasn't mapped.
+    let declared_roots: Vec<std::path::PathBuf> = if config.code_roots.is_empty() {
+        Vec::new()
+    } else {
+        let t0 = std::time::Instant::now();
+        let found: Vec<std::path::PathBuf> = config
+            .code_roots
+            .iter()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_dir())
+            .flat_map(|p| engine::gitmap::find_clone_roots(&p, CODE_ROOT_DEPTH))
+            .collect();
+        dlog.info(format!(
+            "code folders: {} clone roots found under {} folder(s) in {} ms",
+            found.len(),
+            config.code_roots.len(),
+            t0.elapsed().as_millis()
+        ));
+        found
+    };
     let mut discovered = false;
     let mut scanned: std::collections::HashSet<std::path::PathBuf> = Default::default();
     // Bound: a pathological layout must not walk the disk forever. Each round
     // needs a NEW root to continue, so this only binds deeply nested trees.
-    for _round in 0..8 {
+    for round in 0..8 {
         let missing: std::collections::HashSet<&str> = atlas
             .keys()
             .filter(|id| !gitmap.roots.contains_key(*id))
@@ -956,6 +1062,10 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             break;
         }
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        // Already-resolved absolute paths — offer them once, in round 0.
+        if round == 0 {
+            candidates.extend(declared_roots.iter().cloned());
+        }
         for id in &missing {
             for r in &atlas[*id] {
                 let p = r
@@ -1027,6 +1137,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // Codex/... host it never was. Purge undetected tools from sync state so
     // installing the tool later re-pulls everything fresh.
     dlog.info("step: detecting installed tools");
+    phase("Checking apps…");
     let tools = tool_runs();
     // (installed, enabled) per table entry, table order.
     let tool_state: Vec<(bool, bool)> = tools
@@ -1084,6 +1195,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // All config dirs: ~/.claude plus auto-detected ~/.claude-* profiles.
     let dirs = engine::adapters::Adapter::detect_config_dirs(&home);
     dlog.info("step: scanning local files");
+    phase("Scanning files…");
     let scan_t0 = std::time::Instant::now();
     let mut entries = Vec::new();
     let scan_env =
@@ -1133,6 +1245,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
     // (Each adapter used to list separately: 7+ full listings with per-object
     // meta fetches per sync.)
     dlog.info("step: listing the store");
+    phase("Reading storage…");
     let t = std::time::Instant::now();
     let listing = store.list()?;
     dlog.info(format!(
@@ -1215,6 +1328,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         .filter(|e| state.files.get(&e.logical).map(|st| st.hash != e.hash).unwrap_or(true))
         .map(|e| e.size)
         .sum();
+    phase("Uploading\u{2026}");
     dlog.info(format!("step: pushing changes ({:.1} MB to upload)", to_push_bytes as f64 / (1024.0 * 1024.0)));
     let push_t0 = std::time::Instant::now();
     for chunk in entries.chunks(10) {
@@ -1238,6 +1352,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
         ));
     }
     dlog.info("step: applying changes from other machines");
+    phase("Downloading…");
     let pull_t0 = std::time::Instant::now();
     let pulled_bytes = std::sync::atomic::AtomicU64::new(0);
     let mut pull = engine::Report::default();
@@ -1368,6 +1483,7 @@ pub fn sync_now(paths: &Paths, mut progress: impl FnMut(usize, usize) + Send) ->
             // zeros made a real Windows failure indistinguishable from
             // "nothing to do".
             dlog.info("step: updating the Claude sidebar");
+            phase("Updating sidebar\u{2026}");
             if let Some(dir) = registry_dir() {
                 dlog.info(format!("  sidebar registry: {}", dir.display()));
             }
@@ -2336,6 +2452,42 @@ fn sync_registry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_log_caps_itself_mid_run_and_keeps_two_generations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("debug.log");
+        let mut log = RotatingLog::open(path.clone()).unwrap();
+
+        // One long-running sync, never reopening the handle: the old
+        // open-time-only check could not bound this.
+        let line = "x".repeat(1024);
+        let lines_needed = (DEBUG_LOG_MAX_BYTES / 1025) + 500;
+        for _ in 0..lines_needed {
+            log.write_line(&line);
+        }
+
+        let live = std::fs::metadata(&path).unwrap().len();
+        assert!(live <= DEBUG_LOG_MAX_BYTES, "live log past the cap: {live}");
+        let old = path.with_extension("log.old");
+        assert!(old.exists(), "previous generation must be kept");
+        // Exactly two generations — total disk use stays bounded.
+        let total = live + std::fs::metadata(&old).unwrap().len();
+        assert!(total <= 2 * DEBUG_LOG_MAX_BYTES + 2048, "unbounded on disk: {total}");
+        let gens = std::fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(gens, 2, "no third generation may accumulate");
+    }
+
+    #[test]
+    fn debug_log_reopen_continues_the_live_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("debug.log");
+        RotatingLog::open(path.clone()).unwrap().write_line("first");
+        RotatingLog::open(path.clone()).unwrap().write_line("second");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("first") && text.contains("second"), "{text}");
+        assert!(!path.with_extension("log.old").exists(), "small log must not rotate");
+    }
 
     #[test]
     fn debug_log_writes_mini_log_format() {

@@ -356,9 +356,17 @@ async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> 
         let paths = syncer::paths(&app)?;
         set_tray_busy(&app, true);
         let emitter = app.clone();
-        let result = syncer::sync_now(&paths, move |done, total| {
-            let _ = emitter.emit("sync-progress", serde_json::json!({ "done": done, "total": total }));
-        });
+        let phase_emitter = app.clone();
+        let result = syncer::sync_now(
+            &paths,
+            move |done, total| {
+                let _ = emitter
+                    .emit("sync-progress", serde_json::json!({ "done": done, "total": total }));
+            },
+            move |label| {
+                let _ = phase_emitter.emit("sync-phase", label.to_string());
+            },
+        );
         set_tray_busy(&app, false);
         match &result {
             Ok(outcome) => notify_outcome(&app, outcome),
@@ -379,6 +387,7 @@ struct SettingsState {
     autosync_interval_mins: u64,
     debug_logging: bool,
     project_mappings: std::collections::BTreeMap<String, String>,
+    code_roots: Vec<String>,
 }
 
 #[tauri::command]
@@ -395,7 +404,8 @@ fn get_settings(app: tauri::AppHandle) -> SettingsState {
             .map(|c| c.autosync_interval_mins)
             .unwrap_or(AUTOSYNC_INTERVAL_SECS / 60),
         debug_logging: cfg.as_ref().map(|c| c.debug_logging).unwrap_or(false),
-        project_mappings: cfg.map(|c| c.project_mappings).unwrap_or_default(),
+        project_mappings: cfg.as_ref().map(|c| c.project_mappings.clone()).unwrap_or_default(),
+        code_roots: cfg.map(|c| c.code_roots).unwrap_or_default(),
     }
 }
 
@@ -443,6 +453,43 @@ fn set_project_mapping(app: tauri::AppHandle, name: String, path: String) -> Res
         .map_err(|e| e.to_string())?
         .ok_or("VibeSync is not configured yet")?;
     cfg.project_mappings.insert(name, path);
+    syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())?;
+    Ok(get_settings(app))
+}
+
+/// Declare a folder where this machine keeps code. Clone discovery walks it,
+/// so a repo cloned but not yet opened in a tool here is found on the next
+/// sync instead of parking until first use. Unlike a project mapping this
+/// changes no identity — the repo keeps its git origin, this only says where
+/// to look for it.
+#[tauri::command]
+fn add_code_root(app: tauri::AppHandle, path: String) -> Result<SettingsState, String> {
+    let path = path.trim().trim_end_matches(['/', '\\']).to_string();
+    if path.is_empty() {
+        return Err("Choose a folder first.".into());
+    }
+    if !std::path::Path::new(&path).is_dir() {
+        return Err(format!("Folder does not exist: {path}"));
+    }
+    let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let mut cfg = syncer::load_config(&paths)
+        .map_err(|e| e.to_string())?
+        .ok_or("VibeSync is not configured yet")?;
+    if !cfg.code_roots.iter().any(|r| r == &path) {
+        cfg.code_roots.push(path);
+        cfg.code_roots.sort();
+        syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())?;
+    }
+    Ok(get_settings(app))
+}
+
+#[tauri::command]
+fn remove_code_root(app: tauri::AppHandle, path: String) -> Result<SettingsState, String> {
+    let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let mut cfg = syncer::load_config(&paths)
+        .map_err(|e| e.to_string())?
+        .ok_or("VibeSync is not configured yet")?;
+    cfg.code_roots.retain(|r| r != &path);
     syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())?;
     Ok(get_settings(app))
 }
@@ -520,13 +567,22 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
             // icon alone isn't visible from inside the window.
             let _ = app.emit("autosync-start", ());
             let emitter = app.clone();
+            let phase_emitter = app.clone();
             // A panic inside a sync must not kill this thread — that would
             // silently disable autosync until the next app launch.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                syncer::sync_now(&paths, move |done, total| {
-                    let _ = emitter
-                        .emit("sync-progress", serde_json::json!({ "done": done, "total": total }));
-                })
+                syncer::sync_now(
+                    &paths,
+                    move |done, total| {
+                        let _ = emitter.emit(
+                            "sync-progress",
+                            serde_json::json!({ "done": done, "total": total }),
+                        );
+                    },
+                    move |label| {
+                        let _ = phase_emitter.emit("sync-phase", label.to_string());
+                    },
+                )
             }));
             set_tray_busy(&app, false);
             match result {
@@ -778,6 +834,8 @@ pub fn run() {
             set_debug_logging,
             set_project_mapping,
             remove_project_mapping,
+            add_code_root,
+            remove_code_root,
             set_store,
             pick_folder,
             test_store

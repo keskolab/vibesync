@@ -144,6 +144,63 @@ fn origin_identity(config: &Path) -> Option<String> {
     None
 }
 
+/// Directory names never descended into when hunting for clones: dependency
+/// and build trees are enormous, deep, and never hold a clone worked in.
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "build",
+    "dist",
+    "vendor",
+    "Pods",
+    "DerivedData",
+    "venv",
+    "__pycache__",
+    "Library",
+];
+
+/// Collect git clone ROOTS under `root`, at most `max_depth` levels down.
+///
+/// This is the seed a cold machine otherwise lacks. Clone discovery can only
+/// probe locations the fleet already published or siblings of roots already
+/// learned, so a clone somewhere no machine has seen — an external drive, an
+/// unrelated tree — stays invisible until the user opens it in a tool. That
+/// inverts the point of syncing: you want the history there BEFORE you start
+/// working. Walking a folder the user declares as "where I keep code" makes
+/// such a clone findable on the first sync instead.
+///
+/// A directory that is itself a clone root is collected and NOT descended
+/// into — its contents are the big tree we most want to skip. Hidden
+/// directories, [`SKIP_DIRS`], and symlinks are passed over (`DirEntry`
+/// file types don't follow links, so symlink loops can't occur).
+pub fn find_clone_roots(root: &Path, max_depth: usize) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    walk_for_clones(root, max_depth, &mut out);
+    out
+}
+
+fn walk_for_clones(dir: &Path, depth_left: usize, out: &mut Vec<PathBuf>) {
+    if dir.join(".git").exists() {
+        out.push(dir.to_path_buf());
+        return;
+    }
+    if depth_left == 0 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || SKIP_DIRS.iter().any(|s| name.eq_ignore_ascii_case(s)) {
+            continue;
+        }
+        walk_for_clones(&e.path(), depth_left - 1, out);
+    }
+}
+
 /// identity -> this machine's repo root (absolute plain path).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct GitMap {
@@ -408,6 +465,91 @@ mod tests {
         let (loaded, trusted) = GitMap::load(&path);
         assert!(trusted);
         assert_eq!(loaded.roots.len(), 2);
+    }
+
+    fn mk_repo(at: &Path) {
+        std::fs::create_dir_all(at.join(".git")).unwrap();
+        std::fs::write(at.join(".git/config"), "[remote \"origin\"]\n\turl = git@github.com:o/r.git\n")
+            .unwrap();
+    }
+
+    #[test]
+    fn finds_nested_clones_and_stops_at_the_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let code = tmp.path().join("code");
+        // The real shape: <code>/<language>/<project>, two levels down.
+        let proj = code.join("7_rust").join("vibesync");
+        std::fs::create_dir_all(&proj).unwrap();
+        mk_repo(&proj);
+        // A submodule-ish nested repo must NOT be reported separately: the
+        // walk stops at the outer clone root.
+        let nested = proj.join("vendor_lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        mk_repo(&nested);
+
+        let found = find_clone_roots(&code, 4);
+        assert_eq!(found, vec![proj]);
+    }
+
+    #[test]
+    fn skips_dependency_trees_and_hidden_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let code = tmp.path().join("code");
+        for junk in ["node_modules", "target", ".cache"] {
+            let p = code.join(junk).join("pkg");
+            std::fs::create_dir_all(&p).unwrap();
+            mk_repo(&p);
+        }
+        let real = code.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        mk_repo(&real);
+
+        let found = find_clone_roots(&code, 4);
+        assert_eq!(found, vec![real]);
+    }
+
+    #[test]
+    fn respects_the_depth_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let code = tmp.path().join("code");
+        let deep = code.join("a").join("b").join("c").join("proj");
+        std::fs::create_dir_all(&deep).unwrap();
+        mk_repo(&deep);
+
+        assert!(find_clone_roots(&code, 2).is_empty(), "too deep for the bound");
+        assert_eq!(find_clone_roots(&code, 4), vec![deep]);
+    }
+
+    #[test]
+    fn a_declared_folder_that_is_itself_a_clone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("just-one-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        mk_repo(&repo);
+        assert_eq!(find_clone_roots(&repo, 4), vec![repo]);
+    }
+
+    #[test]
+    fn declared_folder_unlocks_a_clone_no_machine_has_seen() {
+        // End to end: the Bug 4 case. A repo cloned somewhere the fleet has
+        // never published, never opened in a tool here — learn() has no way
+        // to reach it, but a declared code folder does.
+        let tmp = tempfile::tempdir().unwrap();
+        let drive = tmp.path().join("Volumes").join("Backup").join("_DEV");
+        let proj = drive.join("7_rust").join("vibesync");
+        std::fs::create_dir_all(&proj).unwrap();
+        mk_repo(&proj);
+
+        let mut map = GitMap::default();
+        assert!(map.roots.is_empty());
+        for c in find_clone_roots(&drive, 4) {
+            if let Some((root, _)) = discover(&c) {
+                if root == c {
+                    map.learn(&c);
+                }
+            }
+        }
+        assert_eq!(map.roots["github.com/o/r"], proj.to_string_lossy());
     }
 
     #[test]
