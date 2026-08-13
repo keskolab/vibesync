@@ -93,6 +93,10 @@
               <label class="switch"><input type="checkbox" id="opt-debuglog" /><span class="knob"></span></label>
             </li>
             <li>
+              <div class="tlabel">Log file<span class="tsub">Show debug.log in Finder for troubleshooting</span></div>
+              <button class="row-btn" id="open-log">Show</button>
+            </li>
+            <li>
               <div class="tlabel">Sync interval<span class="tsub">How often auto-sync runs</span></div>
               <select id="opt-interval" class="mini-select">
                 <option value="5">5 min</option>
@@ -102,6 +106,12 @@
                 <option value="60">1 hour</option>
                 <option value="180">3 hours</option>
               </select>
+            </li>
+          </ul>
+          <ul class="toggles">
+            <li class="nav" id="open-projects">
+              <div class="tlabel">Projects<span class="tsub">See where each project lives on every computer</span></div>
+              <span class="chev">&#8250;</span>
             </li>
           </ul>
           <div class="section-label label-row">Code folders
@@ -140,6 +150,19 @@
           <div class="tsub mapping-path" id="update-result"></div>
           <div class="settings-spacer"></div>
           <button class="secondary destructive" id="quit">Quit VibeSync</button>
+        </section>
+        <!-- Page 3: projects x machines -->
+        <section class="page" id="page-projects">
+          <header>
+            <div class="title-row">
+              <button class="back" id="back-projects">&#8249; Back</button>
+              <span class="app-name">Projects</span>
+              <span class="header-spacer"></span>
+            </div>
+          </header>
+          <div class="tsub mapping-help" id="proj-help">Where each project lives on each of your computers.</div>
+          <ul class="toggles" id="proj-list"></ul>
+          <div class="settings-spacer"></div>
         </section>
       </div>
 

@@ -89,7 +89,7 @@ html.win #popover {
   min-height: 0; /* never push the footer out of the window */
   display: flex;
   align-items: flex-start; /* pages take natural height so JS can fit the window */
-  width: 300%;
+  width: 400%;
   transition: transform 0.28s cubic-bezier(0.3, 0.9, 0.3, 1);
 }
 .page {
@@ -765,6 +765,85 @@ footer {
   word-break: break-all;
 }
 
+/* Code folder rows. The path is long, absolute and machine-specific; left
+   unconstrained it pushed the Remove button clean off the row (a flex child
+   defaults to min-width:auto and refuses to shrink below its content). The
+   folder name is already the row title, so the path truncates rather than
+   wraps, and the full value stays available as a tooltip. */
+.coderoot-name {
+  min-width: 0;
+}
+.coderoot-path {
+  display: block;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .row-btn.danger {
   color: var(--destructive);
+}
+
+
+/* Projects view: one card per project, one line per machine. A real grid
+   cannot work at 320px, so the "columns" are rows — same information,
+   readable width. Machines this project is missing on are dimmed rather
+   than hidden: absence is the thing the user came here to see. */
+.proj-card {
+  /* The base `.toggles li` rule is display:flex ROW — inherited, it laid the
+     project name and every machine line out side by side on one line, which
+     is what pushed the paths off the card. Cards stack their own lines. */
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  padding: 8px 11px;
+}
+.proj-card + .proj-card {
+  border-top: 0.5px solid var(--sep);
+}
+.proj-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.proj-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.proj-loc {
+  display: flex;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--text-2);
+}
+.proj-loc b {
+  flex: 0 0 auto;
+  font-weight: 500;
+  color: var(--text-2);
+}
+.proj-loc span {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: ltr;
+}
+.proj-loc.missing span {
+  opacity: 0.55;
+  font-style: italic;
+}
+.proj-here {
+  color: var(--accent);
+}
+.proj-warn {
+  font-size: 10.5px;
+  color: var(--destructive);
+  margin-top: 3px;
 }
