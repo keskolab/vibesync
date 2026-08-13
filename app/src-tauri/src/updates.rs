@@ -6,6 +6,7 @@
 //! check is notification-only — installing is always a user action in
 //! Settings.
 
+use std::path::Path;
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -91,15 +92,73 @@ pub async fn install_pending_update(app: AppHandle) -> Result<(), String> {
         .take()
         .ok_or("No pending update — check for updates first.")?;
     update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
-    let handle = app.clone();
-    std::thread::spawn(move || handle.restart());
+    relaunch(&app);
     Ok(())
+}
+
+/// Relaunch after an in-place update.
+///
+/// `AppHandle::restart` re-executes the CURRENT executable path, which on
+/// macOS is the binary inside the .app the updater just replaced — the
+/// running image is unlinked out from under it, so the app exited and never
+/// came back and the user had to start it by hand. It was also called from a
+/// spawned thread, where restart is not supported.
+///
+/// On macOS, hand the relaunch to Launch Services instead: `open -n` on the
+/// bundle starts the NEW copy as its own process, and only then do we exit.
+/// Other platforms replace the binary atomically and restart correctly.
+fn relaunch(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        // …/VibeSync.app/Contents/MacOS/VibeSync -> …/VibeSync.app
+        let bundle = std::env::current_exe().ok().and_then(|exe| {
+            exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf)
+        });
+        if let Some(bundle) = bundle {
+            if std::process::Command::new("open").arg("-n").arg(&bundle).spawn().is_ok() {
+                // Give Launch Services a moment to pick up the new process
+                // before this one disappears.
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                app.exit(0);
+                return;
+            }
+        }
+    }
+    app.restart();
 }
 
 /// Startup: silent check; on a hit, stash it, notify, and tell the popover.
 pub async fn run_startup_update_check(app: AppHandle) {
     let Ok(updater) = build_updater(&app) else { return };
-    let Ok(Some(update)) = updater.check().await else { return };
+    // Launch-item startups race the network: the app is up before Wi-Fi
+    // associates or the VPN connects, the single check failed, and nothing
+    // ever retried — so an auto-started app could sit for days on an old
+    // version while reporting nothing. Retry on ERROR only; a successful
+    // "no update" answer is final.
+    let mut update = None;
+    for (attempt, delay) in [5u64, 30, 120].into_iter().enumerate() {
+        match updater.check().await {
+            Ok(Some(u)) => {
+                update = Some(u);
+                break;
+            }
+            Ok(None) => return, // definitively up to date
+            Err(e) => {
+                if let Ok(paths) = crate::syncer::paths(&app) {
+                    crate::syncer::debug_log_event(
+                        &paths,
+                        &format!("update check attempt {} failed: {e}", attempt + 1),
+                    );
+                }
+                tauri::async_runtime::spawn_blocking(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(delay))
+                })
+                .await
+                .ok();
+            }
+        }
+    }
+    let Some(update) = update else { return };
     let latest = update.version.clone();
     let current = app.package_info().version.to_string();
     let notes = update.body.clone();
