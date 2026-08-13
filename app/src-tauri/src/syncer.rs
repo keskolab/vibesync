@@ -393,6 +393,127 @@ pub fn debug_log_error(paths: &Paths, msg: &str) {
     DebugLog::open(paths, enabled).error(msg);
 }
 
+pub struct MatrixRow {
+    pub id: String,
+    pub name: String,
+    pub locations: std::collections::BTreeMap<String, String>,
+    pub here: Option<String>,
+    pub manual: bool,
+}
+
+fn gitmap_path(paths: &Paths) -> PathBuf {
+    paths.config.parent().unwrap_or(std::path::Path::new(".")).join("git_roots.json")
+}
+
+fn machines_cache_path(paths: &Paths) -> PathBuf {
+    paths.config.parent().unwrap_or(std::path::Path::new(".")).join("project_machines.json")
+}
+
+/// Build the projects-by-machine table from data already on disk.
+///
+/// Deliberately offline: the popover must open instantly and work with no
+/// network. The fleet's attribution is whatever the last sync cached; this
+/// machine's own column is always live from `git_roots.json`, so a folder
+/// just located shows immediately instead of after the next sync.
+pub fn project_matrix_data(
+    paths: &Paths,
+) -> Result<(Vec<String>, String, Vec<MatrixRow>)> {
+    let this = engine::machine_name();
+    let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
+    let home = home.trim_end_matches(['/', '\\']).to_string();
+    let (gitmap, _) = engine::gitmap::GitMap::load(&gitmap_path(paths));
+    let mut fleet: engine::atlas::Machines = std::fs::read(machines_cache_path(paths))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    // This machine's live view always wins over any cached copy of itself.
+    fleet.insert(this.clone(), gitmap.roots.clone());
+
+    let expand = |p: &str| -> String {
+        p.strip_prefix(engine::tokenizer::HOME_TOKEN)
+            .map(|rest| format!("{home}{rest}"))
+            .unwrap_or_else(|| p.to_string())
+    };
+
+    let mut ids: std::collections::BTreeSet<String> = Default::default();
+    for roots in fleet.values() {
+        ids.extend(roots.keys().cloned());
+    }
+    let manual = load_config(paths)?.map(|c| c.project_mappings).unwrap_or_default();
+    ids.extend(manual.keys().map(|n| format!("{PROJ_ROW_PREFIX}{n}")));
+
+    let mut rows = Vec::new();
+    for id in ids {
+        let is_manual = id.starts_with(PROJ_ROW_PREFIX);
+        let key = id.strip_prefix(PROJ_ROW_PREFIX).unwrap_or(&id).to_string();
+        let mut locations: std::collections::BTreeMap<String, String> = Default::default();
+        if is_manual {
+            if let Some(p) = manual.get(&key) {
+                locations.insert(this.clone(), p.clone());
+            }
+        } else {
+            for (m, roots) in &fleet {
+                if let Some(p) = roots.get(&key) {
+                    // Other machines' paths stay as stored: a ${HOME} tail
+                    // expanded against THIS home would be a fiction.
+                    let shown = if m == &this { expand(p) } else { p.clone() };
+                    locations.insert(m.clone(), shown);
+                }
+            }
+        }
+        let here = locations.get(&this).cloned();
+        // "github.com/owner/repo" -> "repo"; a manual name is already short.
+        let name = key.rsplit('/').next().unwrap_or(&key).to_string();
+        rows.push(MatrixRow { id: key, name, locations, here, manual: is_manual });
+    }
+    // Projects missing here first — those are the ones needing attention.
+    rows.sort_by(|a, b| a.here.is_some().cmp(&b.here.is_some()).then(a.name.cmp(&b.name)));
+
+    let mut machines: Vec<String> = fleet.keys().cloned().collect();
+    machines.sort();
+    machines.sort_by_key(|m| m != &this); // this machine first
+    Ok((machines, this, rows))
+}
+
+/// Marks a manual-mapping row so it can't collide with a git identity.
+const PROJ_ROW_PREFIX: &str = "proj::";
+
+/// Teach this machine where a project's clone is, by git identity.
+///
+/// Verifies the folder really is that repo before recording it — pointing a
+/// project at the wrong folder would key its sessions into someone else's
+/// history, which no later sync could untangle.
+pub fn locate_project(app: &tauri::AppHandle, id: &str, path: &str) -> Result<()> {
+    let paths = paths(app)?;
+    let dir = std::path::Path::new(path);
+    if !dir.is_dir() {
+        anyhow::bail!("That folder does not exist.");
+    }
+    match engine::gitmap::discover(dir) {
+        Some((root, found)) if found == id => {
+            if root != dir {
+                anyhow::bail!(
+                    "That is a folder inside the repository. Pick its top level: {}",
+                    root.display()
+                );
+            }
+        }
+        Some((_, found)) => {
+            anyhow::bail!("That folder is a different repository ({found}).")
+        }
+        None => anyhow::bail!("That folder is not a git repository with an origin."),
+    }
+    let p = gitmap_path(&paths);
+    let (mut map, trusted) = engine::gitmap::GitMap::load(&p);
+    if !trusted {
+        anyhow::bail!("The project map is unreadable — run a sync first.");
+    }
+    map.learn(dir);
+    map.save(&p)?;
+    debug_log_event(&paths, &format!("ui: located {id} -> {path}"));
+    Ok(())
+}
+
 /// Short human label for the configured store ("which storage").
 fn store_label(store: &engine::StoreConfig) -> String {
     match store {
@@ -1009,6 +1130,13 @@ pub fn sync_now(
     let home_s = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
     let machine = engine::machine_name();
     let mut atlas = engine::atlas::sync_atlas(store.as_ref(), &gitmap, &home_s, &machine);
+    // Same information keyed by machine, for the Projects view.
+    {
+        let fleet = engine::atlas::sync_machines(store.as_ref(), &gitmap, &home_s, &machine);
+        if let Ok(b) = serde_json::to_vec(&fleet) {
+            let _ = std::fs::write(machines_cache_path(paths), b);
+        }
+    }
     // Clone discovery: a freshly `git clone`d repo has no sessions yet, so
     // nothing feeds it into the project map — and the sessions parked for it
     // in the store would wait forever. When the atlas knows identities this
@@ -1122,6 +1250,12 @@ pub fn sync_now(
         // them the sync after that. That two-sync-per-machine round-trip tax
         // is what made convergence take repeated alternating syncs.
         atlas = engine::atlas::sync_atlas(store.as_ref(), &gitmap, &home_s, &machine);
+        {
+        let fleet = engine::atlas::sync_machines(store.as_ref(), &gitmap, &home_s, &machine);
+        if let Ok(b) = serde_json::to_vec(&fleet) {
+            let _ = std::fs::write(machines_cache_path(paths), b);
+        }
+    }
     }
     let tok = engine::Tokenizer::from_env()?
         .with_gitmap(&gitmap)

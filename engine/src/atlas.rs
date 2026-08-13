@@ -23,6 +23,76 @@ pub const KEY: &str = "meta/git_atlas.json";
 
 pub type Atlas = BTreeMap<String, Vec<String>>;
 
+/// Per-machine attribution: `machine -> identity -> that machine's root`.
+///
+/// The atlas above is a flat union of paths, which is all the tokenizer
+/// needs — but it cannot answer "where does this project live on the
+/// MacBook?", because nothing records WHICH machine contributed a path.
+/// This is the same information keyed for people instead of for matching.
+/// Kept as a separate object rather than folded into the atlas so older
+/// versions keep reading the atlas unchanged.
+pub const MACHINES_KEY: &str = "meta/project_machines.json";
+
+pub type Machines = BTreeMap<String, BTreeMap<String, String>>;
+
+/// Publish this machine's `identity -> root` table and return the fleet's.
+///
+/// Last-writer-wins PER MACHINE: each machine owns exactly its own key, so
+/// concurrent syncs can't clobber each other's rows. A machine that has
+/// forgotten a repo drops it from its own row, which is correct — that is
+/// what "it no longer lives here" means.
+pub fn sync_machines(store: &dyn SyncStore, map: &GitMap, home: &str, machine: &str) -> Machines {
+    let (mut all, may_publish): (Machines, bool) = match store.get(MACHINES_KEY) {
+        Ok(Some((b, _))) => match serde_json::from_slice(&b) {
+            Ok(m) => (m, true),
+            Err(_) => (Machines::default(), true),
+        },
+        Ok(None) => (Machines::default(), true),
+        // A failed fetch must never republish over the fleet's copy.
+        Err(e) => {
+            crate::dlog::warn(|| format!("project machines: fetch failed ({e})"));
+            return Machines::default();
+        }
+    };
+    let home = home.trim_end_matches(['/', '\\']);
+    let ci = home.as_bytes().get(1) == Some(&b':');
+    let mine: BTreeMap<String, String> = map
+        .roots
+        .iter()
+        .map(|(id, root)| {
+            let rel = root
+                .strip_prefix(home)
+                .or_else(|| {
+                    if ci && root.get(..home.len()).map(|h| h.eq_ignore_ascii_case(home)).unwrap_or(false) {
+                        root.get(home.len()..)
+                    } else {
+                        None
+                    }
+                })
+                .filter(|r| r.starts_with('/') || r.starts_with('\\'))
+                .map(|r| format!("{HOME_TOKEN}{r}"))
+                .unwrap_or_else(|| root.clone());
+            (id.clone(), rel)
+        })
+        .collect();
+    let changed = all.get(machine) != Some(&mine);
+    all.insert(machine.to_string(), mine);
+    if changed && may_publish {
+        if let Ok(bytes) = serde_json::to_vec_pretty(&all) {
+            let meta = RemoteMeta {
+                hash: hash_bytes(&bytes),
+                mtime_ms: 0,
+                size: bytes.len() as u64,
+                source: machine.to_string(),
+            };
+            if let Err(e) = store.put(MACHINES_KEY, &bytes, &meta) {
+                crate::dlog::warn(|| format!("project machines: publish failed ({e})"));
+            }
+        }
+    }
+    all
+}
+
 /// Download-merge-publish: fold this machine's roots (and rename aliases)
 /// into the store's atlas, home-tokenized, uploading only when something new
 /// was added. Best-effort — a sync must never fail over atlas trouble.

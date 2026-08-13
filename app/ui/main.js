@@ -123,9 +123,9 @@ function statCards(el, items) {
 let currentPage = 0;
 
 function goTo(page) {
-	logUi(`navigate ${["main", "tool detail", "settings"][page] || page}`);
+	logUi(`navigate ${["main", "tool detail", "settings", "projects"][page] || page}`);
 	currentPage = page;
-	$("pages").style.transform = `translateX(${-page * (100 / 3)}%)`;
+	$("pages").style.transform = `translateX(${-page * (100 / 4)}%)`;
 	fitWindow();
 }
 
@@ -221,7 +221,9 @@ function applySettings(s) {
       <button class="row-btn danger" aria-label="Remove code folder">Remove</button>`;
 		// Paths are user-chosen strings — never interpolate them into innerHTML.
 		li.querySelector(".coderoot-name").prepend(path.split(/[\\/]/).pop() || path);
-		li.querySelector(".coderoot-path").textContent = path;
+		const sub = li.querySelector(".coderoot-path");
+		sub.textContent = path;
+		sub.title = path;
 		li.querySelector("button").addEventListener("click", async () => {
 			applySettings(await invoke("remove_code_root", { path }));
 		});
@@ -244,6 +246,99 @@ function applySettings(s) {
 		ul.appendChild(li);
 	}
 	renderStatusLine();
+	fitWindow();
+}
+
+// Absolute paths are far wider than a 320px popover. Collapse the middle
+// rather than the end: the tail (…/_projekt/homeserver) is the part that
+// identifies the folder, while the head is shared by everything. CSS
+// ellipsis stays as a backstop for a single very long segment; the full
+// value is always on the element's tooltip.
+function shortPath(p) {
+	const parts = p.split(/[\\/]/).filter(Boolean);
+	if (parts.length <= 3) return p;
+	const sep = p.includes("\\") ? "\\" : "/";
+	const lead = /^[\\/]/.test(p) ? sep : "";
+	return `${lead}${parts[0]}${sep}\u2026${sep}${parts.slice(-2).join(sep)}`;
+}
+
+// Projects x machines. Rendered as cards rather than a grid: 320px cannot
+// hold a real table, and the question people actually ask is per-project
+// ("where does THIS live?"), not per-cell.
+async function renderProjects() {
+	const ul = $("proj-list");
+	let m;
+	try {
+		m = await invoke("project_matrix");
+	} catch (e) {
+		ul.innerHTML = "";
+		const li = document.createElement("li");
+		li.className = "muted";
+		li.textContent = String(e);
+		ul.appendChild(li);
+		return;
+	}
+	ul.innerHTML = m.rows.length
+		? ""
+		: `<li class="muted"><div class="tlabel">No projects yet<span class="tsub">Sync once and your projects appear here.</span></div></li>`;
+	for (const row of m.rows) {
+		const li = document.createElement("li");
+		li.className = "proj-card";
+
+		const head = document.createElement("div");
+		head.className = "proj-head";
+		const name = document.createElement("div");
+		name.className = "proj-name";
+		name.textContent = row.name;
+		name.title = row.id;
+		head.appendChild(name);
+		// Only a git project can be located by identity; a manual mapping is
+		// matched by NAME, so pointing it somewhere is a different action.
+		if (!row.here && !row.manual) {
+			const btn = document.createElement("button");
+			btn.className = "row-btn";
+			btn.textContent = "Locate\u2026";
+			btn.addEventListener("click", async () => {
+				const dir = await invoke("pick_folder").catch(() => null);
+				if (!dir) return;
+				try {
+					await invoke("locate_project", { id: row.id, path: dir });
+					await renderProjects();
+				} catch (e) {
+					const warn = document.createElement("div");
+					warn.className = "proj-warn";
+					warn.textContent = String(e);
+					li.appendChild(warn);
+					fitWindow();
+				}
+			});
+			head.appendChild(btn);
+		}
+		li.appendChild(head);
+
+		for (const machine of m.machines) {
+			const path = row.locations[machine];
+			const line = document.createElement("div");
+			line.className = path ? "proj-loc" : "proj-loc missing";
+			const who = document.createElement("b");
+			who.textContent = machine === m.thisMachine ? "This computer" : machine;
+			if (machine === m.thisMachine) who.className = "proj-here";
+			const val = document.createElement("span");
+			val.textContent = path ? shortPath(path) : "not on this computer";
+			if (path) val.title = path;
+			line.append(who, val);
+			li.appendChild(line);
+		}
+
+		if (row.manual) {
+			const warn = document.createElement("div");
+			warn.className = "proj-warn";
+			warn.textContent =
+				"Manual name — every computer must set the same one, or the project splits in two.";
+			li.appendChild(warn);
+		}
+		ul.appendChild(li);
+	}
 	fitWindow();
 }
 
@@ -736,6 +831,14 @@ window.addEventListener("DOMContentLoaded", async () => {
 				renderStatusLine();
 			})
 			.catch(() => (e.target.value = String(autosyncMins)));
+	});
+	$("open-projects").addEventListener("click", () => {
+		goTo(3);
+		renderProjects();
+	});
+	$("back-projects").addEventListener("click", () => goTo(2));
+	$("open-log").addEventListener("click", () => {
+		invoke("open_log_folder").catch((e) => setSubText(String(e)));
 	});
 	$("coderoot-browse").addEventListener("click", async () => {
 		const dir = await invoke("pick_folder").catch(() => null);

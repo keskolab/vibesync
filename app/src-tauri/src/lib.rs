@@ -350,6 +350,118 @@ async fn pick_folder(app: tauri::AppHandle) -> Option<String> {
     picked
 }
 
+/// Reveal debug.log in the OS file manager, selecting the file itself when
+/// it exists so "where is the log?" needs no path-hunting. Falls back to
+/// opening the containing folder (logging may never have been switched on).
+/// Windows `explorer /select,` exits non-zero on success, so its status is
+/// deliberately ignored.
+#[tauri::command]
+fn open_log_folder(app: tauri::AppHandle) -> Result<(), String> {
+    let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let log = syncer::debug_log_path(&paths);
+    let dir = log.parent().ok_or("no app data folder")?.to_path_buf();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let exists = log.is_file();
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        if exists {
+            c.arg("-R").arg(&log);
+        } else {
+            c.arg(&dir);
+        }
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer");
+        if exists {
+            c.arg(format!("/select,{}", log.display()));
+        } else {
+            c.arg(&dir);
+        }
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(&dir);
+        c
+    };
+    cmd.spawn().map(|_| ()).map_err(|e| format!("could not open the folder: {e}"))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectRow {
+    /// Stable fleet identity — a git origin, or a manual project name.
+    id: String,
+    /// What to show: the repo/folder name, not the whole identity.
+    name: String,
+    /// Where it is on each machine, this one included. Missing = not here.
+    locations: std::collections::BTreeMap<String, String>,
+    /// This machine's path, if it has one.
+    here: Option<String>,
+    /// True for manual `${PROJ:}` mappings — they must match by name on every
+    /// machine, so a row missing elsewhere means real work for the user.
+    manual: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectMatrix {
+    /// Column order: this machine first, then the rest alphabetically.
+    machines: Vec<String>,
+    this_machine: String,
+    rows: Vec<ProjectRow>,
+}
+
+/// The "where does each project live?" table.
+///
+/// Reads the fleet's per-machine attribution from the store cache and folds
+/// in this machine's own map, so a project shows every location the fleet
+/// knows. This is the view that would have made a split project obvious:
+/// the same work under two identities shows up as two rows.
+#[tauri::command]
+async fn project_matrix(app: tauri::AppHandle) -> Result<ProjectMatrix, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = syncer::paths(&app)?;
+        syncer::project_matrix_data(&paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+    .map(|(machines, this_machine, rows)| ProjectMatrix {
+        machines,
+        this_machine,
+        rows: rows
+            .into_iter()
+            .map(|r| ProjectRow {
+                id: r.id,
+                name: r.name,
+                locations: r.locations,
+                here: r.here,
+                manual: r.manual,
+            })
+            .collect(),
+    })
+}
+
+/// Point a project at its folder on THIS machine.
+///
+/// Writes the git identity straight into `git_roots.json` — deliberately not
+/// a `${PROJ:}` mapping. A manual name overrides the repo's own identity and
+/// only works if every machine sets the same one; setting it on a single
+/// machine silently splits the project in two. Teaching the map where the
+/// clone is keeps the identity the other machines already use.
+#[tauri::command]
+async fn locate_project(app: tauri::AppHandle, id: String, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || syncer::locate_project(&app, &id, &path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
 /// Open the store and LIST it — a real end-to-end connectivity check.
 #[tauri::command]
 async fn test_store(
@@ -857,6 +969,9 @@ pub fn run() {
             set_project_mapping,
             remove_project_mapping,
             add_code_root,
+            open_log_folder,
+            project_matrix,
+            locate_project,
             remove_code_root,
             set_store,
             pick_folder,
