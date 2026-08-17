@@ -266,7 +266,7 @@ pub fn apply_roots_opts(
             });
             std::fs::copy(&abs, &bak)?;
         }
-        let Some((data, _)) = store.get(logical)? else { continue };
+        let Some(data) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }

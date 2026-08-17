@@ -26,6 +26,51 @@ pub struct Report {
     pub unchanged: usize,
     /// Entries waiting for a project/repo that isn't on this machine yet.
     pub parked: usize,
+    /// Objects this pass could not take (undecryptable, unreachable, or
+    /// unwritable). Skipped and retried next sync — never fatal.
+    pub failed: usize,
+}
+
+/// True when an error means "this machine's passphrase cannot read that
+/// object", i.e. it was written by a machine configured with a different
+/// passphrase. Worth distinguishing from transient I/O: it never fixes
+/// itself, and the fix is a human one.
+pub fn is_undecryptable(msg: &str) -> bool {
+    msg.contains("age decrypt") || msg.contains("No matching keys")
+}
+
+/// Fetch one object for an apply pass.
+///
+/// A failure here is ALWAYS per-object. One unreadable object must never
+/// abort the pass: a single `?` used to collapse the whole batch, so
+/// NOTHING applied and it looked exactly like "sync is dead" — live-hit
+/// 2026-08-17, where four objects written under a different passphrase
+/// blocked all ~10,700 others on every machine, every sync. State stays
+/// untracked for a failure, so the object is retried on the next sync and
+/// lands by itself once the cause is gone.
+pub fn fetch_obj(store: &dyn SyncStore, logical: &str, failed: &mut usize) -> Option<Vec<u8>> {
+    match store.get(logical) {
+        Ok(Some((data, _))) => Some(data),
+        // Vanished from the store between listing and fetch: not an error.
+        Ok(None) => None,
+        Err(e) => {
+            *failed += 1;
+            let msg = format!("{e:#}");
+            if is_undecryptable(&msg) {
+                crate::dlog::warn(|| {
+                    format!(
+                        "cannot decrypt {logical} — written by a machine using a different \
+                         passphrase; skipping it, everything else still syncs"
+                    )
+                });
+            } else {
+                crate::dlog::warn(|| {
+                    format!("fetch failed for {logical}: {msg} — skipping, retried next sync")
+                });
+            }
+            None
+        }
+    }
 }
 
 /// Upload every scanned entry whose content the store doesn't have yet.
@@ -111,6 +156,9 @@ pub struct ApplyReport {
     pub skipped_newer_local: usize,
     /// Entries waiting for a project/repo that isn't on this machine yet.
     pub parked: usize,
+    /// Objects this pass could not take (undecryptable or unreachable).
+    /// Skipped and retried next sync — never fatal.
+    pub failed: usize,
 }
 
 pub fn pull_dir(
@@ -160,7 +208,19 @@ pub fn pull_dir(
             }
         }
         if abs.exists() {
-            let local_hash = crate::scanner::hash_file(&abs)?;
+            // A local file we cannot read (permissions, or one being
+            // rewritten under us) is that file's problem, not the pass's.
+            let local_hash = match crate::scanner::hash_file(&abs) {
+                Ok(h) => h,
+                Err(e) => {
+                    crate::dlog::warn(|| {
+                        format!("cannot read local {}: {e:#} — skipping", abs.display())
+                    });
+                    report.failed += 1;
+                    on_file();
+                    continue;
+                }
+            };
             if local_hash == meta.hash {
                 // Already in sync; just record it.
                 state.files.insert(
@@ -176,7 +236,17 @@ pub fn pull_dir(
                 on_file();
                 continue;
             }
-            let local_mtime = crate::scanner::mtime_ms(&abs)?;
+            let local_mtime = match crate::scanner::mtime_ms(&abs) {
+                Ok(m) => m,
+                Err(e) => {
+                    crate::dlog::warn(|| {
+                        format!("cannot stat local {}: {e:#} — skipping", abs.display())
+                    });
+                    report.failed += 1;
+                    on_file();
+                    continue;
+                }
+            };
             if local_mtime > meta.mtime_ms {
                 report.skipped_newer_local += 1;
                 on_file();
@@ -188,36 +258,51 @@ pub fn pull_dir(
                 Some(ext) => format!("{ext}.vibesync-bak"),
                 None => "vibesync-bak".to_string(),
             });
-            std::fs::copy(&abs, &bak)?;
+            // No backup, no overwrite — "nothing is ever lost" outranks
+            // applying this one file.
+            if let Err(e) = std::fs::copy(&abs, &bak) {
+                crate::dlog::warn(|| {
+                    format!("cannot back up {}: {e:#} — leaving local copy alone", abs.display())
+                });
+                report.failed += 1;
+                on_file();
+                continue;
+            }
         }
         to_fetch.push((logical, meta, abs));
     }
-    // Pass 2: parallel downloads — the slow half of a first sync.
+    // Pass 2: parallel downloads — the slow half of a first sync. Failures
+    // are per-object (see fetch_obj): the batch always completes.
     use rayon::prelude::*;
+    let fetch_failures = std::sync::atomic::AtomicUsize::new(0);
     let fetched: Vec<(usize, Option<Vec<u8>>)> = to_fetch
         .par_iter()
         .enumerate()
         .map(|(i, (logical, _, _))| {
-            let data = store.get(logical).map(|o| o.map(|(d, _)| d));
+            let mut failed = 0usize;
+            let data = fetch_obj(store, logical, &mut failed);
+            if failed > 0 {
+                fetch_failures.fetch_add(failed, std::sync::atomic::Ordering::Relaxed);
+            }
             on_file();
-            data.map(|d| (i, d))
+            (i, data)
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
+    report.failed += fetch_failures.load(std::sync::atomic::Ordering::Relaxed);
     // Pass 3 (serial): write files and update state in order.
     for (i, data) in fetched {
         let (logical, meta, abs) = &to_fetch[i];
         let Some(data) = data else { continue };
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent)?;
+        // One unwritable path (permissions, a full disk, a folder that
+        // vanished) costs that file only — state stays untracked, so the
+        // next sync tries again.
+        if let Err(e) = write_pulled(abs, &data, meta.mtime_ms) {
+            crate::dlog::warn(|| {
+                format!("cannot write {}: {e:#} — skipping, retried next sync", abs.display())
+            });
+            report.failed += 1;
+            continue;
         }
-        crate::dlog::debug(|| format!("writing {}", abs.display()));
-        let tmp = abs.with_extension("vibesync-tmp");
-        std::fs::write(&tmp, &data)?;
-        std::fs::rename(&tmp, abs)?;
-        filetime::set_file_mtime(
-            abs,
-            FileTime::from_unix_time(meta.mtime_ms / 1000, ((meta.mtime_ms % 1000) * 1_000_000) as u32),
-        )?;
         state.files.insert(
             (*logical).clone(),
             FileState {
@@ -231,4 +316,29 @@ pub fn pull_dir(
         report.pulled += 1;
     }
     Ok(report)
+}
+
+/// Materialize one pulled object: temp file, atomic rename, store mtime.
+/// The temp file is cleaned up on failure so a half-written pull can never
+/// be mistaken for content.
+fn write_pulled(abs: &Path, data: &[u8], mtime_ms: i64) -> Result<()> {
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::dlog::debug(|| format!("writing {}", abs.display()));
+    let tmp = abs.with_extension("vibesync-tmp");
+    let write = (|| -> Result<()> {
+        std::fs::write(&tmp, data)?;
+        std::fs::rename(&tmp, abs)?;
+        Ok(())
+    })();
+    if write.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return write;
+    }
+    filetime::set_file_mtime(
+        abs,
+        FileTime::from_unix_time(mtime_ms / 1000, ((mtime_ms % 1000) * 1_000_000) as u32),
+    )?;
+    Ok(())
 }
