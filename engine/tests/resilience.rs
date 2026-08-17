@@ -519,14 +519,36 @@ fn diagnosis_survives_keys_missing_from_the_listing() {
 
 /// The collector hands over its keys once and resets, so a later clean
 /// sync cannot inherit the previous one's failures.
+///
+/// The collector is process-global on purpose (the app runs one sync at a
+/// time, and rayon workers all report into it), which means sibling tests
+/// in this binary share it. So this test uses keys nobody else creates and
+/// asserts only about those — an exact global count is not its business.
 #[test]
 fn unreadable_keys_are_drained_once() {
-    let _ = sync::take_unreadable(); // clear anything from other tests
+    const MINE: &str = "drain-probe";
     let tmp = tempfile::tempdir().unwrap();
     let store_dir = tmp.path().join("store");
-    let keys = {
+    let keys: Vec<String> = {
         let s = FolderStore::new(store_dir.clone());
-        seed(&s, 2)
+        (0..2)
+            .map(|i| {
+                let logical = format!("claude/projects/{MINE}/{i}.jsonl");
+                let body = b"x".to_vec();
+                s.put(
+                    &logical,
+                    &body,
+                    &RemoteMeta {
+                        hash: vibesync_engine::scanner::hash_bytes(&body),
+                        mtime_ms: 1,
+                        size: body.len() as u64,
+                        source: "a".into(),
+                    },
+                )
+                .unwrap();
+                logical
+            })
+            .collect()
     };
     let refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
     let store = PoisonStore::undecryptable(store_dir, &refs);
@@ -535,9 +557,15 @@ fn unreadable_keys_are_drained_once() {
         sync::fetch_obj(&store, k, &mut failed);
     }
     assert_eq!(failed, 2);
-    let first = sync::take_unreadable();
-    assert_eq!(first.len(), 2, "keys are reported once");
-    assert!(sync::take_unreadable().is_empty(), "and the collector resets");
+
+    let drained = sync::take_unreadable();
+    let mine: Vec<&String> = drained.iter().filter(|k| k.contains(MINE)).collect();
+    assert_eq!(mine.len(), 2, "both keys reported exactly once");
+    let again = sync::take_unreadable();
+    assert!(
+        !again.iter().any(|k| k.contains(MINE)),
+        "and the collector resets — a later sync cannot inherit them"
+    );
 }
 
 // ------------------------------------------- setup-time passphrase check
