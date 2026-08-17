@@ -241,7 +241,27 @@ storage and become readable as soon as the passphrases match.
 ==============================================================
 ```
 
-**The fix:** on the computer named in the message, go to **Settings → Change storage** and enter the passphrase your other computers use (recover it from a working machine's Keychain if you've forgotten it — see [the passphrase](#the-passphrase)). The setup screen verifies it against your storage and tells you whether it's right *before* you finish. Nothing is lost either way: unreadable files stay in your storage and become readable the moment the passphrases match.
+**The fix:** on the computer named in the message, go to **Settings → Change storage** and enter the passphrase your other computers use (recover it from a working machine's Keychain if you've forgotten it — see [the passphrase](#the-passphrase)). The setup screen verifies it against your storage and tells you whether it's right *before* you finish.
+
+Nothing is lost either way. Files that machine uploaded with the wrong passphrase repair themselves — see [the next section](#i-fixed-the-passphrase--what-about-the-files-uploaded-with-the-wrong-one).
+
+### I fixed the passphrase — what about the files uploaded with the wrong one?
+
+They repair themselves. You don't need to do anything.
+
+While a computer had the wrong passphrase, whatever it uploaded went into your storage encrypted with a key nobody else has — including, after you correct it, that computer itself. But the original files never left its disk. So when VibeSync finds a file **it uploaded itself** that it can no longer read, it draws the only possible conclusion: the copy in storage is stale, the local file is the good one. It forgets the upload and re-sends it with the current passphrase on the next sync. You'll see it in the log:
+
+```
+self-heal: 50 object(s) uploaded by this computer are unreadable here — they were
+encrypted with a passphrase it no longer uses. Forgetting them so the next sync
+re-uploads the local copies with the current passphrase.
+```
+
+Two syncs after correcting the passphrase, everything is readable everywhere and the `PASSPHRASE PROBLEM` block stops appearing on all your computers.
+
+It only ever redoes its **own** uploads. Files another computer wrote are never overwritten from here — that machine has the good local copies, so it must be fixed there.
+
+**The one case it can't fix:** if the local original is genuinely gone (the machine was wiped, or the tool deleted an old session), the unreadable copy in storage is the only one left, and without the old passphrase it stays unreadable. Nothing else is affected — everything readable keeps syncing normally.
 
 ### A few items were skipped, but most synced
 

@@ -496,6 +496,48 @@ fn diagnosis_blames_this_machine_when_almost_nothing_is_readable() {
     }
 }
 
+/// Self-heal: objects this machine uploaded and can no longer read were
+/// encrypted with a passphrase it no longer uses. The local file is the
+/// good copy, so those are the ones to re-upload.
+#[test]
+fn self_heal_picks_only_this_machines_own_unreadable_objects() {
+    let listing = listed(&[
+        ("mine-1.jsonl", "mac-mini"),
+        ("mine-2.jsonl", "mac-mini.local"), // same machine, hostname suffix
+        ("theirs.jsonl", "laptop"),
+        ("fine.jsonl", "mac-mini"),
+    ]);
+    let unreadable = vec![
+        "mine-1.jsonl".to_string(),
+        "mine-2.jsonl".to_string(),
+        "theirs.jsonl".to_string(),
+    ];
+    let is_me = |s: &str| s.trim_end_matches(".local") == "mac-mini";
+    let mine = sync::own_unreadable(&unreadable, &listing, &is_me);
+    assert_eq!(mine, vec!["mine-1.jsonl".to_string(), "mine-2.jsonl".to_string()]);
+    assert!(!mine.contains(&"theirs.jsonl".to_string()), "another machine's copy is not ours to redo");
+    assert!(!mine.contains(&"fine.jsonl".to_string()), "readable objects are untouched");
+}
+
+/// The dangerous mistake would be re-uploading over a peer's good copy.
+#[test]
+fn self_heal_never_touches_another_machines_objects() {
+    let listing = listed(&[("a.jsonl", "laptop"), ("b.jsonl", "windows-pc")]);
+    let unreadable = vec!["a.jsonl".to_string(), "b.jsonl".to_string()];
+    let mine = sync::own_unreadable(&unreadable, &listing, &|s| s == "mac-mini");
+    assert!(mine.is_empty(), "a wrong-passphrase peer must be fixed there, not overwritten from here");
+}
+
+/// Nothing unreadable, nothing to heal — and an unknown author is not us.
+#[test]
+fn self_heal_is_empty_on_a_healthy_sync() {
+    let listing = listed(&[("a.jsonl", "mac-mini")]);
+    assert!(sync::own_unreadable(&[], &listing, &|_| true).is_empty());
+    // Key missing from the listing: no author, so no claim of ownership.
+    let orphan = vec!["gone.jsonl".to_string()];
+    assert!(sync::own_unreadable(&orphan, &listing, &|_| true).is_empty());
+}
+
 /// A clean sync says nothing at all — no scary block in a healthy log.
 #[test]
 fn diagnosis_is_silent_when_everything_is_readable() {

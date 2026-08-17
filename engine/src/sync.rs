@@ -114,6 +114,37 @@ pub enum PassphraseDiagnosis {
     OtherMachine { machine: String, unreadable: usize },
 }
 
+/// Objects THIS machine uploaded that it can no longer read.
+///
+/// That combination has exactly one cause: they were encrypted with a
+/// passphrase this machine no longer uses, so the copy in the store is
+/// stale garbage while the local file is the good one. Forgetting the
+/// upload (dropping the state entry) makes the next push re-send them
+/// under the current passphrase — self-healing what otherwise needs a
+/// human editing state.json by hand.
+///
+/// `is_me` decides whether a `RemoteMeta::source` names this machine; the
+/// caller owns hostname canonicalization.
+pub fn own_unreadable(
+    unreadable: &[String],
+    listing: &[(String, RemoteMeta)],
+    is_me: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    if unreadable.is_empty() {
+        return Vec::new();
+    }
+    let source_of: std::collections::HashMap<&str, &str> =
+        listing.iter().map(|(k, m)| (k.as_str(), m.source.as_str())).collect();
+    let mut out: Vec<String> = unreadable
+        .iter()
+        .filter(|k| source_of.get(k.as_str()).map(|s| is_me(s)).unwrap_or(false))
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Classify a sync's decrypt failures. `listing` supplies the author of
 /// each object (`RemoteMeta::source`).
 pub fn diagnose_passphrase(
