@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::codec::{AgeCodec, Codec, GzipCodec};
-use crate::store::{FolderStore, RemoteMeta, S3Store, SyncStore};
+use crate::store::{FolderStore, S3Store, SyncStore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -61,30 +61,20 @@ pub enum PassphraseCheck {
 /// objects cluster by machine and by namespace, so the first N could all
 /// come from the very machine whose phrase is wrong.
 pub fn check_passphrase(store: &dyn SyncStore) -> PassphraseCheck {
-    const SAMPLE: usize = 8;
-    const MAX_BYTES: u64 = 256 * 1024; // keep the probe fast
+    const SAMPLE: usize = 6;
 
-    let listing = match store.list() {
-        Ok(l) => l,
+    // Cheap by design: one listing request, no metadata sidecars. Reading
+    // the whole store here made setup sit on "Checking…" for minutes.
+    let picks = match store.sample_keys(SAMPLE) {
+        Ok(k) => k,
         Err(e) => return PassphraseCheck::Inconclusive { reason: format!("{e:#}") },
     };
-    if listing.is_empty() {
+    if picks.is_empty() {
         return PassphraseCheck::NewStorage;
     }
-    let mut small: Vec<&(String, RemoteMeta)> =
-        listing.iter().filter(|(_, m)| m.size <= MAX_BYTES).collect();
-    if small.is_empty() {
-        // Everything is large: probe the single smallest object anyway.
-        if let Some(min) = listing.iter().min_by_key(|(_, m)| m.size) {
-            small.push(min);
-        }
-    }
-    let step = (small.len() / SAMPLE).max(1);
-    let picks: Vec<&(String, RemoteMeta)> =
-        small.into_iter().step_by(step).take(SAMPLE).collect();
 
     let (mut readable, mut unreadable, mut other) = (0usize, 0usize, String::new());
-    for (logical, _) in &picks {
+    for logical in &picks {
         match store.get(logical) {
             Ok(Some(_)) => readable += 1,
             // Vanished between listing and fetch: tells us nothing.

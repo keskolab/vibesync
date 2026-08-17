@@ -483,3 +483,44 @@ body.onboarding .toggles {
   background: var(--accent);
   opacity: 1;
 }
+
+/* Passphrase verdict — the one message that prevents a machine being set
+   up with the wrong key, so it reads as a banner, not a footnote (11px
+   grey was easy to miss entirely). */
+.pp-verdict {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 500;
+  border: 1px solid transparent;
+}
+.pp-verdict.checking {
+  color: var(--text-2);
+  background: color-mix(in srgb, var(--text-3) 12%, transparent);
+}
+.pp-verdict.ok {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+}
+.pp-verdict.warn {
+  color: #ff9f0a;
+  background: color-mix(in srgb, #ff9f0a 14%, transparent);
+  border-color: color-mix(in srgb, #ff9f0a 35%, transparent);
+}
+.pp-verdict.bad {
+  color: var(--destructive);
+  background: color-mix(in srgb, var(--destructive) 14%, transparent);
+  border-color: color-mix(in srgb, var(--destructive) 35%, transparent);
+}
+.pp-verdict.info {
+  color: var(--text-2);
+  background: color-mix(in srgb, var(--text-3) 10%, transparent);
+}
+.pp-verdict a {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+}
