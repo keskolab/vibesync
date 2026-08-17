@@ -57,18 +57,92 @@ pub fn fetch_obj(store: &dyn SyncStore, logical: &str, failed: &mut usize) -> Op
             *failed += 1;
             let msg = format!("{e:#}");
             if is_undecryptable(&msg) {
-                crate::dlog::warn(|| {
-                    format!(
-                        "cannot decrypt {logical} — written by a machine using a different \
-                         passphrase; skipping it, everything else still syncs"
-                    )
-                });
+                // Collected for the end-of-sync diagnosis. Only the first
+                // few are logged individually: a machine holding the wrong
+                // passphrase cannot read ANY object, and ten thousand
+                // identical warnings bury the one line that explains why.
+                let n = note_unreadable(logical);
+                if n <= 5 {
+                    crate::dlog::warn(|| {
+                        format!("cannot decrypt {logical} — written by a machine using a \
+                                 different passphrase; skipping it")
+                    });
+                } else {
+                    crate::dlog::debug(|| format!("cannot decrypt {logical}"));
+                }
             } else {
                 crate::dlog::warn(|| {
                     format!("fetch failed for {logical}: {msg} — skipping, retried next sync")
                 });
             }
             None
+        }
+    }
+}
+
+/// Keys that failed to decrypt this sync, for the end-of-sync diagnosis.
+static UNREADABLE: std::sync::LazyLock<std::sync::Mutex<Vec<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Record an undecryptable key; returns how many have been seen so far.
+fn note_unreadable(logical: &str) -> usize {
+    let mut v = UNREADABLE.lock().unwrap();
+    // Cap the memory: the diagnosis only needs counts and sources.
+    if v.len() < 20_000 {
+        v.push(logical.to_string());
+    }
+    v.len()
+}
+
+/// Drain the keys collected since the last call.
+pub fn take_unreadable() -> Vec<String> {
+    std::mem::take(&mut *UNREADABLE.lock().unwrap())
+}
+
+/// Which machine's passphrase is wrong — the question that took a human two
+/// days to answer by hand. The store's listing records who wrote each
+/// object, so the engine can simply say it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PassphraseDiagnosis {
+    /// Nothing unreadable.
+    None,
+    /// THIS machine cannot read most of the storage: its own passphrase is
+    /// the odd one out, so nothing from the other machines arrives here.
+    ThisMachine { unreadable: usize, total: usize, machines: Vec<(String, usize)> },
+    /// A minority of objects are unreadable, all written elsewhere: that
+    /// other machine is the misconfigured one.
+    OtherMachine { machine: String, unreadable: usize },
+}
+
+/// Classify a sync's decrypt failures. `listing` supplies the author of
+/// each object (`RemoteMeta::source`).
+pub fn diagnose_passphrase(
+    unreadable: &[String],
+    listing: &[(String, RemoteMeta)],
+) -> PassphraseDiagnosis {
+    if unreadable.is_empty() {
+        return PassphraseDiagnosis::None;
+    }
+    let source_of: std::collections::HashMap<&str, &str> =
+        listing.iter().map(|(k, m)| (k.as_str(), m.source.as_str())).collect();
+    let mut by_machine: std::collections::HashMap<&str, usize> = Default::default();
+    for k in unreadable {
+        *by_machine.entry(source_of.get(k.as_str()).copied().unwrap_or("unknown")).or_default() +=
+            1;
+    }
+    let mut machines: Vec<(String, usize)> =
+        by_machine.into_iter().map(|(m, n)| (m.to_string(), n)).collect();
+    machines.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+    // More than half the storage unreadable => the odd passphrase is ours.
+    // (A single misconfigured peer can only poison what it has written.)
+    let total = listing.len().max(unreadable.len());
+    if unreadable.len() * 2 > total {
+        PassphraseDiagnosis::ThisMachine { unreadable: unreadable.len(), total, machines }
+    } else {
+        PassphraseDiagnosis::OtherMachine {
+            machine: machines[0].0.clone(),
+            unreadable: unreadable.len(),
         }
     }
 }

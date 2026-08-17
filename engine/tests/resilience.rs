@@ -428,6 +428,118 @@ fn undecryptable_is_told_apart_from_transient_trouble() {
     assert!(!sync::is_undecryptable("HTTP status 503"));
 }
 
+// ------------------------------------------------ end-of-sync diagnosis
+
+fn listed(pairs: &[(&str, &str)]) -> Vec<(String, RemoteMeta)> {
+    pairs
+        .iter()
+        .map(|(k, src)| {
+            (
+                k.to_string(),
+                RemoteMeta {
+                    hash: "h".into(),
+                    mtime_ms: 1,
+                    size: 1,
+                    source: src.to_string(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// The live case seen from the healthy machine: a few objects unreadable,
+/// all written by one peer. The log must name that peer as the one to fix.
+#[test]
+fn diagnosis_names_the_misconfigured_other_machine() {
+    let listing = listed(&[
+        ("a.jsonl", "mac-mini"),
+        ("b.jsonl", "mac-mini"),
+        ("c.jsonl", "laptop"),
+        ("d.jsonl", "laptop"),
+        ("e.jsonl", "laptop"),
+        ("f.jsonl", "windows"),
+        ("g.jsonl", "windows"),
+        ("h.jsonl", "windows"),
+    ]);
+    let bad = vec!["a.jsonl".to_string(), "b.jsonl".to_string()];
+    match sync::diagnose_passphrase(&bad, &listing) {
+        sync::PassphraseDiagnosis::OtherMachine { machine, unreadable } => {
+            assert_eq!(machine, "mac-mini");
+            assert_eq!(unreadable, 2);
+        }
+        other => panic!("expected OtherMachine, got {other:?}"),
+    }
+}
+
+/// The same incident seen from the broken machine: it can read almost
+/// nothing, so the fix belongs HERE, not on a peer.
+#[test]
+fn diagnosis_blames_this_machine_when_almost_nothing_is_readable() {
+    let listing = listed(&[
+        ("a.jsonl", "laptop"),
+        ("b.jsonl", "laptop"),
+        ("c.jsonl", "windows"),
+        ("d.jsonl", "windows"),
+        ("e.jsonl", "mac-mini"),
+    ]);
+    let bad: Vec<String> =
+        ["a.jsonl", "b.jsonl", "c.jsonl", "d.jsonl"].iter().map(|s| s.to_string()).collect();
+    match sync::diagnose_passphrase(&bad, &listing) {
+        sync::PassphraseDiagnosis::ThisMachine { unreadable, total, machines } => {
+            assert_eq!(unreadable, 4);
+            assert_eq!(total, 5);
+            // Sorted by volume so the log leads with the biggest contributor.
+            assert_eq!(machines[0].0, "laptop");
+            assert_eq!(machines[0].1, 2);
+        }
+        other => panic!("expected ThisMachine, got {other:?}"),
+    }
+}
+
+/// A clean sync says nothing at all — no scary block in a healthy log.
+#[test]
+fn diagnosis_is_silent_when_everything_is_readable() {
+    let listing = listed(&[("a.jsonl", "laptop")]);
+    assert_eq!(sync::diagnose_passphrase(&[], &listing), sync::PassphraseDiagnosis::None);
+}
+
+/// Objects missing from the listing (deleted mid-sync) must not crash the
+/// diagnosis or hide it.
+#[test]
+fn diagnosis_survives_keys_missing_from_the_listing() {
+    let listing = listed(&[("a.jsonl", "laptop")]);
+    let bad = vec!["gone.jsonl".to_string()];
+    match sync::diagnose_passphrase(&bad, &listing) {
+        sync::PassphraseDiagnosis::ThisMachine { machines, .. } => {
+            assert_eq!(machines[0].0, "unknown");
+        }
+        other => panic!("expected ThisMachine, got {other:?}"),
+    }
+}
+
+/// The collector hands over its keys once and resets, so a later clean
+/// sync cannot inherit the previous one's failures.
+#[test]
+fn unreadable_keys_are_drained_once() {
+    let _ = sync::take_unreadable(); // clear anything from other tests
+    let tmp = tempfile::tempdir().unwrap();
+    let store_dir = tmp.path().join("store");
+    let keys = {
+        let s = FolderStore::new(store_dir.clone());
+        seed(&s, 2)
+    };
+    let refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+    let store = PoisonStore::undecryptable(store_dir, &refs);
+    let mut failed = 0usize;
+    for k in &keys {
+        sync::fetch_obj(&store, k, &mut failed);
+    }
+    assert_eq!(failed, 2);
+    let first = sync::take_unreadable();
+    assert_eq!(first.len(), 2, "keys are reported once");
+    assert!(sync::take_unreadable().is_empty(), "and the collector resets");
+}
+
 // ------------------------------------------- setup-time passphrase check
 
 /// Seed a store with `n` small objects.

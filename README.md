@@ -1,12 +1,12 @@
 # VibeSync
 
-VibeSync is a small menu bar app that keeps your AI coding sessions in sync across all your computers. Start a Claude Code session on your desktop, open your laptop, and continue where you left off — history, plans, custom agents, skills, and settings included.
+**Keep your AI coding sessions on every computer you use.**
 
-It runs on **both macOS and Windows**, in any mix — a Mac at home and a Windows PC at work sync with each other just fine, and sessions translate across the two systems automatically.
+Start a Claude Code session on your desktop, open your laptop, and carry on where you left off — the conversation, plans, memory, custom agents, skills and settings all came with you. Works on **macOS and Windows**, in any mix.
 
-<p align="left"><b><a href="https://github.com/keskolab/vibesync/releases">Download VibeSync — installers for macOS and Windows</a></b><br/><sub><a href="#how-to-install-vibesync">How to install</a></sub></p>
+Your data goes to a place **you** own: a folder you already sync (iCloud Drive, OneDrive, Dropbox, Google Drive), your own cloud bucket (Cloudflare R2, Amazon S3, Azure), or a USB disk. No account, no middleman server, and anything bound for the cloud is encrypted on your machine first.
 
-Your data lives in a place **you** control: a folder you already sync (iCloud Drive, OneDrive, Dropbox, Google Drive), your own cloud bucket (Cloudflare R2, Amazon S3, Azure), or a USB disk. There is no account, no middleman server — and anything sent to cloud storage is encrypted on your machine first.
+<p align="left"><b><a href="https://github.com/keskolab/vibesync/releases">⬇ Download VibeSync for macOS and Windows</a></b></p>
 
 <p align="center">
   <img src="assets/img/macOS-1.png" alt="VibeSync menu bar popover with sync status and tool toggles (macOS)" width="24%" />
@@ -15,75 +15,159 @@ Your data lives in a place **you** control: a folder you already sync (iCloud Dr
   <img src="assets/img/windows-1.png" alt="VibeSync system tray app on Windows" width="24%" />
 </p>
 
-### Why does this exist?
+**Why this exists:** AI coding tools keep sessions on the machine where they happened. Vendors don't sync them, and some delete transcripts after ~30 days. Your conversations, plans and project memory are worth keeping — and worth having on whichever computer you sit down at.
 
-AI coding tools keep sessions on the machine where they happened. Vendors don't sync them, and some tools even delete transcripts after ~30 days. Your conversations, plans, and project memory are valuable — they shouldn't be stuck on one computer or quietly disappear.
+**Contents** — [Quick start](#quick-start) · [What syncs](#what-syncs) · [Where your data lives](#where-your-data-lives) · [The passphrase](#the-passphrase) · [How syncing works](#how-syncing-works) · [How projects are matched](#how-projects-are-matched) · [Troubleshooting](#troubleshooting) · [Every file VibeSync touches](#every-file-vibesync-touches)
 
-### How it works
+---
 
-In plain english: every computer runs the same small app, and they never talk to each other directly. They all talk to one shared place — your storage. Each computer regularly does two things: *"upload anything new I have"* and *"download anything new the others left for me."* That's the whole idea.
+## Quick start
 
-1. Start with any computer, for example computer A.
-2. Computer A looks through your sessions and sends anything new to the storage you chose.
-3. Computer B (and C, and D…) does the same — and downloads anything it doesn't have yet.
-4. Auto-sync repeats this in the background (every 15 minutes by default, adjustable in Settings).
+### 1. Install
 
-One sync, step by step:
+Download the installer from the [Releases page](https://github.com/keskolab/vibesync/releases): a `.dmg` for macOS (Apple Silicon and Intel), a `.exe` or `.msi` for Windows. It updates itself from then on.
+
+<details>
+<summary>Windows shows an "unknown publisher" warning — here's why</summary>
+
+The app isn't code-signed: a publisher certificate costs several hundred dollars *per year*, hard to justify for a free, open-source tool. The warning means "Windows doesn't know who built this", not "this is dangerous" — all the code is in this repository, and building it yourself produces the identical app.
+
+Click **More info → Run anyway**. If Microsoft Edge also blocks the *download*, the Keep option hides behind **⋯ next to Delete → Keep → Show more → Keep anyway**. The macOS build is signed with an Apple developer certificate and opens normally.
+</details>
+
+<details>
+<summary>Or build from source</summary>
+
+You need [Rust](https://rustup.rs) and [Node.js](https://nodejs.org):
+
+```sh
+git clone https://github.com/keskolab/vibesync
+cd vibesync/app && npm install && npm run tauri dev
+```
+
+Optional check: `cargo test --workspace`
+</details>
+
+### 2. Set up your first computer
+
+VibeSync lives in the **menu bar** (macOS) or **system tray** (Windows). Open it and the Setup Assistant asks three things:
+
+1. **Which tools to sync** — it detects what you have installed.
+2. **Where your data should live** — see [storage options](#where-your-data-lives).
+3. **A passphrase**, if you chose cloud storage — see [the passphrase](#the-passphrase).
+
+Then press **Sync**.
+
+### 3. Add your second computer
+
+Install VibeSync there, point it at **the same storage**, and enter **the exact same passphrase**. Press Sync.
+
+> **The one thing that must match: the passphrase.** It is the key your files are encrypted with, so a computer with a different one cannot read anything the others uploaded. Setup now checks this for you and says *"✓ Correct — this passphrase opens the data already in this storage"* before you continue.
+
+One habit worth forming: **sync first, open your AI apps after.** They read their history when they start, so an app that was already open won't show what just arrived until you restart it.
+
+---
+
+## What syncs
+
+| Tool | What follows you |
+|---|---|
+| **Claude Code** | Sessions, subagents, memory, plans, tasks, history, agents, skills, rules, settings — and synced sessions appear in the Claude desktop sidebar. Extra accounts (`~/.claude-work`) sync separately. Plugins only if you opt in |
+| **VS Code Copilot Chat** | Chat history per project, visible in the Chat panel on every machine |
+| **Codex** | Session transcripts and the thread database — every machine lists all sessions |
+| **OpenCode** | Sessions, merged at the database level |
+| **Copilot CLI** | Standalone `copilot` sessions, conversations included — resume them anywhere |
+| **Zed** | Agent threads (best synced while Zed is closed) |
+| **All tools** | Global skills in `~/.agents/skills` ([Agent Skills spec](https://agentskills.io)) |
+
+Every tool has its own on/off switch and finer-grained scopes. Each tool's page shows a **"+N new"** badge when a sync brings something in, and how many items are **waiting in storage** for a project that isn't on this computer yet.
+
+---
+
+## Where your data lives
+
+You pick one place. All of your computers point at that same place.
+
+| Option | Good for | Encrypted? |
+|---|---|---|
+| **A folder** — iCloud Drive, OneDrive, Dropbox, Google Drive | The simplest choice: you already have it, and it syncs itself | Compressed, not encrypted (it's your own folder) |
+| **Cloudflare R2** | Your own bucket; generous free tier | ✅ Always, before upload |
+| **Amazon S3** | Your own bucket | ✅ Always, before upload |
+| **Azure Blob** | Paste one container SAS URL — no account keys | ✅ Always, before upload |
+| **A USB disk or plain local folder** | Air-gapped, manual, no cloud at all | Compressed, not encrypted |
+
+Changing your mind later is fine: **Settings → Change storage**.
+
+---
+
+## The passphrase
+
+If you chose cloud storage, VibeSync asks for a passphrase. It's worth 30 seconds to understand, because it's the one setting that can silently break syncing.
+
+**What it is.** Not a cloud credential — those (bucket, access key) just prove you may use the bucket. The passphrase is what your files are **encrypted with**. VibeSync turns it into an encryption key and locks every file with it *on your computer*, before upload. Your cloud provider only ever holds files it cannot read.
+
+**Why every computer needs the same one.** The same passphrase always produces the same key — that is the entire mechanism by which your computers can read each other's data. There is no key exchange and no account. A computer given a *different* passphrase produces a *different* key, so it cannot read anything the others wrote, and they cannot read what it writes.
+
+**Where it's kept.** In your system's password vault (macOS Keychain, Windows Credential Manager). It never leaves your computers, and nobody — including us — can recover your data without it. Write it down somewhere safe.
+
+**If you forget it** and still have a working computer, you can read it back: macOS **Keychain Access** → search *VibeSync* → entry `store-secrets`.
+
+---
+
+## How syncing works
+
+Every computer runs the same small app, and they never talk to each other directly. They all talk to one shared place — your storage. Each computer regularly does two things: *upload anything new I have*, and *download anything new the others left for me*. That's the whole idea.
 
 ```mermaid
 flowchart TD
-    A["Sync starts<br/>(timer fires, or you press Sync)"] --> B["Scan this computer's tools<br/>for new or changed sessions"]
+    A["Sync starts<br/>(timer, or you press Sync)"] --> B["Scan this computer's tools<br/>for new or changed sessions"]
     B --> C["Upload anything new to your storage<br/>(encrypted first, if it's a cloud bucket)"]
     C --> D["Look in storage for sessions<br/>uploaded by your other computers"]
     D --> E{"Does this computer know<br/>which project a session belongs to?"}
     E -- "Yes — repo is cloned here,<br/>or the folder path matches" --> F["Download it and place it<br/>where the tool expects it"]
-    E -- "No — project doesn't<br/>exist here yet" --> G["Leave it waiting in storage —<br/>it appears the moment the project does"]
+    E -- "No — project isn't<br/>here yet" --> G["Leave it waiting in storage —<br/>it appears the moment the project does"]
     F --> H["Done. Show a '+N new' badge<br/>and wait for the next sync"]
     G --> H
 ```
 
-The rules every sync follows:
+Four rules hold for every sync:
 
-- **Nothing is ever lost.** Sync never deletes anything. If the same session changed on two computers, the newer version wins and the older one is kept beside it as a backup file.
-- **Nothing comes back from the dead.** When a tool cleans up old sessions (Claude does after ~30 days), your storage keeps them forever — but they're never pushed back onto a computer that already cleaned them up.
-- **Works across your computers with zero setup.** A session from `C:\Github\app` on your PC lands in `~/dev/app` on your Mac — same project, different folders, nothing to configure. Git projects are recognized by the repository itself; everything else follows your home folder layout automatically. If a computer doesn't have a project yet, that project's sessions just wait in your storage until it shows up — clone the repo and they're there.
-- **Only changes transfer.** After the first sync, routine syncs finish in seconds.
-- Adding another computer is just: install VibeSync, point it at the same place, enter the same passphrase, press Sync. One habit worth forming: **sync first, open your AI apps after** — they read their history when they start (details in ["Synced sessions don't show up?"](#synced-sessions-dont-show-up)).
+- **Nothing is ever lost.** Sync never deletes. If the same session changed on two computers, the newer version wins and the older one is kept beside it as a `.vibesync-bak` file.
+- **Nothing comes back from the dead.** When a tool cleans up old sessions, your storage keeps them — but they're never pushed back onto a computer that already cleaned them up.
+- **Only changes transfer.** After the first sync, routine syncs take seconds.
+- **A problem with one file costs one file.** An item that can't be read or written is skipped, counted and explained in the log; everything else still syncs, and the skipped item is retried automatically.
 
-### Git repo or just a folder? Why it matters
+Auto-sync runs in the background every 15 minutes by default (adjustable in Settings).
 
-When VibeSync moves a session from one computer to another, it has to answer one question: **"which project does this session belong to on the new computer?"** How it answers depends on whether your project folder is a git repository or just an ordinary folder.
+---
 
-- **A git repository** (cloned from GitHub, GitLab, etc.) carries its own ID card: the repository's address, like `github.com/you/todo-app`. VibeSync uses that address as the project's identity, so it **doesn't matter where the folder lives** on each computer. Clone it anywhere — sessions find it.
-- **An ordinary folder** has no ID card. VibeSync falls back to the folder's location *inside your home folder*. `~/Documents/notes` on one Mac matches `~/Documents/notes` on another Mac and `C:\Users\you\Documents\notes` on Windows — same spot relative to home, so sessions still follow you.
-- **An ordinary folder at a random location** (an external drive, or a different spot on every machine) matches nothing automatically. This is the one case you fix by hand, with a **project name** — explained next.
+## How projects are matched
 
-#### What's a "project name"?
+When a session moves between computers, VibeSync has to answer one question: **which project does this belong to here?** There are three answers, and two of them need nothing from you.
 
-A project name is a label you give a folder, under **Project mappings** in VibeSync's settings. It's you writing the ID card that the folder doesn't have: on each computer, add a mapping with the **same name**, pointing at **that computer's** copy of the folder.
+**1. It's a git repository** → matched by the repository address (`github.com/you/todo-app`). Clone it **anywhere** — the location never matters.
 
-| Computer | Folder on that computer | Project name you type |
+**2. It's a plain folder** → matched by its place *inside your home folder*. `~/Documents/notes` on a Mac is the same project as `C:\Users\you\Documents\notes` on Windows.
+
+**3. It's a plain folder in a different place on each computer** → the only case that needs you. Give it a **project name** (Settings → Project mappings): the same name on every computer, each pointing at that computer's copy.
+
+| Computer | Folder there | Project name you type |
 |---|---|---|
 | Windows PC | `D:\misc\stuff` | `stuff` |
 | MacBook | `/Volumes/Data/stuff` | `stuff` |
 
-That's the entire feature. The name itself can be anything — it just has to be the same everywhere. From then on, VibeSync treats those folders as one project, exactly as if they were clones of the same git repo, and sessions started in one appear in the other.
+A mapping covers everything beneath the folder, so naming a parent like `D:\Code` once takes care of every project inside it.
 
-Two things worth knowing: a mapping covers **everything beneath the folder**, so naming a parent like `D:\Code` once takes care of every project inside it. And most people never need any of this — git projects and home-folder projects already match on their own.
-
-A concrete example — a Mac and a Windows PC:
+### Example: a Mac and a Windows PC
 
 | Project | On the Mac | On the Windows PC | Do sessions follow you? |
 |---|---|---|---|
-| Git repo `todo-app` | `~/dev/todo-app` | `C:\Github\todo-app` | ✅ Zero setup — the repo is the ID |
-| Plain folder `notes` | `~/Documents/notes` | `C:\Users\you\Documents\notes` | ✅ Same spot inside home |
-| Plain folder `stuff` | `~/Desktop/stuff` | `D:\misc\stuff` | ⚠️ Needs a project name (see above) |
+| Git repo `todo-app` | `~/dev/todo-app` | `C:\Github\todo-app` | ✅ Yes — the repo is the ID |
+| Plain folder `notes` | `~/Documents/notes` | `C:\Users\you\Documents\notes` | ✅ Yes — same spot inside home |
+| Plain folder `stuff` | `~/Desktop/stuff` | `D:\misc\stuff` | ⚠️ Give it a project name |
 | Repo not cloned yet | `~/dev/todo-app` | *(not cloned)* | ⏸ Waits in storage until you clone it |
-| Repo cloned somewhere unusual | `~/dev/todo-app` | `E:\Archive\todo-app` | ⏸ Waits until VibeSync finds the clone — see [below](#i-cloned-the-repo-but-its-sessions-didnt-arrive) |
 
-(The verdicts are short on purpose — the bullets above explain each case. And a third or fourth computer behaves exactly like the second: clone the repo, or keep the folder at the same home spot, and sessions follow.)
-
-**A realistic mixed case — everything in one Dropbox folder.** Say every computer runs Dropbox, and `~/Dropbox/Projects` is where all your work lives — a few git repos, and plenty of folders that never got one:
+### Example: everything in one Dropbox folder
 
 ```
 ~/Dropbox/Projects/
@@ -92,21 +176,98 @@ A concrete example — a Mac and a Windows PC:
 └── scraper/     ← plain folder, no git
 ```
 
-Nothing to configure: `website` matches by its repository address, and the plain folders match because Dropbox sits at the same spot inside the home folder on every machine (`~/Dropbox` on a Mac *is* `C:\Users\you\Dropbox` on a PC — same place relative to home). This is the simplest answer for projects that never got a git repo: keep them together in one folder that exists on all your computers, and they all follow you.
+Nothing to configure. `website` matches by its repository address; the plain folders match because Dropbox sits at the same place inside your home folder on every machine. This is the simplest answer for projects that never got a git repo: keep them in one folder that exists on all your computers.
 
-And if one computer keeps Dropbox somewhere unusual, like `D:\Dropbox`? Still just **one** mapping, not one per project: give the `Projects` folder itself a project name (the same name on each computer), and everything inside it is covered — including folders you create next month. A mapping applies to the whole tree beneath it.
+Worth spelling out: Dropbox syncs those folders' *files*, but your AI sessions never live inside the project folder — each tool keeps them in its own data folder (`~/.claude`, `~/.codex`, VS Code's storage). **Dropbox moves your code; VibeSync moves the conversations about it.**
 
-Worth spelling out: Dropbox already syncs those folders' *files*, but your AI sessions never live inside the project folder — each tool keeps them in its own data folder (`~/.claude`, `~/.codex`, VS Code's storage, …), which Dropbox doesn't cover. Dropbox moves your code; VibeSync moves the conversations about it.
+---
 
-Rule of thumb: **if your project is a git repo, put it wherever you like. If it's just a folder, keep it at the same place inside your home folder on every computer — or give it a project name in VibeSync.**
+## Troubleshooting
 
-#### "I cloned the repo, but its sessions didn't arrive"
+### First: turn on the log
 
-A git repo is recognized by its repository address, so its location never matters — but VibeSync still has to *find* your copy on this computer. It looks in two places: folders it has seen your other computers use, and the neighbours of repos it already knows about here. That covers most layouts. It does **not** cover a clone somewhere genuinely new — an external drive, or a tree unlike anything on your other machines.
+**Settings → Debug logging**, then sync once. The log records exactly what happened, in plain language.
 
-Until it finds the clone, those sessions wait in storage. Opening the project in one of your AI tools fixes it — but that's backwards, because the reason you wanted the history is to have it *before* you start working.
+| | Where the log is |
+|---|---|
+| macOS | `~/Library/Application Support/com.keskolabs.vibesync/debug.log` |
+| Windows | `%APPDATA%\com.keskolabs.vibesync\debug.log` |
 
-**Code folders** (Settings → Code folders) fix that: point VibeSync at the folder your repositories live under, and it looks there for clones you haven't opened yet. Everything inside is covered, several levels deep, so one entry usually does a whole machine:
+Settings has a **Show debug.log** button that opens the folder for you. The file is capped at 5 MB, keeping one previous file alongside it.
+
+Every sync ends with a one-line summary:
+
+```
+sync done in 12874 ms — 164 up, 0 down
+```
+
+If anything was skipped, it says so, and why:
+
+```
+sync done in 11799 ms — 12 up, 40 down, 2 skipped (unreadable — check every machine uses the same passphrase)
+```
+
+---
+
+### Nothing syncs at all — one computer sees nothing
+
+Almost always a **passphrase mismatch**: that computer was set up with a different passphrase, so it cannot read anything the others uploaded.
+
+VibeSync now says this outright. Look for this block in the log:
+
+```
+===================== PASSPHRASE PROBLEM =====================
+10842 of 10896 objects in your storage could not be read by THIS computer.
+They were written by: my-laptop (5349), work-pc (4200), mac-mini (1293)
+This computer's passphrase is not the one your other computers use,
+so it cannot read anything they uploaded — that is why nothing arrives here.
+FIX IT ON THIS COMPUTER: Settings -> Change storage -> enter the same
+passphrase your other computer uses. Nothing is lost; everything syncs
+as soon as the passphrases match.
+==============================================================
+```
+
+The same block appears on a **healthy** computer when a *different* machine is the misconfigured one — and it names that machine, so you know where to go:
+
+```
+===================== PASSPHRASE PROBLEM =====================
+34 object(s) in your storage could not be read here.
+Every one of them was written by: mac-mini
+That computer is using a different passphrase from this one, so
+the work it uploads cannot be read by the rest of your machines.
+FIX IT ON mac-mini: Settings -> Change storage -> enter the same
+passphrase this computer uses. Nothing is lost; those files stay in your
+storage and become readable as soon as the passphrases match.
+==============================================================
+```
+
+**The fix:** on the computer named in the message, go to **Settings → Change storage** and enter the passphrase your other computers use (recover it from a working machine's Keychain if you've forgotten it — see [the passphrase](#the-passphrase)). The setup screen verifies it against your storage and tells you whether it's right *before* you finish. Nothing is lost either way: unreadable files stay in your storage and become readable the moment the passphrases match.
+
+### A few items were skipped, but most synced
+
+Individual lines look like this:
+
+```
+cannot decrypt claude/projects/.../session.jsonl — written by a machine using a different passphrase; skipping it
+claude-code: 4 object(s) skipped — unreadable in the store; everything else applied
+```
+
+That's the same passphrase problem, limited to whatever one machine uploaded. Everything else keeps syncing normally, and skipped items are retried on every sync — they land by themselves once the passphrase is corrected.
+
+### Synced sessions don't show up in the app
+
+GUI tools (Claude Code, VS Code, Zed) read their session history **once, when they start**, and never look again while running. So:
+
+1. **Let the sync finish before you open the app.**
+2. **App already open? Restart it fully** — Cmd+Q on macOS, not just closing the window.
+
+VibeSync tells you when this applies: the badge changes to *"+N new · restart VS Code"*, and clears itself once you've restarted. Command-line tools (Codex, Copilot CLI, `claude`) are never affected — they read fresh every run.
+
+### Sessions are "waiting in storage"
+
+They belong to a project this computer doesn't have yet. Clone the repo (or create the folder) and they arrive on the next sync. Each tool's page shows the count.
+
+If you *have* cloned the repo and they still wait, VibeSync hasn't found your copy — it looks where your other computers keep their projects, and next to repos it already knows here. Point it at your code with **Settings → Code folders**:
 
 | Computer | What you'd add |
 |---|---|
@@ -114,85 +275,24 @@ Until it finds the clone, those sessions wait in storage. Opening the project in
 | Desktop with a code drive | `/Volumes/Backup/Development` |
 | Windows PC | `D:\Code` |
 
-This is not a project name and doesn't change any project's identity — your repos keep matching by repository address, and clone them anywhere you like. It only tells VibeSync where to look. Most people never need it: if your repos live under your home folder, they're already found.
+This doesn't change any project's identity — it only tells VibeSync where to look. Most people never need it.
 
-### The passphrase (cloud storage)
+### A "(fork)" copy of my session appeared
 
-- Data in a cloud bucket is locked (encrypted) on your computer **before** it is uploaded. The cloud provider only ever holds files it cannot read.
-- Every computer uses the same passphrase — that's how each one can unlock what the others uploaded.
-- It's stored in your system's password vault (macOS Keychain / Windows Credential Manager), never leaves your computers, and nobody can recover your data without it — so write it down.
+Claude did that, not VibeSync, and nothing is lost.
 
-### What syncs
+When you open a session that was started on a *different* computer, Claude doesn't continue it — it makes a copy for you to carry on in, named "…(fork)", and moves the original into the sidebar's **Archived** list on that computer only. Your other computers still show the original as before.
 
-| Tool | What follows you |
-|---|---|
-| Claude Code | Sessions, subagents, memory, plans, tasks, history, agents, skills, rules, settings — and synced sessions appear in the Claude desktop sidebar. Extra accounts (`~/.claude-work`) sync separately. Plugins only if you opt in |
-| VS Code Copilot Chat | Chat history per project, visible in the Chat panel on every machine |
-| Codex | Session transcripts and the thread database (modern builds) — every machine's session list shows all of them; backup taken before the first database write |
-| OpenCode | Sessions sync at the database level, with a backup taken before the first write |
-| Zed | Agent threads (best synced while Zed is closed) |
-| Copilot CLI | Standalone `copilot` sessions, conversations included — resume them from any machine |
-| All tools | Global skills in `~/.agents/skills` ([Agent Skills spec](https://agentskills.io)) |
+- **Keep working in the fork** — it's the live one.
+- **Want the original back in the list?** Unarchive it once; that choice sticks, and syncing never changes it.
+- **Don't want the fork?** Archive or delete it — also sticks, on that computer.
 
-Works on macOS and Windows, in any mix. Each app has its own on/off switch, per-area scopes, a "+N new" badge when a sync brings something in, and the main window shows when the next auto-sync will run. Each app's page also shows how many items are **waiting in storage** for a project that isn't on this computer yet — clone the repo and they land on the next sync.
+---
 
-### Synced sessions don't show up?
-
-Here's the one thing worth knowing about how your AI apps behave: GUI tools (Claude Code, VS Code, Zed) read their session history **once, when they start** — they never check the disk again while running. Two practical rules follow:
-
-1. **Let the sync finish before you open the app.** Sitting down at a computer? Press Sync (or wait for the auto-sync — the main window shows when the next one runs), let it complete, *then* open Claude Code or VS Code. An app opened mid-sync shows whatever was on disk at that half-way moment.
-2. **App was already open while the sync ran? Restart it.** Anything delivered while it was running is on disk but invisible. Quit it fully — Cmd+Q on macOS, not just closing the window — and reopen.
-
-VibeSync tells you when rule 2 applies: the badge changes to *"+N new · restart VS Code"* whenever items arrived while that app was running, and the hint disappears on its own once you've restarted it. Command-line tools (Codex, Copilot CLI, `claude`) are never affected — they read fresh on every run. And your data is never at risk either way — this is purely about what's on screen.
-
-### Why did a "(fork)" copy of my session appear?
-
-Claude did that — not VibeSync. And nothing is lost.
-
-Here's what happens. You start a session on computer A. VibeSync brings it to computer B. You open it on B. Claude doesn't continue a conversation that was started on a different computer — instead it makes a copy and lets you carry on in the copy. The copy gets the same name plus "(fork)". At the same time, Claude moves the original into the sidebar's **Archived** list — on computer B only. Computer A keeps showing the original exactly as before.
-
-The fork contains the whole conversation up to the moment you opened it, and the original still exists too. Nothing disappeared; there's just one more entry in the list than you expected.
-
-What to do:
-
-- **Keep working in the fork.** It's the live one now.
-- **Want the original back in the list?** Open the Archived section and unarchive it — once. It stays that way: syncing never changes what you archive or unarchive on a computer.
-- **Don't want the fork?** Archive or delete it. That sticks too, on the computer where you did it.
-
-### How to install VibeSync
-
-Grab the installer for your system from the [**Releases page**](https://github.com/keskolab/vibesync/releases) — a `.dmg` for macOS (works on both Apple Silicon and Intel), a `.exe` or `.msi` installer for Windows. The app updates itself after that.
-
-**A note on the Windows install warning, in the spirit of transparency:** when you run the Windows installer, Windows will warn you about an "unknown publisher" and ask for administrator permission. That's because the app isn't code-signed yet — a publisher certificate costs several hundred dollars *per year*, which is hard to justify for a free, open-source tool. The warning means "Windows doesn't know who built this," not "this is dangerous" — and since every line of the code is public in this repository, you can see exactly what you're running (or build it yourself from source below, which produces the identical app). Click **More info → Run anyway** to proceed. If **Microsoft Edge** additionally blocks the download itself ("Make sure you trust… before you open it"), the Keep option is hidden behind the **⋯ menu next to Delete → Keep → Show more → Keep anyway**. The macOS build is signed with an Apple developer certificate and opens like any other app.
+## Every file VibeSync touches
 
 <details>
-<summary><b>Or build and run from source</b></summary>
-
-You need two free tools installed first: [Rust](https://rustup.rs) and [Node.js](https://nodejs.org). Then:
-
-```sh
-# 1. Get the code
-git clone https://github.com/keskolab/vibesync
-cd vibesync
-
-# 2. Start the app
-cd app && npm install && npm run tauri dev
-```
-
-Optional health check — run the engine's test suite:
-
-```sh
-cargo test -p vibesync-engine
-```
-
-</details>
-
-Once it's running, VibeSync appears in your **menu bar** (macOS) or **system tray** (Windows). Open it, walk through the Setup Assistant — pick which tools to sync and where your sessions should live — and press **Sync**.
-
-To sync between computers, repeat the same steps on each one and point them all at the same storage location (with the same passphrase, if it's a cloud bucket).
-
-<details>
-<summary><b>Every file VibeSync touches</b> — full transparency list</summary>
+<summary>Full transparency list</summary>
 
 Nothing outside this list is read or written. `~` is your home folder (`C:\Users\<you>` on Windows). Tools that aren't installed or are switched off aren't touched at all.
 
@@ -209,16 +309,15 @@ Nothing outside this list is read or written. `~` is your home folder (`C:\Users
 | VS Code | `.../Code/User/workspaceStorage/<id>/chatSessions/` ² | Syncs Copilot chats per project |
 | VS Code | `.../Code/User/workspaceStorage/<id>/state.vscdb` ² | Updates one key (the chat index) so synced chats show in the panel |
 | Codex | `~/.codex/sessions/`, `~/.codex/session_index.jsonl` | Syncs; merges the index so every machine lists all sessions |
-| All tools | `meta/git_atlas.json` (in your storage) | Fleet map of where each machine keeps each project (paths only) — lets the same repo live at different locations per machine |
 | Codex | `~/.codex/state_<N>.sqlite` | Merges synced threads in (insert/update-newer only, never deletes); one-time backup before the first write |
-| OpenCode | `~/.local/share/opencode/opencode.db` | Merges synced sessions in (insert/update-newer only, never deletes); one-time backup `opencode.db.vibesync-bak` before the first write |
-| OpenCode | `~/.local/share/opencode/project/` | Syncs each project's `storage/` records (current OpenCode layout) |
-| OpenCode | `~/.local/share/opencode/storage/` | Syncs (legacy records) |
+| OpenCode | `~/.local/share/opencode/opencode.db` | Merges synced sessions in (insert/update-newer only, never deletes); one-time backup before the first write |
+| OpenCode | `~/.local/share/opencode/project/`, `storage/` | Syncs each project's records (current and legacy layouts) |
 | Zed | `.../Zed/threads/threads.db` ³ | Syncs thread rows, newest wins |
 | Copilot CLI | `~/.copilot/session-state/` | Syncs |
 | Copilot CLI | `~/.copilot/session-store.db` | Merges synced conversations in (insert/update-newer only, never deletes); one-time backup before the first write |
 | Copilot CLI | `~/.copilot/config.json`, `settings.json`, `logs/` | Never touched — auth/trust stays local |
 | All tools | `~/.agents/skills/` | Syncs global skills |
+| All tools | `meta/git_atlas.json` (in your storage) | Fleet map of where each machine keeps each project (paths only) |
 
 ¹ macOS: `~/Library/Application Support/Claude/claude-code-sessions/`; Windows Store app: inside the Claude package under `%LOCALAPPDATA%\Packages\`.
 ² macOS: `~/Library/Application Support/Code/User/workspaceStorage/`; Windows: `%APPDATA%\Code\User\workspaceStorage\`.
@@ -228,24 +327,26 @@ Nothing outside this list is read or written. `~` is your home folder (`C:\Users
 
 | File | What it holds |
 |---|---|
-| `config.json` | Settings and storage location. Credentials/passphrase live in the OS keychain — this file holds a `@keychain` marker instead. Never uploaded |
+| `config.json` | Settings and storage location. Credentials and passphrase live in the OS keychain — this file holds a `@keychain` marker instead. Never uploaded |
 | `state.json` | Fingerprints of already-synced files, so only changes transfer |
 | `git_roots.json` | Which local folder each git project lives in on this machine |
 | `new_items.json` | The "+N new" counts shown on each app's card |
 | `applied_registry.json`, `registry-backup/` | Sidebar entries VibeSync added, and backups of the originals |
 | `store_list_cache.json` | Cloud listing cache so routine syncs make a handful of requests instead of thousands |
-| `debug.log` | Only when the Settings toggle is on: per-sync phase timings for troubleshooting. Capped at 5 MB, keeping one previous file (`debug.log.old`) |
-| `hash_cache.json`, `ghost_cache.json` | Speed caches: file fingerprints across app launches; known-stale sidebar entries so they aren't re-downloaded every sync |
+| `debug.log` | Only when the Settings toggle is on. Capped at 5 MB, keeping one previous file (`debug.log.old`) |
+| `hash_cache.json`, `ghost_cache.json` | Speed caches: file fingerprints across launches; known-stale sidebar entries |
 
 **Inside your storage** (all under `v1/files/`, each file with a small `.meta` sidecar; encrypted before upload on cloud backends): `claude/`, `vscode/ws/`, `codex/`, `opencode/`, `zed/threads/`, `copilot/session-state/`, `shared/skills/`.
 
 </details>
 
-### License
+---
 
-VibeSync is **GPL-3.0** — free to use, modify, and share; derivative distributions must remain open under the GPL.
+## License
 
-This project is **open source, but not open contribution**: pull requests are not accepted, so the codebase remains single-author (this keeps dual-licensing possible). Bug reports, feature requests, and *adapter intel* (where tool X stores its sessions on platform Y) are very welcome as issues.
+VibeSync is **GPL-3.0** — free to use, modify and share; derivative distributions must remain open under the GPL.
+
+This project is **open source, but not open contribution**: pull requests are not accepted, so the codebase stays single-author (which keeps dual-licensing possible). Bug reports, feature requests, and *adapter intel* (where tool X stores its sessions on platform Y) are very welcome as issues.
 
 **Commercial licensing** (closed-source embedding or distribution) is available — contact the author.
 

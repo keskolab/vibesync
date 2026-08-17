@@ -1676,6 +1676,49 @@ pub fn sync_now(
     let _ = save_ledger(paths, &ledger);
     let _ = save_parked(paths, &parked_counts);
 
+    // The diagnosis that took two days to reach by hand: name the machine
+    // whose passphrase is wrong, say which side must fix it, and say that
+    // nothing is lost. Printed as a block so it cannot be missed in a log
+    // full of routine lines.
+    match engine::sync::diagnose_passphrase(&engine::sync::take_unreadable(), &listing) {
+        engine::sync::PassphraseDiagnosis::None => {}
+        engine::sync::PassphraseDiagnosis::ThisMachine { unreadable, total, machines } => {
+            let who = machines
+                .iter()
+                .map(|(m, n)| format!("{m} ({n})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            for line in [
+                "===================== PASSPHRASE PROBLEM =====================".to_string(),
+                format!("{unreadable} of {total} objects in your storage could not be read by THIS computer."),
+                format!("They were written by: {who}"),
+                "This computer's passphrase is not the one your other computers use,".to_string(),
+                "so it cannot read anything they uploaded — that is why nothing arrives here.".to_string(),
+                "FIX IT ON THIS COMPUTER: Settings -> Change storage -> enter the same".to_string(),
+                "passphrase your other computer uses. Nothing is lost; everything syncs".to_string(),
+                "as soon as the passphrases match.".to_string(),
+                "==============================================================".to_string(),
+            ] {
+                dlog.error(line);
+            }
+        }
+        engine::sync::PassphraseDiagnosis::OtherMachine { machine, unreadable } => {
+            for line in [
+                "===================== PASSPHRASE PROBLEM =====================".to_string(),
+                format!("{unreadable} object(s) in your storage could not be read here."),
+                format!("Every one of them was written by: {machine}"),
+                format!("That computer is using a different passphrase from this one, so"),
+                "the work it uploads cannot be read by the rest of your machines.".to_string(),
+                format!("FIX IT ON {machine}: Settings -> Change storage -> enter the same"),
+                "passphrase this computer uses. Nothing is lost; those files stay in your".to_string(),
+                "storage and become readable as soon as the passphrases match.".to_string(),
+                "==============================================================".to_string(),
+            ] {
+                dlog.error(line);
+            }
+        }
+    }
+
     dlog.info(format!(
         "sync done in {} ms — {} up, {} down{}",
         sync_t0.elapsed().as_millis(),
