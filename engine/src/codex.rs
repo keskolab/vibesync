@@ -352,7 +352,7 @@ pub fn apply(home: &Path, tok: &crate::tokenizer::Tokenizer, state: &mut SyncSta
         // Index objects: union in.
         if let Some(_machine) = logical.strip_prefix(&index_prefix) {
             on_file();
-            if let Some((bytes, _)) = store.get(logical)? {
+            if let Some(bytes) = crate::sync::fetch_obj(store, logical, &mut report.failed) {
                 for (id, (updated, line)) in parse_index(&bytes) {
                     match merged.get(&id) {
                         Some((cur, _)) if *cur >= updated => {}
@@ -399,7 +399,7 @@ pub fn apply(home: &Path, tok: &crate::tokenizer::Tokenizer, state: &mut SyncSta
                 continue;
             }
         }
-        let Some((data, _)) = store.get(logical)? else { continue };
+        let Some(data) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
         // Materialize with THIS machine's paths inside the content.
         let localized = transform_rollout(&data, &rollout_expand(tok));
         if let Some(parent) = abs.parent() {
@@ -841,7 +841,7 @@ pub fn db_apply(
                 continue;
             }
         }
-        let Some((bytes, _)) = store.get(logical)? else { continue };
+        let Some(bytes) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
         let Ok(mut obj) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
         let Some(t) = obj.get_mut("thread").and_then(|s| s.as_object_mut()) else { continue };
         for f in THREAD_PATH_FIELDS {

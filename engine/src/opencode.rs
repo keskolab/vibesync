@@ -185,7 +185,7 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
                 continue;
             }
         }
-        let Some((data, _)) = store.get(logical)? else { continue };
+        let Some(data) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -451,7 +451,7 @@ pub fn db_apply(
                 continue;
             }
         }
-        let Some((bytes, _)) = store.get(logical)? else { continue };
+        let Some(bytes) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
         let Ok(mut obj) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
         let Some(session) = obj.get_mut("session").and_then(|s| s.as_object_mut()) else {
             continue;

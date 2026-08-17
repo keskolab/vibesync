@@ -255,7 +255,7 @@ fn apply_db(
                 continue;
             }
         }
-        let Some((json, _)) = store.get(logical)? else { continue };
+        let Some(json) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
         let Ok(mut row) =
             serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&json)
         else {

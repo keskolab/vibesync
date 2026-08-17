@@ -1569,11 +1569,22 @@ pub fn sync_now(
                     ));
                     parked_counts.insert(t.id.to_string(), r.parked);
                 }
+                if r.failed > 0 {
+                    // Loud, but NOT a tool failure: the rest of the tool
+                    // applied. Silence here is what made four unreadable
+                    // objects look like "sync is completely dead".
+                    dlog.warn(format!(
+                        "{}: {} object(s) skipped — unreadable in the store (usually written by a \
+                         machine using a different passphrase); everything else applied",
+                        t.id, r.failed
+                    ));
+                }
                 for err in &r.errors {
                     dlog.error(format!("{}: {err}", t.id));
                     tool_errors.push(format!("{}: {err}", t.id));
                 }
                 pull.pulled += r.pulled;
+                pull.failed += r.failed;
                 pull.unchanged += r.unchanged;
                 pull.skipped_newer_local += r.skipped_newer_local;
                 pull.skipped_deleted += r.skipped_deleted;
@@ -1666,10 +1677,15 @@ pub fn sync_now(
     let _ = save_parked(paths, &parked_counts);
 
     dlog.info(format!(
-        "sync done in {} ms — {} up, {} down",
+        "sync done in {} ms — {} up, {} down{}",
         sync_t0.elapsed().as_millis(),
         push.pushed,
-        pull.pulled
+        pull.pulled,
+        if pull.failed > 0 {
+            format!(", {} skipped (unreadable — check every machine uses the same passphrase)", pull.failed)
+        } else {
+            String::new()
+        }
     ));
     engine::scanner::save_hash_cache();
     engine::dlog::set_sink(None);
@@ -1756,6 +1772,7 @@ impl From<engine::sync::ApplyReport> for GenReport {
             unchanged: r.unchanged,
             skipped_newer_local: r.skipped_newer_local,
             parked: r.parked,
+            failed: r.failed,
             ..Default::default()
         }
     }
@@ -1768,6 +1785,9 @@ struct GenReport {
     skipped_newer_local: usize,
     skipped_deleted: usize,
     parked: usize,
+    /// Objects skipped this pass because they could not be read (written
+    /// under a different passphrase) or written. Never fatal: they retry.
+    failed: usize,
     /// Step-specific failures where the tool still made partial progress
     /// (e.g. opencode file layer ok, db merge failed). Logged per line and
     /// counted toward the sync's overall failure.
@@ -1780,6 +1800,7 @@ impl GenReport {
         self.unchanged += r.unchanged;
         self.skipped_newer_local += r.skipped_newer_local;
         self.parked += r.parked;
+        self.failed += r.failed;
     }
 }
 
@@ -1985,6 +2006,7 @@ fn apply_claude(env: &ApplyEnv, state: &mut engine::SyncState) -> Result<GenRepo
         g.skipped_newer_local += r.skipped_newer_local;
         g.skipped_deleted += r.skipped_deleted;
         g.parked += r.parked;
+        g.failed += r.failed;
     }
     Ok(g)
 }
@@ -2444,6 +2466,7 @@ fn sync_registry(
     let mut applied_count = 0usize;
     let mut ghosts = 0usize;
     let mut healed = 0usize;
+    let mut failed = 0usize;
     for (logical, meta) in listing {
         let Some(sid) = logical.strip_prefix("claude/registry/").and_then(|s| s.strip_suffix(".json")) else {
             continue;
@@ -2470,7 +2493,10 @@ fn sync_registry(
                 continue;
             }
         }
-        let Some((bytes, _)) = store.get(logical)? else { continue };
+        // Per-object: one undecryptable entry used to abort the whole
+        // sidebar pass, so ZERO entries applied on every sync while a
+        // single foreign-passphrase object sat in the store.
+        let Some(bytes) = engine::sync::fetch_obj(store, logical, &mut failed) else { continue };
         let Ok(mut remote) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
         registry::expand_paths(&mut remote, tok);
         registry::normalize_separators(&mut remote);
@@ -2580,6 +2606,11 @@ fn sync_registry(
     }
     let _ = std::fs::write(&ghost_cache_path, serde_json::to_vec(&new_ghost_cache).unwrap_or_default());
     let _ = std::fs::write(&applied_path, serde_json::to_vec(&applied).unwrap_or_default());
+    if failed > 0 {
+        engine::dlog::warn(|| {
+            format!("sidebar: {failed} entr{} skipped (unreadable in the store) — the rest applied normally", if failed == 1 { "y" } else { "ies" })
+        });
+    }
     Ok((pushed, applied_count, ghosts, healed))
 }
 
