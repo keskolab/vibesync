@@ -1466,7 +1466,8 @@ pub fn sync_now(
     dlog.info(format!("step: pushing changes ({:.1} MB to upload)", to_push_bytes as f64 / (1024.0 * 1024.0)));
     let push_t0 = std::time::Instant::now();
     for chunk in entries.chunks(10) {
-        let r = engine::sync::push(chunk, &mut state, store.as_ref(), &machine)?;
+        let r =
+            engine::sync::push_with_listing(chunk, &mut state, store.as_ref(), &machine, &listing)?;
         push.pushed += r.pushed;
         push.unchanged += r.unchanged;
         let d = done.fetch_add(chunk.len(), std::sync::atomic::Ordering::Relaxed) + chunk.len();
