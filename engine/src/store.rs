@@ -41,6 +41,23 @@ pub trait SyncStore: Send + Sync {
     fn probe(&self) -> Result<bool> {
         Ok(!self.list()?.is_empty())
     }
+    /// A handful of object keys, as cheaply as the backend allows.
+    ///
+    /// For probes that only need examples — "can this passphrase open
+    /// anything here?" — never the whole store: `list()` also downloads a
+    /// metadata sidecar per object, so on a real bucket it is ~10,000
+    /// requests and takes minutes. Setup used to call it and looked hung.
+    fn sample_keys(&self, max: usize) -> Result<Vec<String>> {
+        let all = self.list()?;
+        if all.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Spread across the listing, never the first N: objects cluster by
+        // machine and by tool, so the front could be entirely one machine's
+        // writes and give a confidently wrong verdict.
+        let step = (all.len() / max).max(1);
+        Ok(all.into_iter().step_by(step).take(max).map(|(k, _)| k).collect())
+    }
 }
 
 // ---------------------------------------------------------------- folder
@@ -230,6 +247,43 @@ impl S3Store {
     }
 
     /// All meta objects under `prefix` as (logical, etag), paginating.
+    /// First `want` logical keys under `prefix` — one small LIST request,
+    /// no sidecar downloads, no pagination.
+    fn sample_prefix(&self, prefix: &str, want: usize) -> Result<Vec<String>> {
+        use rusty_s3::S3Action;
+        let root = "v1/files/";
+        let mut action = self.bucket.list_objects_v2(Some(&self.credentials));
+        action.query_mut().insert("prefix", prefix);
+        // Keys come in pairs (content + .meta.json sidecar) and only the
+        // sidecar half names a logical object, so ask for extra.
+        let max_keys = (want * 4).max(8).to_string();
+        action.query_mut().insert("max-keys", &max_keys);
+        let url = action.sign(SIGN_TTL);
+        let text = self
+            .agent
+            .get(url.as_str())
+            .call()
+            .map_err(|e| clean_s3_err("list", e))?
+            .into_string()?;
+        let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&text)
+            .context("parse LIST response")?;
+        let mut out = Vec::new();
+        for obj in parsed.contents {
+            let key = percent_encoding::percent_decode_str(&obj.key)
+                .decode_utf8_lossy()
+                .into_owned();
+            if let Some(base) = key.strip_suffix(META_SUFFIX) {
+                if let Some(logical) = base.strip_prefix(root) {
+                    out.push(logical.to_string());
+                    if out.len() >= want {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn list_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
         use rusty_s3::S3Action;
         let root = "v1/files/";
@@ -416,6 +470,36 @@ impl SyncStore for S3Store {
         let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&text)
             .context("parse LIST response")?;
         Ok(!parsed.contents.is_empty())
+    }
+
+    /// A few keys spread across the tool namespaces, in a handful of small
+    /// requests — never the full `list()`, which also downloads a metadata
+    /// sidecar per object (~10,000 requests on a real bucket, minutes long:
+    /// setup called it and looked frozen).
+    ///
+    /// Namespaces are the cheap proxy for "different machines and different
+    /// times": taking the first N keys of one prefix could sample nothing
+    /// but a single machine's writes.
+    fn sample_keys(&self, max: usize) -> Result<Vec<String>> {
+        let prefixes = self.top_prefixes().unwrap_or_default();
+        let mut out: Vec<String> = Vec::new();
+        if prefixes.is_empty() {
+            return self.sample_prefix("v1/files/", max);
+        }
+        // At least one from each namespace, topping up until we have `max`.
+        let per = (max / prefixes.len()).max(1);
+        for p in &prefixes {
+            if out.len() >= max {
+                break;
+            }
+            let want = per.min(max - out.len());
+            match self.sample_prefix(p, want) {
+                Ok(keys) => out.extend(keys),
+                // One unreachable namespace must not sink the probe.
+                Err(e) => crate::dlog::debug(|| format!("sample {p}: {e:#}")),
+            }
+        }
+        Ok(out)
     }
 
     fn list(&self) -> Result<Vec<(String, RemoteMeta)>> {

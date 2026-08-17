@@ -43,6 +43,10 @@ let existing = null; // current app status, if already configured
 // so it blocks Continue — but never traps the user.
 let passphraseChecked = null;
 let passphraseOverride = false;
+// True while the storage check is in flight. Continue stays disabled: if
+// this is the same storage as another computer, letting the user click
+// past the check is exactly how a wrong passphrase gets committed.
+let passphraseChecking = false;
 
 function buildStore() {
   const f = chosen.fields;
@@ -230,7 +234,7 @@ function renderEncryption() {
         <div class="strength"><div class="fill" id="pp-strength"></div></div>
         <div class="field"><label>Confirm passphrase</label><input type="password" id="pp2" /></div>
         <p class="inline-note" id="pp-note">Required \u2014 your data is always encrypted before it reaches ${b.name}.</p>
-        <p class="inline-note" id="pp-verdict" style="display:none"></p>
+        <div class="pp-verdict" id="pp-verdict" style="display:none"></div>
         <p class="inline-note">You'll enter the same passphrase on each machine. It never leaves your computer \u2014 if you lose it, the data can't be recovered.</p>
       </div>`;
     const pp1 = body.querySelector("#pp1");
@@ -268,47 +272,55 @@ function renderEncryption() {
     const verdict = body.querySelector("#pp-verdict");
     let verifyTimer = null;
     let verifySeq = 0;
-    const show = (text, color) => {
+    // state: "checking" | "ok" | "warn" | "bad" | "info"
+    const show = (text, state) => {
       verdict.textContent = text;
-      verdict.style.color = color;
+      verdict.className = `pp-verdict ${state}`;
       verdict.style.display = "";
     };
     const scheduleVerify = () => {
       clearTimeout(verifyTimer);
       passphraseChecked = null;
       passphraseOverride = false;
+      passphraseChecking = false;
       if (!passphraseValid()) {
         verdict.style.display = "none";
+        refreshNav();
         return;
       }
-      verifyTimer = setTimeout(verify, 700);
+      verifyTimer = setTimeout(verify, 250);
     };
     const verify = async () => {
       const store = buildStore();
       if (!store) { verdict.style.display = "none"; return; }
       const seq = ++verifySeq;
-      show("Checking this passphrase against the storage\u2026", "var(--text-2)");
+      passphraseChecking = true;
+      refreshNav();
+      show("Checking this passphrase against your storage\u2026", "checking");
       let r;
       try {
         obLogUi("check_passphrase");
         r = await tauri?.core.invoke("check_passphrase", { store, passphrase: chosen.passphrase });
       } catch (e) {
         if (seq !== verifySeq) return;
-        show(`Couldn't check right now (${String(e).slice(0, 80)}) \u2014 you can continue.`, "var(--text-2)");
+        passphraseChecking = false;
+        show(`Couldn't check right now (${String(e).slice(0, 80)}) \u2014 you can continue.`, "info");
+        refreshNav();
         return;
       }
       if (seq !== verifySeq || !r) return;
+      passphraseChecking = false;
       passphraseChecked = r.kind;
       if (r.kind === "newStorage") {
-        show("\u2713 Empty storage \u2014 this passphrase will protect it. Use the exact same one on your other computers.", "var(--ok)");
+        show("\u2713 New storage \u2014 this passphrase will protect it. Use the exact same one on your other computers.", "ok");
       } else if (r.kind === "matches") {
-        show("\u2713 Correct \u2014 this passphrase opens the data already in this storage.", "var(--ok)");
+        show("\u2713 Correct \u2014 this passphrase opens the data already in this storage.", "ok");
       } else if (r.kind === "mismatch") {
-        show("\u2717 This passphrase does not open the data already in this storage. It must be exactly the one you used on your other computer \u2014 otherwise this machine's sessions can't be read anywhere else.", "var(--destructive)");
+        show("\u2717 Wrong passphrase for this storage. It must be exactly the one you used on your other computer \u2014 otherwise this computer can't read anything the others uploaded, and they can't read this one.", "bad");
       } else if (r.kind === "mixed") {
-        show(`\u26a0 This passphrase works, but ${r.unreadable} of ${r.readable + r.unreadable} sampled items were written with a different one \u2014 another machine is set up with the wrong passphrase.`, "#ff9f0a");
+        show(`\u26a0 This passphrase works, but ${r.unreadable} of ${r.readable + r.unreadable} checked items were written with a different one \u2014 another computer is set up with the wrong passphrase.`, "warn");
       } else {
-        show("Couldn't check the storage right now \u2014 you can continue.", "var(--text-2)");
+        show("Couldn't check your storage right now \u2014 you can continue.", "info");
       }
       refreshNav();
     };
@@ -363,6 +375,7 @@ function refreshNav() {
   next.disabled =
     (step === 3 && !buildStore()) ||
     (step === 4 && needsPassphrase() && !passphraseValid()) ||
+    (step === 4 && needsPassphrase() && passphraseChecking) ||
     (step === 4 && needsPassphrase() && passphraseChecked === "mismatch" && !passphraseOverride);
 }
 
