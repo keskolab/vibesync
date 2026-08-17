@@ -1487,6 +1487,10 @@ pub fn sync_now(
     }
     dlog.info("step: applying changes from other machines");
     phase("Downloading…");
+    // Start from a clean slate: a sync that ended early (crash, cancelled
+    // run) leaves keys in the collector, and attributing them to THIS sync
+    // would name a machine that had nothing to do with it.
+    let _ = engine::sync::take_unreadable();
     let pull_t0 = std::time::Instant::now();
     let pulled_bytes = std::sync::atomic::AtomicU64::new(0);
     let mut pull = engine::Report::default();
