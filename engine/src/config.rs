@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::codec::{AgeCodec, Codec, GzipCodec};
-use crate::store::{FolderStore, S3Store, SyncStore};
+use crate::store::{FolderStore, RemoteMeta, S3Store, SyncStore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -27,6 +27,86 @@ pub enum StoreConfig {
     },
     /// Azure Blob Storage via a container SAS URL. Always encrypted.
     AzureSas { container_sas_url: String },
+}
+
+/// What a passphrase means for the data ALREADY in a storage location.
+///
+/// The passphrase is the only thing tying two machines together: the same
+/// phrase derives the same key, a different phrase derives a different one.
+/// Nothing at setup time used to verify it, so a second machine could be
+/// configured with a mistyped or forgotten phrase, encrypt everything it
+/// uploaded under a key no one else had, and only reveal it weeks later as
+/// "sync is broken" (live incident 2026-08-17).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum PassphraseCheck {
+    /// No VibeSync data here yet — first machine, nothing to match against.
+    NewStorage,
+    /// Every sampled object opened: this phrase matches the existing data.
+    Matches { sampled: usize },
+    /// Nothing opened: wrong phrase for this storage.
+    Mismatch { sampled: usize },
+    /// Some objects open and some don't — this phrase is right, but the
+    /// storage also holds objects written under a different one (another
+    /// machine is misconfigured).
+    Mixed { readable: usize, unreadable: usize },
+    /// Couldn't tell (network, permissions). Never block setup on this.
+    Inconclusive { reason: String },
+}
+
+/// Sample existing objects and try to decrypt them, so setup can say
+/// "this is the right passphrase" before the user commits to it.
+///
+/// Sampling is spread across the listing rather than taken from the front:
+/// objects cluster by machine and by namespace, so the first N could all
+/// come from the very machine whose phrase is wrong.
+pub fn check_passphrase(store: &dyn SyncStore) -> PassphraseCheck {
+    const SAMPLE: usize = 8;
+    const MAX_BYTES: u64 = 256 * 1024; // keep the probe fast
+
+    let listing = match store.list() {
+        Ok(l) => l,
+        Err(e) => return PassphraseCheck::Inconclusive { reason: format!("{e:#}") },
+    };
+    if listing.is_empty() {
+        return PassphraseCheck::NewStorage;
+    }
+    let mut small: Vec<&(String, RemoteMeta)> =
+        listing.iter().filter(|(_, m)| m.size <= MAX_BYTES).collect();
+    if small.is_empty() {
+        // Everything is large: probe the single smallest object anyway.
+        if let Some(min) = listing.iter().min_by_key(|(_, m)| m.size) {
+            small.push(min);
+        }
+    }
+    let step = (small.len() / SAMPLE).max(1);
+    let picks: Vec<&(String, RemoteMeta)> =
+        small.into_iter().step_by(step).take(SAMPLE).collect();
+
+    let (mut readable, mut unreadable, mut other) = (0usize, 0usize, String::new());
+    for (logical, _) in &picks {
+        match store.get(logical) {
+            Ok(Some(_)) => readable += 1,
+            // Vanished between listing and fetch: tells us nothing.
+            Ok(None) => {}
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if crate::sync::is_undecryptable(&msg) {
+                    unreadable += 1;
+                } else if other.is_empty() {
+                    other = msg;
+                }
+            }
+        }
+    }
+    match (readable, unreadable) {
+        (0, 0) => PassphraseCheck::Inconclusive {
+            reason: if other.is_empty() { "no objects could be sampled".into() } else { other },
+        },
+        (r, 0) => PassphraseCheck::Matches { sampled: r },
+        (0, u) => PassphraseCheck::Mismatch { sampled: u },
+        (r, u) => PassphraseCheck::Mixed { readable: r, unreadable: u },
+    }
 }
 
 /// Build the store described by `config`. `passphrase` is required whenever

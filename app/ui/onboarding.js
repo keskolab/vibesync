@@ -37,6 +37,13 @@ function passphraseValid() {
 }
 let existing = null; // current app status, if already configured
 
+// Result of trying this passphrase against the storage ("matches",
+// "mismatch", "mixed", "newStorage", …) and the user's explicit override
+// of a mismatch. A mismatch is almost always a typo or a forgotten phrase,
+// so it blocks Continue — but never traps the user.
+let passphraseChecked = null;
+let passphraseOverride = false;
+
 function buildStore() {
   const f = chosen.fields;
   switch (storage) {
@@ -223,6 +230,7 @@ function renderEncryption() {
         <div class="strength"><div class="fill" id="pp-strength"></div></div>
         <div class="field"><label>Confirm passphrase</label><input type="password" id="pp2" /></div>
         <p class="inline-note" id="pp-note">Required \u2014 your data is always encrypted before it reaches ${b.name}.</p>
+        <p class="inline-note" id="pp-verdict" style="display:none"></p>
         <p class="inline-note">You'll enter the same passphrase on each machine. It never leaves your computer \u2014 if you lose it, the data can't be recovered.</p>
       </div>`;
     const pp1 = body.querySelector("#pp1");
@@ -249,7 +257,62 @@ function renderEncryption() {
         note.style.color = "var(--ok)";
       }
       refreshNav();
+      scheduleVerify();
     };
+
+    // Verify against the storage itself. A passphrase is only "correct"
+    // relative to data that already exists: the same phrase derives the
+    // same key, so a second machine typing a different one silently
+    // encrypts everything under a key nobody else can read. Trying it here
+    // is the only way to catch that before weeks of broken syncing.
+    const verdict = body.querySelector("#pp-verdict");
+    let verifyTimer = null;
+    let verifySeq = 0;
+    const show = (text, color) => {
+      verdict.textContent = text;
+      verdict.style.color = color;
+      verdict.style.display = "";
+    };
+    const scheduleVerify = () => {
+      clearTimeout(verifyTimer);
+      passphraseChecked = null;
+      passphraseOverride = false;
+      if (!passphraseValid()) {
+        verdict.style.display = "none";
+        return;
+      }
+      verifyTimer = setTimeout(verify, 700);
+    };
+    const verify = async () => {
+      const store = buildStore();
+      if (!store) { verdict.style.display = "none"; return; }
+      const seq = ++verifySeq;
+      show("Checking this passphrase against the storage\u2026", "var(--text-2)");
+      let r;
+      try {
+        obLogUi("check_passphrase");
+        r = await tauri?.core.invoke("check_passphrase", { store, passphrase: chosen.passphrase });
+      } catch (e) {
+        if (seq !== verifySeq) return;
+        show(`Couldn't check right now (${String(e).slice(0, 80)}) \u2014 you can continue.`, "var(--text-2)");
+        return;
+      }
+      if (seq !== verifySeq || !r) return;
+      passphraseChecked = r.kind;
+      if (r.kind === "newStorage") {
+        show("\u2713 Empty storage \u2014 this passphrase will protect it. Use the exact same one on your other computers.", "var(--ok)");
+      } else if (r.kind === "matches") {
+        show("\u2713 Correct \u2014 this passphrase opens the data already in this storage.", "var(--ok)");
+      } else if (r.kind === "mismatch") {
+        show("\u2717 This passphrase does not open the data already in this storage. It must be exactly the one you used on your other computer \u2014 otherwise this machine's sessions can't be read anywhere else.", "var(--destructive)");
+      } else if (r.kind === "mixed") {
+        show(`\u26a0 This passphrase works, but ${r.unreadable} of ${r.readable + r.unreadable} sampled items were written with a different one \u2014 another machine is set up with the wrong passphrase.`, "#ff9f0a");
+      } else {
+        show("Couldn't check the storage right now \u2014 you can continue.", "var(--text-2)");
+      }
+      refreshNav();
+    };
+
     pp1.addEventListener("input", (e) => { chosen.passphrase = e.target.value; feedback(); });
     pp2.addEventListener("input", (e) => { chosen.confirm = e.target.value; feedback(); });
     feedback();
@@ -299,7 +362,8 @@ function refreshNav() {
   next.textContent = step === 0 ? "Get Started" : step === STEPS - 1 ? (existing?.configured ? "Switch Storage & Sync" : "Start First Sync") : "Continue";
   next.disabled =
     (step === 3 && !buildStore()) ||
-    (step === 4 && needsPassphrase() && !passphraseValid());
+    (step === 4 && needsPassphrase() && !passphraseValid()) ||
+    (step === 4 && needsPassphrase() && passphraseChecked === "mismatch" && !passphraseOverride);
 }
 
 let renderedStep = -1;
