@@ -1661,6 +1661,27 @@ pub fn sync_now(
             (0, 0, 0, 0)
         };
     report_progress(total);
+
+    // Self-heal before saving state: an object THIS machine uploaded that it
+    // can no longer read was encrypted with a passphrase it no longer uses.
+    // The local file is the good copy, so forget the upload and let the next
+    // push redo it — otherwise the stale copy sits there unreadable to the
+    // whole fleet until someone edits state.json by hand.
+    let unreadable_keys = engine::sync::take_unreadable();
+    let mine = engine::sync::own_unreadable(&unreadable_keys, &listing, &|src| {
+        canon_machine(src) == this_machine
+    });
+    if !mine.is_empty() {
+        for k in &mine {
+            state.files.remove(k);
+        }
+        dlog.warn(format!(
+            "self-heal: {} object(s) uploaded by this computer are unreadable here — they were \
+             encrypted with a passphrase it no longer uses. Forgetting them so the next sync \
+             re-uploads the local copies with the current passphrase.",
+            mine.len()
+        ));
+    }
     state.save(&paths.state)?;
 
     // Rewrite (not merge): the ledger reflects this sync only, clearing
@@ -1684,7 +1705,7 @@ pub fn sync_now(
     // whose passphrase is wrong, say which side must fix it, and say that
     // nothing is lost. Printed as a block so it cannot be missed in a log
     // full of routine lines.
-    match engine::sync::diagnose_passphrase(&engine::sync::take_unreadable(), &listing) {
+    match engine::sync::diagnose_passphrase(&unreadable_keys, &listing) {
         engine::sync::PassphraseDiagnosis::None => {}
         engine::sync::PassphraseDiagnosis::ThisMachine { unreadable, total, machines } => {
             let who = machines

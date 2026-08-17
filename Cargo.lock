@@ -5434,7 +5434,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vibesync-app"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -5458,7 +5458,7 @@ dependencies = [
 
 [[package]]
 name = "vibesync-engine"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "age",
  "anyhow",
