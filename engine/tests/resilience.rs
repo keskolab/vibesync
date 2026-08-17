@@ -428,6 +428,76 @@ fn undecryptable_is_told_apart_from_transient_trouble() {
     assert!(!sync::is_undecryptable("HTTP status 503"));
 }
 
+// ------------------------------------------------------- upload churn
+
+/// A machine with no state for a file the store already holds identically
+/// must adopt it, not re-upload it. Re-uploading changes the object's ETag,
+/// which invalidates every other machine's listing cache — one machine
+/// doing this to ~4,100 objects took every other sync from 8s to 67s.
+#[test]
+fn push_adopts_identical_objects_instead_of_re_uploading() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_dir = tmp.path().join("store");
+    // Machine A publishes two sessions.
+    let a = publish_sessions(tmp.path(), &FolderStore::new(store_dir.clone()), "proj", &["s1", "s2"]);
+
+    // Machine B has byte-identical files (it downloaded them earlier) but
+    // an EMPTY state — the situation after a state reset or failed applies.
+    let b = Machine::new(tmp.path(), "b");
+    for u in ["s1", "s2"] {
+        b.write_session("proj", u, &format!("session {u}\n"));
+    }
+    let entries = CLAUDE_CODE.scan(&b.home, &b.tok, false).unwrap();
+    let store = FolderStore::new(store_dir);
+    let listing = store.list().unwrap();
+    let mut state = SyncState::default();
+
+    let r = sync::push_with_listing(&entries, &mut state, &store, "b", &listing).unwrap();
+
+    assert_eq!(r.pushed, 0, "identical content must not be re-uploaded");
+    assert_eq!(r.unchanged, 2);
+    // Still recorded, so the next sync treats them as known.
+    assert_eq!(state.files.len(), 2);
+    // And the store still credits the original machine.
+    for (_, meta) in store.list().unwrap() {
+        assert_eq!(meta.source, "a", "adopting must not restamp ownership");
+    }
+    let _ = a;
+}
+
+/// Genuinely changed content still uploads — the guard must not freeze a
+/// file just because an older version is in the store.
+#[test]
+fn push_still_uploads_when_content_differs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_dir = tmp.path().join("store");
+    publish_sessions(tmp.path(), &FolderStore::new(store_dir.clone()), "proj", &["s1"]);
+
+    let b = Machine::new(tmp.path(), "b");
+    b.write_session("proj", "s1", "different content on B\n");
+    let entries = CLAUDE_CODE.scan(&b.home, &b.tok, false).unwrap();
+    let store = FolderStore::new(store_dir);
+    let listing = store.list().unwrap();
+    let mut state = SyncState::default();
+
+    let r = sync::push_with_listing(&entries, &mut state, &store, "b", &listing).unwrap();
+    assert_eq!(r.pushed, 1, "changed content must still upload");
+}
+
+/// Without a listing (the plain push entry point) behaviour is unchanged.
+#[test]
+fn push_without_a_listing_behaves_as_before() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = FolderStore::new(tmp.path().join("store"));
+    let a = Machine::new(tmp.path(), "a");
+    a.write_session("proj", "s1", "content\n");
+    let entries = CLAUDE_CODE.scan(&a.home, &a.tok, false).unwrap();
+    let mut state = SyncState::default();
+    assert_eq!(sync::push(&entries, &mut state, &store, "a").unwrap().pushed, 1);
+    // Second push is skipped by state, as always.
+    assert_eq!(sync::push(&entries, &mut state, &store, "a").unwrap().pushed, 0);
+}
+
 // ------------------------------------------------ end-of-sync diagnosis
 
 fn listed(pairs: &[(&str, &str)]) -> Vec<(String, RemoteMeta)> {

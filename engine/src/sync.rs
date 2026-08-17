@@ -185,13 +185,48 @@ pub fn push(
     store: &dyn SyncStore,
     source: &str,
 ) -> Result<Report> {
+    push_with_listing(entries, state, store, source, &[])
+}
+
+/// Push, skipping anything the store already holds byte-for-byte.
+///
+/// State alone is not enough to decide. A machine whose state was reset —
+/// or which never recorded an apply (its downloads were failing) — has no
+/// entry for files that are nonetheless already in the store, identical.
+/// Uploading them again changes nothing but the object's ETag, which
+/// invalidates every OTHER machine's listing cache and forces it to
+/// re-download a metadata sidecar per object. Live-hit 2026-08-17: one
+/// machine re-uploaded ~4,100 unchanged objects and every other machine's
+/// sync went from 8 seconds to 67.
+pub fn push_with_listing(
+    entries: &[FileEntry],
+    state: &mut SyncState,
+    store: &dyn SyncStore,
+    source: &str,
+    listing: &[(String, RemoteMeta)],
+) -> Result<Report> {
     use rayon::prelude::*;
     let mut report = Report::default();
+    let remote_hash: std::collections::HashMap<&str, &str> =
+        listing.iter().map(|(k, m)| (k.as_str(), m.hash.as_str())).collect();
+    let mut adopt: Vec<(&FileEntry, &str)> = Vec::new();
     let todo: Vec<&FileEntry> = entries
         .iter()
         .filter(|e| {
             match state.files.get(&e.logical) {
                 Some(st) if st.hash == e.hash && !st.deleted_locally => {
+                    report.unchanged += 1;
+                    return false;
+                }
+                // A deletion this machine recorded must stay recorded.
+                Some(st) if st.deleted_locally => return true,
+                _ => {}
+            }
+            // Content already in the store: adopt it into state instead of
+            // re-uploading identical bytes.
+            match remote_hash.get(e.logical.as_str()) {
+                Some(h) if **h == e.hash => {
+                    adopt.push((e, h));
                     report.unchanged += 1;
                     false
                 }
@@ -199,6 +234,22 @@ pub fn push(
             }
         })
         .collect();
+    if !adopt.is_empty() {
+        crate::dlog::debug(|| {
+            format!("push: {} file(s) already in the store — recorded, not re-uploaded", adopt.len())
+        });
+        for (e, hash) in adopt {
+            state.files.insert(
+                e.logical.clone(),
+                FileState {
+                    hash: (*hash).to_string(),
+                    mtime_ms: e.mtime_ms,
+                    size: e.size,
+                    deleted_locally: false,
+                },
+            );
+        }
+    }
     // Encrypt + upload in parallel; state is updated afterwards, serially.
     let results: Vec<Result<(String, FileState)>> = todo
         .par_iter()
