@@ -477,6 +477,25 @@ async fn test_store(
     .map_err(|e| format!("{e:#}"))
 }
 
+/// Does this passphrase actually open the data already in that storage?
+/// Setup can only warn about a wrong phrase by trying it — nothing else
+/// distinguishes "new passphrase" from "wrong passphrase".
+#[tauri::command]
+async fn check_passphrase(
+    store: vibesync_engine::StoreConfig,
+    passphrase: Option<String>,
+) -> Result<vibesync_engine::PassphraseCheck, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = vibesync_engine::open_store(&store, passphrase.as_deref())?;
+        Ok::<vibesync_engine::PassphraseCheck, anyhow::Error>(vibesync_engine::check_passphrase(
+            s.as_ref(),
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
 /// Dev-only UI affordances (e.g. "Replay first launch") key off this.
 #[tauri::command]
 fn is_dev() -> bool {
@@ -975,7 +994,8 @@ pub fn run() {
             remove_code_root,
             set_store,
             pick_folder,
-            test_store
+            test_store,
+            check_passphrase
         ])
         .setup(|app| {
             // Menu bar app: no Dock icon.

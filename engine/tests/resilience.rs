@@ -428,6 +428,154 @@ fn undecryptable_is_told_apart_from_transient_trouble() {
     assert!(!sync::is_undecryptable("HTTP status 503"));
 }
 
+// ------------------------------------------- setup-time passphrase check
+
+/// Seed a store with `n` small objects.
+fn seed(store: &dyn SyncStore, n: usize) -> Vec<String> {
+    let mut keys = Vec::new();
+    for i in 0..n {
+        let logical = format!("claude/projects/p/{i}.jsonl");
+        let body = format!("object {i}\n").into_bytes();
+        store
+            .put(
+                &logical,
+                &body,
+                &RemoteMeta {
+                    hash: vibesync_engine::scanner::hash_bytes(&body),
+                    mtime_ms: 1,
+                    size: body.len() as u64,
+                    source: "a".into(),
+                },
+            )
+            .unwrap();
+        keys.push(logical);
+    }
+    keys
+}
+
+/// First machine: nothing to match against, so setup must not cry wolf.
+#[test]
+fn passphrase_check_reports_new_storage_when_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = FolderStore::new(tmp.path().join("store"));
+    assert_eq!(vibesync_engine::check_passphrase(&store), vibesync_engine::PassphraseCheck::NewStorage);
+}
+
+/// Second machine, right phrase: the reassurance that was missing.
+#[test]
+fn passphrase_check_confirms_a_matching_passphrase() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = FolderStore::new(tmp.path().join("store"));
+    seed(&store, 5);
+    match vibesync_engine::check_passphrase(&store) {
+        vibesync_engine::PassphraseCheck::Matches { sampled } => assert_eq!(sampled, 5),
+        other => panic!("expected Matches, got {other:?}"),
+    }
+}
+
+/// Second machine, wrong phrase — the exact mistake that caused the
+/// incident. Setup must be able to say so before the user commits.
+#[test]
+fn passphrase_check_detects_a_wrong_passphrase() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_dir = tmp.path().join("store");
+    let keys = {
+        let s = FolderStore::new(store_dir.clone());
+        seed(&s, 5)
+    };
+    let refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+    let store = PoisonStore::undecryptable(store_dir, &refs);
+    match vibesync_engine::check_passphrase(&store) {
+        vibesync_engine::PassphraseCheck::Mismatch { sampled } => assert_eq!(sampled, 5),
+        other => panic!("expected Mismatch, got {other:?}"),
+    }
+}
+
+/// Our actual store today: this machine's phrase is right, but another
+/// machine has been writing under a different one. Saying only "correct"
+/// would hide a real problem, so it gets its own verdict.
+#[test]
+fn passphrase_check_flags_a_store_written_by_two_different_passphrases() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_dir = tmp.path().join("store");
+    let keys = {
+        let s = FolderStore::new(store_dir.clone());
+        seed(&s, 6)
+    };
+    let poisoned: Vec<&str> = keys.iter().take(2).map(|s| s.as_str()).collect();
+    let store = PoisonStore::undecryptable(store_dir, &poisoned);
+    match vibesync_engine::check_passphrase(&store) {
+        vibesync_engine::PassphraseCheck::Mixed { readable, unreadable } => {
+            assert_eq!((readable, unreadable), (4, 2));
+        }
+        other => panic!("expected Mixed, got {other:?}"),
+    }
+}
+
+/// A store we cannot even list tells us nothing about the passphrase —
+/// setup must not block on an unrelated network problem.
+#[test]
+fn passphrase_check_is_inconclusive_when_the_store_cannot_be_listed() {
+    struct Unreachable;
+    impl SyncStore for Unreachable {
+        fn put(&self, _l: &str, _p: &[u8], _m: &RemoteMeta) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn get(&self, _l: &str) -> anyhow::Result<Option<(Vec<u8>, RemoteMeta)>> {
+            Ok(None)
+        }
+        fn list(&self) -> anyhow::Result<Vec<(String, RemoteMeta)>> {
+            anyhow::bail!("connection reset by peer")
+        }
+    }
+    match vibesync_engine::check_passphrase(&Unreachable) {
+        vibesync_engine::PassphraseCheck::Inconclusive { reason } => {
+            assert!(reason.contains("connection reset"), "{reason}");
+        }
+        other => panic!("expected Inconclusive, got {other:?}"),
+    }
+}
+
+/// Objects that vanished between listing and fetch prove nothing either.
+#[test]
+fn passphrase_check_is_inconclusive_when_every_sample_vanished() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_dir = tmp.path().join("store");
+    {
+        let s = FolderStore::new(store_dir.clone());
+        seed(&s, 3);
+    }
+    let store = VanishedStore(FolderStore::new(store_dir));
+    assert!(matches!(
+        vibesync_engine::check_passphrase(&store),
+        vibesync_engine::PassphraseCheck::Inconclusive { .. }
+    ));
+}
+
+/// The sample is spread across the listing: objects cluster by machine and
+/// by namespace, so probing only the first few could sample exclusively
+/// from the misconfigured machine and give the wrong verdict.
+#[test]
+fn passphrase_check_samples_across_the_listing_not_just_the_front() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_dir = tmp.path().join("store");
+    let keys = {
+        let s = FolderStore::new(store_dir.clone());
+        seed(&s, 40)
+    };
+    // Poison a contiguous block at the very front of the sorted listing.
+    let mut sorted = keys.clone();
+    sorted.sort();
+    let front: Vec<&str> = sorted.iter().take(8).map(|s| s.as_str()).collect();
+    let store = PoisonStore::undecryptable(store_dir, &front);
+    match vibesync_engine::check_passphrase(&store) {
+        // Spread sampling must still reach readable objects further in.
+        vibesync_engine::PassphraseCheck::Mixed { readable, .. } => assert!(readable > 0),
+        vibesync_engine::PassphraseCheck::Matches { .. } => {}
+        other => panic!("front-loaded poison must not read as a global mismatch: {other:?}"),
+    }
+}
+
 // ------------------------------------------------------- file adapters
 
 /// Copilot CLI's session-state file layer.
