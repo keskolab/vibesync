@@ -182,10 +182,6 @@ Auto-sync runs in the background every 15 minutes by default (adjustable in Sett
 
 ---
 
-
-
----
-
 ## FAQ
 
 <details>
