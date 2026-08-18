@@ -17,7 +17,7 @@ Your data goes to a place **you** own: a folder you already sync (iCloud Drive, 
 
 **Why this exists:** AI coding tools keep sessions on the machine where they happened. Vendors don't sync them, and some delete transcripts after ~30 days. Your conversations, plans and project memory are worth keeping — and worth having on whichever computer you sit down at.
 
-**Contents** — [Quick start](#quick-start) · [What syncs](#what-syncs) · [Where your data lives](#where-your-data-lives) · [The passphrase](#the-passphrase) · [How syncing works](#how-syncing-works) · [How projects are matched](#how-projects-are-matched) · [Troubleshooting](#troubleshooting) · [Every file VibeSync touches](#every-file-vibesync-touches)
+**Contents** — [Quick start](#quick-start) · [What syncs](#what-syncs) · [Where your data lives](#where-your-data-lives) · [The passphrase](#the-passphrase) · [How syncing works](#how-syncing-works) · [How projects are matched](#how-projects-are-matched) · [FAQ](#faq) · [Troubleshooting](#troubleshooting) · [Every file VibeSync touches](#every-file-vibesync-touches)
 
 ---
 
@@ -84,6 +84,47 @@ Every tool has its own on/off switch and finer-grained scopes. Each tool's page 
 
 ---
 
+## How projects are matched
+
+When a session moves between computers, VibeSync has to answer one question: **which project does this belong to here?** There are three answers, and two of them need nothing from you.
+
+**1. It's a git repository** → matched by the repository address (`github.com/you/todo-app`). Clone it **anywhere** — the location never matters.
+
+**2. It's a plain folder** → matched by its place *inside your home folder*. `~/Documents/notes` on a Mac is the same project as `C:\Users\you\Documents\notes` on Windows.
+
+**3. It's a plain folder in a different place on each computer** → the only case that needs you. Give it a **project name** (Settings → Project mappings): the same name on every computer, each pointing at that computer's copy.
+
+| Computer | Folder there | Project name you type |
+|---|---|---|
+| Windows PC | `D:\misc\stuff` | `stuff` |
+| MacBook | `/Volumes/Data/stuff` | `stuff` |
+
+A mapping covers everything beneath the folder, so naming a parent like `D:\Code` once takes care of every project inside it.
+
+### Example: a Mac and a Windows PC
+
+| Project | On the Mac | On the Windows PC | Do sessions follow you? |
+|---|---|---|---|
+| Git repo `todo-app` | `~/dev/todo-app` | `C:\Github\todo-app` | ✅ Yes — the repo is the ID |
+| Plain folder `notes` | `~/Documents/notes` | `C:\Users\you\Documents\notes` | ✅ Yes — same spot inside home |
+| Plain folder `stuff` | `~/Desktop/stuff` | `D:\misc\stuff` | ⚠️ Give it a project name |
+| Repo not cloned yet | `~/dev/todo-app` | *(not cloned)* | ⏸ Waits in storage until you clone it |
+
+### Example: everything in one Dropbox folder
+
+```
+~/Dropbox/Projects/
+├── website/     ← git repo
+├── recipes/     ← plain folder, no git
+└── scraper/     ← plain folder, no git
+```
+
+Nothing to configure. `website` matches by its repository address; the plain folders match because Dropbox sits at the same place inside your home folder on every machine. This is the simplest answer for projects that never got a git repo: keep them in one folder that exists on all your computers.
+
+Worth spelling out: Dropbox syncs those folders' *files*, but your AI sessions never live inside the project folder — each tool keeps them in its own data folder (`~/.claude`, `~/.codex`, VS Code's storage). **Dropbox moves your code; VibeSync moves the conversations about it.**
+
+---
+
 ## Where your data lives
 
 You pick one place. All of your computers point at that same place.
@@ -141,50 +182,106 @@ Auto-sync runs in the background every 15 minutes by default (adjustable in Sett
 
 ---
 
-## How projects are matched
 
-When a session moves between computers, VibeSync has to answer one question: **which project does this belong to here?** There are three answers, and two of them need nothing from you.
 
-**1. It's a git repository** → matched by the repository address (`github.com/you/todo-app`). Clone it **anywhere** — the location never matters.
+---
 
-**2. It's a plain folder** → matched by its place *inside your home folder*. `~/Documents/notes` on a Mac is the same project as `C:\Users\you\Documents\notes` on Windows.
+## FAQ
 
-**3. It's a plain folder in a different place on each computer** → the only case that needs you. Give it a **project name** (Settings → Project mappings): the same name on every computer, each pointing at that computer's copy.
+<details>
+<summary><b>Do I need an account? Is there a server in the middle?</b></summary>
 
-| Computer | Folder there | Project name you type |
-|---|---|---|
-| Windows PC | `D:\misc\stuff` | `stuff` |
-| MacBook | `/Volumes/Data/stuff` | `stuff` |
+No to both. There is no account, no sign-in and no VibeSync server. Your computers never talk to each other directly either — each one reads and writes a storage location that **you** own, and that is the only thing they share.
 
-A mapping covers everything beneath the folder, so naming a parent like `D:\Code` once takes care of every project inside it.
+</details>
 
-### Example: a Mac and a Windows PC
+<details>
+<summary><b>What does it cost?</b></summary>
 
-| Project | On the Mac | On the Windows PC | Do sessions follow you? |
-|---|---|---|---|
-| Git repo `todo-app` | `~/dev/todo-app` | `C:\Github\todo-app` | ✅ Yes — the repo is the ID |
-| Plain folder `notes` | `~/Documents/notes` | `C:\Users\you\Documents\notes` | ✅ Yes — same spot inside home |
-| Plain folder `stuff` | `~/Desktop/stuff` | `D:\misc\stuff` | ⚠️ Give it a project name |
-| Repo not cloned yet | `~/dev/todo-app` | *(not cloned)* | ⏸ Waits in storage until you clone it |
+The app is free and open source (GPL-3.0). The only cost is whatever your storage costs: a folder you already sync (iCloud Drive, OneDrive, Dropbox) costs nothing extra, Cloudflare R2 has a generous free tier, and a USB disk is a one-off.
 
-### Example: everything in one Dropbox folder
+</details>
 
-```
-~/Dropbox/Projects/
-├── website/     ← git repo
-├── recipes/     ← plain folder, no git
-└── scraper/     ← plain folder, no git
-```
+<details>
+<summary><b>Is my data encrypted?</b></summary>
 
-Nothing to configure. `website` matches by its repository address; the plain folders match because Dropbox sits at the same place inside your home folder on every machine. This is the simplest answer for projects that never got a git repo: keep them in one folder that exists on all your computers.
+If you chose a **cloud bucket** (R2, S3, Azure) — always, on your computer, before upload. Your provider only ever holds files it cannot read. See [the passphrase](#the-passphrase).
 
-Worth spelling out: Dropbox syncs those folders' *files*, but your AI sessions never live inside the project folder — each tool keeps them in its own data folder (`~/.claude`, `~/.codex`, VS Code's storage). **Dropbox moves your code; VibeSync moves the conversations about it.**
+If you chose a **plain folder or USB disk** — compressed, not encrypted. That storage is already yours, and adding a passphrase there would mean one more thing to lose.
+
+</details>
+
+<details>
+<summary><b>Does it sync my code too?</b></summary>
+
+No — and it doesn't need to. Your AI sessions never live inside your project folder; each tool keeps them in its own data folder (`~/.claude`, `~/.codex`, VS Code's storage). Git or Dropbox moves your code; **VibeSync moves the conversations about it.**
+
+</details>
+
+<details>
+<summary><b>Does it work between macOS and Windows?</b></summary>
+
+Yes, in any mix — a Mac at home and a Windows PC at work sync with each other. Paths are translated in both directions, so a session started in `C:\Github\app` lands in `~/dev/app` and stays one project. See [how projects are matched](#how-projects-are-matched).
+
+</details>
+
+<details>
+<summary><b>How many computers can I use?</b></summary>
+
+As many as you like. Each one installs VibeSync, points at the same storage, and uses the same passphrase.
+
+</details>
+
+<details>
+<summary><b>What happens if I edit the same session on two computers?</b></summary>
+
+The newer version wins and the older one is kept next to it as a `.vibesync-bak` file. Sync never deletes anything, so nothing is lost either way.
+
+</details>
+
+<details>
+<summary><b>My AI tool deletes old sessions. Does VibeSync delete them too?</b></summary>
+
+The opposite — your storage keeps them after the tool has cleaned them up locally. They are never pushed back onto a computer that already deleted them, so cleaning up stays cleaned up while the archive survives.
+
+</details>
+
+<details>
+<summary><b>Can I sync some tools but not others?</b></summary>
+
+Yes. Every tool has its own on/off switch, plus finer scopes within it (sessions, plans, config). Claude Code plugins are opt-in because they can be large.
+
+</details>
+
+<details>
+<summary><b>Can I change where my data lives later?</b></summary>
+
+Yes — **Settings → Change storage**. Nothing already synced is lost.
+
+</details>
+
+<details>
+<summary><b>Do I have to sync manually?</b></summary>
+
+No. Auto-sync runs every 15 minutes by default and the interval is adjustable in Settings. The **Sync** button is there for when you don't want to wait.
+
+</details>
+
+<details>
+<summary><b>Why does Windows say "unknown publisher"?</b></summary>
+
+The Windows build isn't code-signed — a publisher certificate costs several hundred dollars per year, which is hard to justify for a free tool. The warning means "Windows doesn't know who built this", not "this is dangerous". All the code is in this repository and building it yourself produces the identical app. The macOS build is signed and opens normally.
+
+</details>
 
 ---
 
 ## Troubleshooting
 
-### First: turn on the log
+Open the section that matches what you're seeing. If you're not sure, start with the log — it names the problem in plain language.
+
+<details>
+<summary><b>Start here — turn on the log</b></summary>
 
 **Settings → Debug logging**, then sync once. The log records exactly what happened, in plain language.
 
@@ -207,9 +304,10 @@ If anything was skipped, it says so, and why:
 sync done in 11799 ms — 12 up, 40 down, 2 skipped (unreadable — check every machine uses the same passphrase)
 ```
 
----
+</details>
 
-### Nothing syncs at all — one computer sees nothing
+<details>
+<summary><b>Nothing syncs at all — one computer sees nothing</b></summary>
 
 Almost always a **passphrase mismatch**: that computer was set up with a different passphrase, so it cannot read anything the others uploaded.
 
@@ -243,9 +341,12 @@ storage and become readable as soon as the passphrases match.
 
 **The fix:** on the computer named in the message, go to **Settings → Change storage** and enter the passphrase your other computers use (recover it from a working machine's Keychain if you've forgotten it — see [the passphrase](#the-passphrase)). The setup screen verifies it against your storage and tells you whether it's right *before* you finish.
 
-Nothing is lost either way. Files that machine uploaded with the wrong passphrase repair themselves — see [the next section](#i-fixed-the-passphrase--what-about-the-files-uploaded-with-the-wrong-one).
+Nothing is lost either way. Files that machine uploaded with the wrong passphrase repair themselves — see *I fixed the passphrase* below.
 
-### I fixed the passphrase — what about the files uploaded with the wrong one?
+</details>
+
+<details>
+<summary><b>I fixed the passphrase — what about the files uploaded with the wrong one?</b></summary>
 
 They repair themselves. You don't need to do anything.
 
@@ -263,7 +364,10 @@ It only ever redoes its **own** uploads. Files another computer wrote are never 
 
 **The one case it can't fix:** if the local original is genuinely gone (the machine was wiped, or the tool deleted an old session), the unreadable copy in storage is the only one left, and without the old passphrase it stays unreadable. Nothing else is affected — everything readable keeps syncing normally.
 
-### A few items were skipped, but most synced
+</details>
+
+<details>
+<summary><b>A few items were skipped, but most synced</b></summary>
 
 Individual lines look like this:
 
@@ -274,7 +378,10 @@ claude-code: 4 object(s) skipped — unreadable in the store; everything else ap
 
 That's the same passphrase problem, limited to whatever one machine uploaded. Everything else keeps syncing normally, and skipped items are retried on every sync — they land by themselves once the passphrase is corrected.
 
-### Synced sessions don't show up in the app
+</details>
+
+<details>
+<summary><b>Synced sessions don't show up in the app</b></summary>
 
 GUI tools (Claude Code, VS Code, Zed) read their session history **once, when they start**, and never look again while running. So:
 
@@ -283,7 +390,10 @@ GUI tools (Claude Code, VS Code, Zed) read their session history **once, when th
 
 VibeSync tells you when this applies: the badge changes to *"+N new · restart VS Code"*, and clears itself once you've restarted. Command-line tools (Codex, Copilot CLI, `claude`) are never affected — they read fresh every run.
 
-### Sessions are "waiting in storage"
+</details>
+
+<details>
+<summary><b>Sessions are "waiting in storage"</b></summary>
 
 They belong to a project this computer doesn't have yet. Clone the repo (or create the folder) and they arrive on the next sync. Each tool's page shows the count.
 
@@ -297,7 +407,10 @@ If you *have* cloned the repo and they still wait, VibeSync hasn't found your co
 
 This doesn't change any project's identity — it only tells VibeSync where to look. Most people never need it.
 
-### A "(fork)" copy of my session appeared
+</details>
+
+<details>
+<summary><b>A "(fork)" copy of my session appeared</b></summary>
 
 Claude did that, not VibeSync, and nothing is lost.
 
@@ -306,6 +419,8 @@ When you open a session that was started on a *different* computer, Claude doesn
 - **Keep working in the fork** — it's the live one.
 - **Want the original back in the list?** Unarchive it once; that choice sticks, and syncing never changes it.
 - **Don't want the fork?** Archive or delete it — also sticks, on that computer.
+
+</details>
 
 ---
 
