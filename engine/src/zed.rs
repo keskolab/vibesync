@@ -633,7 +633,9 @@ mod tests {
             })
             .unwrap();
         assert_eq!(blob, vec![0x28, 0xb5, 0x2f, 0xfd], "blob must survive byte-for-byte");
-        assert_eq!(fp, format!("{}/dev/app", b_home.to_string_lossy()));
+        // A real path on THIS machine, native separators included (the old
+        // raw substring replace produced `C:\\...\\b/dev/app` on Windows).
+        assert_eq!(fp, b_home.join("dev").join("app").to_string_lossy());
 
         // Reverse: B's copy pushes back and the OLD schema accepts it
         // (missing worktree_branch hits the column default).
