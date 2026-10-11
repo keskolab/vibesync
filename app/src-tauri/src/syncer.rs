@@ -1980,6 +1980,42 @@ pub fn autosync_retry_delay_secs(failures: u32, interval_secs: u64) -> i64 {
     (60i64 << failures.min(10)).min(interval_secs as i64)
 }
 
+/// Rate limit for `sync-progress` events.
+///
+/// The sync reports progress once per file — hundreds of thousands of ticks
+/// on a big machine — and each became an IPC event and a re-render: the
+/// webview drowned and the Sync button flickered. The UI can show at most a
+/// few updates a second anyway. The first tick and the last (done == total)
+/// always pass, so the bar starts at once and ends at 100%.
+pub struct ProgressGate {
+    min_gap: std::time::Duration,
+    last: Option<std::time::Instant>,
+}
+
+impl ProgressGate {
+    pub fn new(min_gap: std::time::Duration) -> Self {
+        Self { min_gap, last: None }
+    }
+
+    /// The gate the app uses: ~8 updates a second.
+    pub fn for_ui() -> Self {
+        Self::new(std::time::Duration::from_millis(125))
+    }
+
+    pub fn admit(&mut self, now: std::time::Instant, done: usize, total: usize) -> bool {
+        let due = match self.last {
+            None => true,
+            Some(t) => now.duration_since(t) >= self.min_gap,
+        };
+        if due || done >= total {
+            self.last = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Record deletions, then apply the per-scope switches — in THIS order.
 ///
 /// Marking sees the full scan. Marking after the scope filter recorded
@@ -3045,6 +3081,34 @@ mod tests {
         std::os::unix::fs::symlink(tmp.path().join("projects"), p.join("loop")).unwrap();
         assert_eq!(count_jsonl(&tmp.path().join("projects")), 1);
         assert_eq!(count_jsonl(&tmp.path().join("missing")), 0);
+    }
+
+    #[test]
+    fn progress_events_are_rate_limited_but_never_lose_the_end() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut gate = ProgressGate::new(Duration::from_millis(125));
+        let total = 200_000;
+        // 200,000 ticks over one simulated second.
+        let sent: Vec<usize> = (1..=total)
+            .filter(|&d| gate.admit(t0 + Duration::from_micros(d as u64 * 5), d, total))
+            .collect();
+        assert_eq!(sent[0], 1, "the first tick shows at once");
+        assert_eq!(*sent.last().unwrap(), total, "the final tick always arrives");
+        assert!(sent.len() <= 10, "{} events for one second", sent.len());
+    }
+
+    #[test]
+    fn a_progress_tick_after_a_quiet_spell_passes() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut gate = ProgressGate::for_ui();
+        assert!(gate.admit(t0, 1, 10));
+        assert!(!gate.admit(t0 + Duration::from_millis(10), 2, 10));
+        assert!(gate.admit(t0 + Duration::from_millis(500), 3, 10));
+        // done >= total passes even inside the gap (and a defensive overshoot).
+        assert!(gate.admit(t0 + Duration::from_millis(501), 10, 10));
+        assert!(gate.admit(t0 + Duration::from_millis(502), 11, 10));
     }
 
     #[test]

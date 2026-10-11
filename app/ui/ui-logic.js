@@ -90,5 +90,69 @@
 		return { ok: true };
 	}
 
-	g.VibeSyncUI = { esc, continueBlocked, makeLatest, makeTwoClick, applySwitch, finishSetup };
+	// Counts that stay readable and steady at any size: exact up to 99,999
+	// ("12,345"), compact above ("123K", "1.2M") — a six- or seven-digit
+	// raw number widened its card and read as noise. Pair with
+	// `fmtCountTitle` for the exact value on hover.
+	function fmtCount(n, locale) {
+		const v = Number(n) || 0;
+		if (Math.abs(v) < 100000) return v.toLocaleString(locale);
+		return new Intl.NumberFormat(locale, {
+			notation: "compact",
+			maximumFractionDigits: Math.abs(v) < 1e6 ? 0 : 1,
+		}).format(v);
+	}
+	const fmtCountTitle = (n, locale) => (Number(n) || 0).toLocaleString(locale);
+
+	// Sync progress as a stable-width percentage (never two running counts,
+	// whose width changed on almost every tick and jostled the button), with
+	// the exact counts kept for a tooltip. Floors, so 100% means done.
+	function progressView(done, total, locale) {
+		const d = Math.max(0, Number(done) || 0);
+		const t = Math.max(0, Number(total) || 0);
+		if (t === 0) return { pct: null, title: "" };
+		const pct = Math.min(100, Math.floor((d / t) * 100));
+		return { pct, title: `${d.toLocaleString(locale)} of ${t.toLocaleString(locale)} files` };
+	}
+
+	// Call `fn` with the latest arguments at most once per `ms` — the first
+	// call at once, later ones coalesced, and the last one never dropped (a
+	// trailing call fires when the window closes). `now`/`schedule` are
+	// injectable for tests.
+	function makeThrottle(fn, ms, now = () => Date.now(), schedule = setTimeout) {
+		let last = -Infinity;
+		let pending = null;
+		let timer = false;
+		const fire = () => {
+			timer = false;
+			if (!pending) return;
+			const args = pending;
+			pending = null;
+			last = now();
+			fn(...args);
+		};
+		return (...args) => {
+			pending = args;
+			const wait = last + ms - now();
+			if (wait <= 0 && !timer) {
+				fire();
+			} else if (!timer) {
+				timer = true;
+				schedule(fire, Math.max(0, wait));
+			}
+		};
+	}
+
+	g.VibeSyncUI = {
+		esc,
+		continueBlocked,
+		makeLatest,
+		makeTwoClick,
+		applySwitch,
+		finishSetup,
+		fmtCount,
+		fmtCountTitle,
+		progressView,
+		makeThrottle,
+	};
 })(globalThis);

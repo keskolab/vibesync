@@ -111,13 +111,24 @@ const fmtSizeStr = (b) => {
 };
 
 // Reusable stat-card row (used on the main page and every tool page).
+// Numbers go through fmtCount — exact up to 99,999, compact above ("123K")
+// with the exact value on hover — so a six-digit count can't widen its
+// card. Strings (sizes) are shown as given.
 function statCards(el, items) {
-	el.innerHTML = items
-		.map(
-			({ value, label }) =>
-				`<div class="count"><b>${value}</b><span>${label}</span></div>`,
-		)
+	const { fmtCount, fmtCountTitle } = globalThis.VibeSyncUI;
+	const html = items
+		.map(({ value, label }) => {
+			const n = typeof value === "number";
+			const shown = n ? fmtCount(value) : String(value);
+			const title = n ? ` title="${esc(fmtCountTitle(value))}"` : "";
+			return `<div class="count"${title}><b>${esc(shown)}</b><span>${esc(label)}</span></div>`;
+		})
 		.join('<div class="vsep"></div>');
+	// Same content, same DOM: don't rebuild (and re-layout) for nothing.
+	if (el.dataset.html !== html) {
+		el.dataset.html = html;
+		el.innerHTML = html;
+	}
 }
 
 let currentPage = 0;
@@ -429,7 +440,7 @@ function renderAll() {
       ${ICONS[t.id] || ""}
       <div class="tlabel">${t.name}<span class="tsub">${
 				t.installed
-					? `${t.sessions} sessions · ${t.plans} plans · ${fmtSizeStr(t.bytes)}${newBadge(t.newItems, t.newMs, t.newSeen, t.needsRestart ? t.name : "")}`
+					? `${globalThis.VibeSyncUI.fmtCount(t.sessions)} sessions · ${globalThis.VibeSyncUI.fmtCount(t.plans)} plans · ${fmtSizeStr(t.bytes)}${newBadge(t.newItems, t.newMs, t.newSeen, t.needsRestart ? t.name : "")}`
 					: "Not installed"
 			}</span></div>
       ${
@@ -689,12 +700,31 @@ function openTool(t) {
 
 let uiBusy = false;
 
+// The Sync button while busy: the current stage ("Uploading…") plus a
+// fixed-width percentage and a fill bar; the exact counts sit in the
+// tooltip. Two running counts ("103,412 / 210,987 files") changed width on
+// nearly every tick, so the label and spinner jostled — and one event per
+// file meant tens of thousands of re-renders. Progress renders through a
+// throttle (~8/s); stage changes, being rare, render at once.
+const progress = { phase: "", pct: null, title: "" };
+
+function renderProgress() {
+	const btn = $("sync-now");
+	$("sync-label").textContent = uiBusy ? progress.phase : "Sync Now";
+	$("sync-pct").textContent = uiBusy && progress.pct !== null ? `${progress.pct}%` : "";
+	btn.style.setProperty("--progress", uiBusy && progress.pct !== null ? `${progress.pct}%` : "0%");
+	btn.title = uiBusy ? progress.title : "";
+}
+
+const renderProgressSoon = globalThis.VibeSyncUI.makeThrottle(renderProgress, 125);
+
 function setBusy(busy, label) {
   uiBusy = busy;
 	const btn = $("sync-now");
 	btn.classList.toggle("busy", busy);
 	btn.disabled = busy;
-	$("sync-label").textContent = busy ? label : "Sync Now";
+	Object.assign(progress, { phase: busy ? label : "", pct: null, title: "" });
+	renderProgress();
 	if (busy) {
 		$("status-dot").className = "dot busy";
 		$("status-text").textContent = "Syncing";
@@ -798,8 +828,10 @@ window.addEventListener("DOMContentLoaded", async () => {
 	tauri?.event.listen("sync-progress", (e) => {
 		if (!uiBusy) return;
 		const { done, total } = e.payload;
-		$("sync-label").textContent =
-			`${done.toLocaleString()} / ${total.toLocaleString()} files`;
+		const view = globalThis.VibeSyncUI.progressView(done, total);
+		progress.pct = view.pct;
+		progress.title = view.title;
+		renderProgressSoon();
 	});
 
 	// Stage names cover the stretch BEFORE a file total exists (store open,
@@ -809,7 +841,8 @@ window.addEventListener("DOMContentLoaded", async () => {
 	// before their own ticks, so the handover is seamless.
 	tauri?.event.listen("sync-phase", (e) => {
 		if (!uiBusy) return;
-		$("sync-label").textContent = String(e.payload);
+		progress.phase = String(e.payload);
+		renderProgress();
 	});
 
 	// Every open re-fetches status: events fired while the window was hidden

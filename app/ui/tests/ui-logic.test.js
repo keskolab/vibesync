@@ -172,3 +172,87 @@ test("a failed save keeps the assistant open with the reason", async () => {
 	assert.match(r.error, /sync is running/);
 	assert.deepEqual(host.calls.map((c) => c[0]), ["invoke"], "no event, no close");
 });
+
+// --------------------------------------------------------- big numbers
+
+test("counts stay exact below 100,000 and compact above", () => {
+	const f = (n) => UI.fmtCount(n, "en-US");
+	assert.equal(f(0), "0");
+	assert.equal(f(999), "999");
+	assert.equal(f(12345), "12,345");
+	assert.equal(f(99999), "99,999");
+	assert.equal(f(100000), "100K");
+	assert.equal(f(123456), "123K");
+	assert.equal(f(999999), "1M");
+	assert.equal(f(1234567), "1.2M");
+	assert.equal(f(25_400_000), "25.4M");
+	assert.equal(f(undefined), "0");
+	assert.equal(f("1234"), "1,234");
+	assert.equal(UI.fmtCountTitle(1234567, "en-US"), "1,234,567");
+});
+
+test("compact counts never grow past six characters, so cards keep their width", () => {
+	for (const n of [100000, 123456, 999999, 1000000, 9876543, 12345678, 999999999]) {
+		assert.ok(UI.fmtCount(n, "en-US").length <= 6, `${n} -> ${UI.fmtCount(n, "en-US")}`);
+	}
+});
+
+// -------------------------------------------------------- sync progress
+
+test("progress is a percentage with the exact counts kept for the tooltip", () => {
+	assert.deepEqual(UI.progressView(0, 0, "en-US"), { pct: null, title: "" });
+	assert.deepEqual(UI.progressView(51234, 210987, "en-US"), {
+		pct: 24,
+		title: "51,234 of 210,987 files",
+	});
+	// Floors: 99.99% is not "100%" until it is actually done.
+	assert.equal(UI.progressView(209999, 210000).pct, 99);
+	assert.equal(UI.progressView(210000, 210000).pct, 100);
+	// Defensive: overshoot and garbage never leave 0..100.
+	assert.equal(UI.progressView(500, 100).pct, 100);
+	assert.equal(UI.progressView(-5, 100).pct, 0);
+});
+
+// ------------------------------------------------------------ throttling
+
+function fakeClock() {
+	let t = 0;
+	const timers = [];
+	return {
+		now: () => t,
+		schedule: (fn, ms) => timers.push({ at: t + ms, fn }),
+		advance(ms) {
+			t += ms;
+			for (;;) {
+				timers.sort((a, b) => a.at - b.at);
+				if (!timers.length || timers[0].at > t) break;
+				timers.shift().fn();
+			}
+		},
+	};
+}
+
+test("a burst of 100,000 progress events renders a handful of times", () => {
+	const clock = fakeClock();
+	const seen = [];
+	const render = UI.makeThrottle((d) => seen.push(d), 125, clock.now, clock.schedule);
+	// 100,000 ticks spread over one second.
+	for (let i = 1; i <= 100000; i++) {
+		render(i);
+		if (i % 100 === 0) clock.advance(1);
+	}
+	clock.advance(200);
+	assert.ok(seen.length <= 10, `rendered ${seen.length} times`);
+	assert.equal(seen[0], 1, "first tick shows at once");
+	assert.equal(seen.at(-1), 100000, "the final value is never dropped");
+});
+
+test("a lone update after a quiet spell shows immediately", () => {
+	const clock = fakeClock();
+	const seen = [];
+	const render = UI.makeThrottle((d) => seen.push(d), 125, clock.now, clock.schedule);
+	render("a");
+	clock.advance(1000);
+	render("b");
+	assert.deepEqual(seen, ["a", "b"]);
+});
