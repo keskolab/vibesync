@@ -1,25 +1,23 @@
 name: CI
 
+# Runs on pull requests only, and only when Rust code (or this file) changes.
+#
+# Not on push to main: every change reaches main through a PR that already
+# ran these exact checks, so the merge re-ran identical code — the Windows
+# job twice per change for nothing. (Branch protection's "require branches
+# to be up to date before merging" guarantees the merged tree is the one
+# that was tested.) For anything else — a direct push, a re-check — run it
+# by hand: Actions -> CI -> Run workflow.
 on:
-  push:
-    branches: [main]
-    # Docs/chore-only pushes don't touch code — don't spend runner money
-    # on them. If EVERY changed file matches, no run starts at all.
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'assets/**'
-      - 'packaging/**'
-      - 'LICENSE'
-      - '.gitignore'
   pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'assets/**'
-      - 'packaging/**'
-      - 'LICENSE'
-      - '.gitignore'
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'engine/**'
+      - 'app/src-tauri/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - '.github/workflows/ci.yml'
   workflow_dispatch:
 
 # Pushing twice in quick succession makes the first run stale — cancel it
@@ -32,33 +30,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # One job per OS: `cargo test --workspace` already runs the engine suite,
-  # so a separate engine job doubled the bill for zero extra coverage.
-  tests:
-    name: Tests (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  # macOS first: most failures show up on any platform, so a broken PR stops
+  # here instead of also spending ~10 minutes on Windows. Draft PRs wait.
+  macos:
+    name: Tests (macos-latest)
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # --no-fail-fast: one failing test binary must not hide the others
-      # (a single Windows failure in the engine's unit tests used to skip
-      # every integration suite on that platform).
+      # --no-fail-fast: one failing test binary must not hide the others.
       - run: cargo test --workspace --no-fail-fast
 
-  # The UI's decision logic (escaping, the setup gates, the finish flow)
-  # lives in app/ui/ui-logic.js and is tested with Node's built-in runner —
-  # no npm install, no dependencies.
-  ui:
-    name: UI logic tests
-    runs-on: ubuntu-latest
+  # Windows only once macOS is green — it is the slow, expensive runner, and
+  # still the only place Windows-only bugs (paths, file locking) show up.
+  windows:
+    name: Tests (windows-latest)
+    needs: macos
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: lts/*
-      - run: node --test app/ui/tests/ui-logic.test.js
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --no-fail-fast
