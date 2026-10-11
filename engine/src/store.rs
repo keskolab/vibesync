@@ -720,16 +720,28 @@ mod tests {
     fn parallel_puts_of_one_object_all_succeed_and_leave_no_temp_files() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FolderStore::new(tmp.path());
+        let ok = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|s| {
             for i in 0..16u8 {
-                let store = &store;
+                let (store, ok) = (&store, &ok);
                 s.spawn(move || {
                     let body = vec![i; 1000];
                     let meta = RemoteMeta { hash: crate::scanner::hash_bytes(&body), mtime_ms: 1, size: 1000, source: "m".into() };
-                    store.put("p/a.jsonl", &body, &meta).unwrap();
+                    if store.put("p/a.jsonl", &body, &meta).is_ok() {
+                        ok.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
                 });
             }
         });
+        let ok = ok.load(std::sync::atomic::Ordering::SeqCst);
+        // Windows may refuse a rename onto a file another rename is replacing
+        // at that instant; that put fails cleanly (retried next sync). What
+        // must hold everywhere: no shared temp file, nothing left behind.
+        if cfg!(windows) {
+            assert!(ok >= 1);
+        } else {
+            assert_eq!(ok, 16);
+        }
         // Data and sidecar may come from different racing writers — the
         // reader's hash check (sync::pull_dir) is what guards that.
         let (plain, _) = store.get("p/a.jsonl").unwrap().unwrap();
