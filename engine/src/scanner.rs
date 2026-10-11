@@ -172,17 +172,29 @@ pub fn scan_root(
         return Ok(out);
     }
     if abs_root.is_file() {
-        let meta = std::fs::metadata(abs_root)?;
         let name = abs_root.file_name().unwrap_or_default().to_string_lossy();
-        out.push(FileEntry {
-            logical: format!("{logical_prefix}/{name}"),
-            abs: abs_root.to_path_buf(),
-            size: meta.len(),
-            mtime_ms: mtime_ms(abs_root)?,
-            hash: hash_file(abs_root)?,
-        });
+        let logical = format!("{logical_prefix}/{name}");
+        let read = (|| -> Result<(u64, i64, String)> {
+            Ok((std::fs::metadata(abs_root)?.len(), mtime_ms(abs_root)?, hash_file(abs_root)?))
+        })();
+        match read {
+            Ok((size, mtime_ms, hash)) => {
+                out.push(FileEntry { logical, abs: abs_root.to_path_buf(), size, mtime_ms, hash })
+            }
+            Err(e) if is_not_found(&e) => {}
+            Err(e) => note_scan_skip(logical, &e),
+        }
         return Ok(out);
     }
+    let logical_of = |path: &Path| -> Option<String> {
+        let rel = path.strip_prefix(abs_root).ok()?;
+        let mut logical = String::from(logical_prefix);
+        for comp in rel.components() {
+            logical.push('/');
+            logical.push_str(&tok.tokenize_encoded(&comp.as_os_str().to_string_lossy()));
+        }
+        Some(logical)
+    };
     let walker = walkdir::WalkDir::new(abs_root).follow_links(false).into_iter();
     for entry in walker.filter_entry(|e| {
         !(e.file_type().is_dir()
@@ -191,7 +203,19 @@ pub fn scan_root(
                 .map(|n| exclude_dirs.iter().any(|x| x.eq_ignore_ascii_case(n)))
                 .unwrap_or(false))
     }) {
-        let entry = entry?;
+        // One unreadable file or folder costs that item, never the scan: a
+        // single root-owned folder (one `sudo claude`) used to fail every
+        // sync forever. It is remembered so deletion marking leaves its
+        // state alone — "couldn't read it" is not "it was deleted".
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                if let Some(logical) = e.path().and_then(logical_of) {
+                    note_scan_skip(logical, &e);
+                }
+                continue;
+            }
+        };
         if !entry.file_type().is_file() {
             continue;
         }
@@ -213,22 +237,76 @@ pub fn scan_root(
         if !ext_ok {
             continue;
         }
-        let rel = path.strip_prefix(abs_root)?;
-        let mut logical = String::from(logical_prefix);
-        for comp in rel.components() {
-            let comp = comp.as_os_str().to_string_lossy();
-            logical.push('/');
-            logical.push_str(&tok.tokenize_encoded(&comp));
+        let Some(logical) = logical_of(path) else { continue };
+        let read = (|| -> Result<(u64, i64, String)> {
+            Ok((entry.metadata()?.len(), mtime_ms(path)?, hash_file(path)?))
+        })();
+        match read {
+            Ok((size, mtime_ms, hash)) => {
+                out.push(FileEntry { logical, abs: path.to_path_buf(), size, mtime_ms, hash })
+            }
+            // Gone between listing and reading (a tool rotating its files):
+            // genuinely absent, so it is simply not in this scan.
+            Err(e) if is_not_found(&e) => {}
+            Err(e) => note_scan_skip(logical, &e),
         }
-        let meta = entry.metadata()?;
-        out.push(FileEntry {
-            logical,
-            abs: path.to_path_buf(),
-            size: meta.len(),
-            mtime_ms: mtime_ms(path)?,
-            hash: hash_file(path)?,
-        });
     }
     out.sort_by(|a, b| a.logical.cmp(&b.logical));
     Ok(out)
+}
+
+fn is_not_found(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>().map(|io| io.kind() == std::io::ErrorKind::NotFound)
+            .unwrap_or(false)
+            || c.downcast_ref::<walkdir::Error>()
+                .and_then(|w| w.io_error())
+                .map(|io| io.kind() == std::io::ErrorKind::NotFound)
+                .unwrap_or(false)
+    })
+}
+
+/// Logical paths (files, or whole folders) the scans of this sync could not
+/// read. Deletion marking must leave them alone: absent from a scan because
+/// unreadable is not absent because deleted, and the deleted mark is one-way.
+static SCAN_SKIPS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn note_scan_skip(logical: String, err: &dyn std::fmt::Display) {
+    crate::dlog::warn(|| format!("cannot read {logical}: {err} — skipping it this sync"));
+    SCAN_SKIPS.lock().unwrap().push(logical);
+}
+
+/// What the scans so far could not read (see [`SCAN_SKIPS`]).
+pub fn scan_skips() -> Vec<String> {
+    SCAN_SKIPS.lock().unwrap().clone()
+}
+
+/// Reset the collector at the start of a sync.
+pub fn clear_scan_skips() {
+    SCAN_SKIPS.lock().unwrap().clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file gone between listing and reading is "absent", not "unreadable";
+    /// telling them apart decides whether deletion marking may record it.
+    #[test]
+    fn not_found_is_told_apart_from_other_read_errors() {
+        let gone = std::fs::read("/definitely/not/here").unwrap_err();
+        assert!(is_not_found(&anyhow::Error::from(gone).context("hash it")));
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!is_not_found(&anyhow::Error::from(denied)));
+    }
+
+    #[test]
+    fn a_vanished_file_is_simply_not_scanned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tok = Tokenizer::new(&tmp.path().to_string_lossy());
+        clear_scan_skips();
+        let out = scan_root(&tmp.path().join("settings.json"), "claude/meta", &tok, &[], &[], &[]).unwrap();
+        assert!(out.is_empty());
+        assert!(!scan_skips().iter().any(|k| k.contains("settings.json")));
+    }
 }

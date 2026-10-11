@@ -12,7 +12,8 @@ pub enum StoreConfig {
     /// A directory: local, USB, or inside any cloud-synced folder.
     Folder {
         path: String,
-        /// Encrypt content (mandatory when the folder is provider-synced).
+        /// Encrypt content. Setup leaves folders unencrypted, cloud-synced
+        /// ones included; the flag exists for configs that opt in.
         #[serde(default)]
         encrypted: bool,
     },

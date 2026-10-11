@@ -58,6 +58,57 @@ pub trait SyncStore: Send + Sync {
         let step = (all.len() / max).max(1);
         Ok(all.into_iter().step_by(step).take(max).map(|(k, _)| k).collect())
     }
+    /// Fingerprint of the content key, `None` for unencrypted stores.
+    fn key_id(&self) -> Option<String> {
+        None
+    }
+    /// Can this machine's key open `logical`? Reads only the first few KB
+    /// (the encryption header), never the whole object. `Ok(None)` = can't
+    /// tell cheaply (unencrypted store, legacy object, vanished).
+    fn opens(&self, _logical: &str) -> Result<Option<bool>> {
+        Ok(None)
+    }
+}
+
+/// How much of an object `opens` reads: an age header for one recipient is
+/// a few hundred bytes.
+const HEAD_BYTES: usize = 4096;
+
+/// A temp-file name no other writer in this process can be using.
+/// Parallel puts of two objects whose names differ only past the last dot
+/// used to share one `.tmp` file and fail each other.
+fn unique_tmp(path: &std::path::Path) -> PathBuf {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()))
+}
+
+/// Retry an upload on errors that are worth retrying (network, throttling,
+/// server-side 5xx). A refusal like 403 won't change in a second.
+#[allow(clippy::result_large_err)] // ureq's own error type
+fn put_retry(
+    op: impl Fn() -> std::result::Result<ureq::Response, ureq::Error>,
+) -> std::result::Result<(), ureq::Error> {
+    let mut delay = Duration::from_millis(250);
+    let mut attempt = 0;
+    loop {
+        match op() {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                let transient = match &e {
+                    ureq::Error::Transport(_) => true,
+                    ureq::Error::Status(code, _) => *code == 429 || *code >= 500,
+                };
+                attempt += 1;
+                if !transient || attempt >= 3 {
+                    return Err(e);
+                }
+                std::thread::sleep(delay);
+                delay *= 2;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- folder
@@ -103,14 +154,9 @@ impl SyncStore for FolderStore {
         }
         let encoded = self.codec.encode(plain)?;
 
-        let tmp = data_path.with_extension("tmp");
-        std::fs::write(&tmp, &encoded)?;
-        std::fs::rename(&tmp, &data_path)?;
-
-        let meta_path = self.object_path(logical, META_SUFFIX);
-        let tmp = meta_path.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(meta)?)?;
-        std::fs::rename(&tmp, &meta_path)?;
+        // Data first, then the sidecar that announces it.
+        write_atomic(&data_path, &encoded)?;
+        write_atomic(&self.object_path(logical, META_SUFFIX), &serde_json::to_vec_pretty(meta)?)?;
         Ok(())
     }
 
@@ -148,8 +194,21 @@ impl SyncStore for FolderStore {
         if !root.exists() {
             return Ok(out);
         }
+        // The storage root itself must be readable — that failing IS the
+        // store being unreachable. Below it, one bad entry is skipped like
+        // the S3 listing skips a corrupt sidecar: a cloud-synced folder
+        // routinely holds half-downloaded or offline placeholder files
+        // (OneDrive Files On-Demand, evicted iCloud files), and one of them
+        // used to fail every sync.
+        std::fs::read_dir(&root).with_context(|| format!("read {}", root.display()))?;
         for entry in walkdir::WalkDir::new(&root) {
-            let entry = entry?;
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    crate::dlog::warn(|| format!("store listing: skipping unreadable entry: {e}"));
+                    continue;
+                }
+            };
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -165,12 +224,49 @@ impl SyncStore for FolderStore {
             let last = comps.last_mut().expect("file has a name");
             *last = base.to_string();
             let logical = comps.join("/");
-            let meta: RemoteMeta = serde_json::from_slice(&std::fs::read(entry.path())?)?;
-            out.push((logical, meta));
+            let meta = std::fs::read(entry.path())
+                .map_err(anyhow::Error::from)
+                .and_then(|b| Ok(serde_json::from_slice::<RemoteMeta>(&b)?));
+            match meta {
+                Ok(meta) => out.push((logical, meta)),
+                // Not counted as present: the writer's next push heals it.
+                Err(e) => crate::dlog::warn(|| {
+                    format!("store listing: skipping {logical} — its metadata can't be read ({e:#})")
+                }),
+            }
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
     }
+
+    fn key_id(&self) -> Option<String> {
+        self.codec.key_id()
+    }
+
+    fn opens(&self, logical: &str) -> Result<Option<bool>> {
+        use std::io::Read;
+        let path = self.object_path(logical, self.codec.suffix());
+        let mut head = Vec::with_capacity(HEAD_BYTES);
+        match std::fs::File::open(&path) {
+            Ok(f) => {
+                f.take(HEAD_BYTES as u64).read_to_end(&mut head)?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        }
+        Ok(self.codec.opens(&head))
+    }
+}
+
+/// Write via a uniquely named temp file + rename, so a reader (or a
+/// cloud-sync client) never sees a half-written object.
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let tmp = unique_tmp(path);
+    let res = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(res?)
 }
 
 // ---------------------------------------------------------------- s3 / r2
@@ -235,13 +331,12 @@ impl S3Store {
         format!("v1/files/{logical}{suffix}")
     }
 
+    #[allow(clippy::result_large_err)] // the retried closure returns ureq's error
     fn put_bytes(&self, key: &str, body: &[u8]) -> Result<()> {
         use rusty_s3::S3Action;
         let action = self.bucket.put_object(Some(&self.credentials), key);
         let url = action.sign(SIGN_TTL);
-        self.agent
-            .put(url.as_str())
-            .send_bytes(body)
+        put_retry(|| self.agent.put(url.as_str()).send_bytes(body))
             .map_err(|e| clean_s3_err("upload", e))?;
         Ok(())
     }
@@ -472,6 +567,23 @@ impl SyncStore for S3Store {
         Ok(!parsed.contents.is_empty())
     }
 
+    fn key_id(&self) -> Option<String> {
+        self.codec.key_id()
+    }
+
+    fn opens(&self, logical: &str) -> Result<Option<bool>> {
+        use rusty_s3::S3Action;
+        let key = self.key(logical, self.codec.suffix());
+        let url = self.bucket.get_object(Some(&self.credentials), &key).sign(SIGN_TTL);
+        // The presigned URL signs only the host, so a Range header is free
+        // to add. A server ignoring it still only gets read up to HEAD_BYTES.
+        match self.agent.get(url.as_str()).set("Range", &format!("bytes=0-{}", HEAD_BYTES - 1)).call() {
+            Ok(resp) => Ok(self.codec.opens(&read_head(resp)?)),
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            Err(e) => Err(clean_s3_err("download", e)),
+        }
+    }
+
     /// A few keys spread across the tool namespaces, in a handful of small
     /// requests — never the full `list()`, which also downloads a metadata
     /// sidecar per object (~10,000 requests on a real bucket, minutes long:
@@ -568,6 +680,12 @@ impl SyncStore for S3Store {
 // Needed for get_bytes' read_to_end.
 use std::io::Read;
 
+fn read_head(resp: ureq::Response) -> Result<Vec<u8>> {
+    let mut head = Vec::with_capacity(HEAD_BYTES);
+    resp.into_reader().take(HEAD_BYTES as u64).read_to_end(&mut head)?;
+    Ok(head)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,6 +712,79 @@ mod tests {
         assert_eq!(plain, b"data");
         assert_eq!(got_meta, meta);
         assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    /// Many writers of the same object at once (duplicate scan keys, two
+    /// syncs) used to share one `.tmp` file and fail each other.
+    #[test]
+    fn parallel_puts_of_one_object_all_succeed_and_leave_no_temp_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FolderStore::new(tmp.path());
+        std::thread::scope(|s| {
+            for i in 0..16u8 {
+                let store = &store;
+                s.spawn(move || {
+                    let body = vec![i; 1000];
+                    let meta = RemoteMeta { hash: crate::scanner::hash_bytes(&body), mtime_ms: 1, size: 1000, source: "m".into() };
+                    store.put("p/a.jsonl", &body, &meta).unwrap();
+                });
+            }
+        });
+        // Data and sidecar may come from different racing writers — the
+        // reader's hash check (sync::pull_dir) is what guards that.
+        let (plain, _) = store.get("p/a.jsonl").unwrap().unwrap();
+        assert_eq!(plain.len(), 1000);
+        assert!(plain.iter().all(|b| *b == plain[0]), "one writer's bytes, not a mix");
+        let leftovers: Vec<_> = walkdir::WalkDir::new(tmp.path())
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn an_unreadable_storage_root_is_an_error_not_an_empty_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FolderStore::new(tmp.path());
+        let meta = RemoteMeta { hash: "h".into(), mtime_ms: 1, size: 1, source: "m".into() };
+        store.put("a", b"x", &meta).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let root = tmp.path().join("v1/files");
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let readable = std::fs::read_dir(&root).is_ok();
+            let res = store.list();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if !readable {
+                // An empty listing here would read as "the store has nothing".
+                assert!(res.is_err());
+            }
+        }
+        // A missing root is simply a new store.
+        assert!(FolderStore::new(tmp.path().join("nope")).list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn folder_probe_tells_own_key_from_foreign_and_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mine = FolderStore::with_codec(tmp.path(), Box::new(AgeCodec::new("mine")));
+        let meta = RemoteMeta { hash: "h".into(), mtime_ms: 1, size: 1, source: "m".into() };
+        mine.put("a", b"x", &meta).unwrap();
+        assert_eq!(mine.opens("a").unwrap(), Some(true));
+        let theirs = FolderStore::with_codec(tmp.path(), Box::new(AgeCodec::new("theirs")));
+        assert_eq!(theirs.opens("a").unwrap(), Some(false));
+        assert_eq!(mine.opens("missing").unwrap(), None);
+        assert_eq!(FolderStore::new(tmp.path()).key_id(), None);
+    }
+
+    #[test]
+    fn xml_names_are_unescaped() {
+        assert_eq!(xml_unescape("plain/name.json"), "plain/name.json");
+        assert_eq!(xml_unescape("R&amp;D/&lt;x&gt;/&quot;q&quot;/it&apos;s"), "R&D/<x>/\"q\"/it's");
+        // `&amp;lt;` is a literal "&lt;" in the name, not "<".
+        assert_eq!(xml_unescape("a&amp;lt;b"), "a&lt;b");
     }
 
     /// Integration test against a real bucket; opt-in via env vars:
@@ -661,13 +852,21 @@ impl AzureSasStore {
         u
     }
 
+    #[allow(clippy::result_large_err)] // the retried closure returns ureq's error
     fn put_bytes(&self, key: &str, body: &[u8]) -> Result<()> {
-        self.agent
-            .put(self.blob_url(key).as_str())
-            .set("x-ms-blob-type", "BlockBlob")
-            .send_bytes(body)
-            .with_context(|| format!("PUT {key}"))?;
+        let url = self.blob_url(key);
+        put_retry(|| {
+            self.agent.put(url.as_str()).set("x-ms-blob-type", "BlockBlob").send_bytes(body)
+        })
+        .map_err(|e| clean_azure_err("upload", e))?;
         Ok(())
+    }
+
+    /// One container LIST page. Errors are scrubbed like every other Azure
+    /// call: ureq's own error text embeds the full request URL, and here
+    /// that URL carries the SAS signature — a credential.
+    fn list_page(&self, u: &url::Url) -> Result<String> {
+        Ok(self.agent.get(u.as_str()).call().map_err(|e| clean_azure_err("list", e))?.into_string()?)
     }
 
     /// Same retry rationale as the S3 store: transient meta-fetch failures
@@ -697,7 +896,35 @@ impl AzureSasStore {
                 Ok(Some(buf))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(e) => Err(clean_s3_err("download", e)),
+            Err(e) => Err(clean_azure_err("download", e)),
+        }
+    }
+}
+
+fn xml_unescape(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Azure's counterpart of `clean_s3_err`: a human message, never the URL.
+fn clean_azure_err(op: &str, e: ureq::Error) -> anyhow::Error {
+    match e {
+        ureq::Error::Status(403, _) => anyhow::anyhow!(
+            "Access denied (403) on {op}. The SAS URL may have expired or lack \
+             read/write/list permission for this container."
+        ),
+        ureq::Error::Status(404, _) => {
+            anyhow::anyhow!("Not found (404) on {op}. Check the container name in the SAS URL.")
+        }
+        ureq::Error::Status(code, _) => anyhow::anyhow!("Storage returned HTTP {code} on {op}."),
+        ureq::Error::Transport(t) => {
+            anyhow::anyhow!("Could not reach storage on {op}: {}", t.kind())
         }
     }
 }
@@ -730,8 +957,20 @@ impl SyncStore for AzureSasStore {
             .append_pair("comp", "list")
             .append_pair("prefix", "v1/files/")
             .append_pair("maxresults", "1");
-        let xml = self.agent.get(u.as_str()).call().context("LIST blobs")?.into_string()?;
-        Ok(xml.contains("<Name>"))
+        Ok(self.list_page(&u)?.contains("<Name>"))
+    }
+
+    fn key_id(&self) -> Option<String> {
+        self.codec.key_id()
+    }
+
+    fn opens(&self, logical: &str) -> Result<Option<bool>> {
+        let url = self.blob_url(&format!("v1/files/{logical}{}", self.codec.suffix()));
+        match self.agent.get(url.as_str()).set("x-ms-range", &format!("bytes=0-{}", HEAD_BYTES - 1)).call() {
+            Ok(resp) => Ok(self.codec.opens(&read_head(resp)?)),
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            Err(e) => Err(clean_azure_err("download", e)),
+        }
     }
 
     fn list(&self) -> Result<Vec<(String, RemoteMeta)>> {
@@ -746,10 +985,12 @@ impl SyncStore for AzureSasStore {
             if !marker.is_empty() {
                 u.query_pairs_mut().append_pair("marker", &marker);
             }
-            let xml = self.agent.get(u.as_str()).call().context("LIST blobs")?.into_string()?;
+            let xml = self.list_page(&u)?;
             // Minimal XML scrape: blob names inside <Name>...</Name>.
             for part in xml.split("<Name>").skip(1) {
-                if let Some(name) = part.split("</Name>").next() {
+                // Names are XML text: `R&D` arrives as `R&amp;D`, and taken
+                // raw it named an object that doesn't exist.
+                if let Some(name) = part.split("</Name>").next().map(xml_unescape) {
                     if let Some(base) = name.strip_suffix(META_SUFFIX) {
                         if let Some(logical) = base.strip_prefix("v1/files/") {
                             names.push(logical.to_string());
@@ -761,8 +1002,8 @@ impl SyncStore for AzureSasStore {
                 .split("<NextMarker>")
                 .nth(1)
                 .and_then(|s| s.split("</NextMarker>").next())
-                .unwrap_or("")
-                .to_string();
+                .map(xml_unescape)
+                .unwrap_or_default();
             if marker.is_empty() {
                 break;
             }

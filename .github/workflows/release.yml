@@ -4,13 +4,20 @@
 # to ship it.
 #
 # Before tagging: bump the version in app/src-tauri/tauri.conf.json AND the
-# workspace Cargo.toml so the manifest version matches the tag.
+# workspace Cargo.toml so the manifest version matches the tag (the first
+# step checks this and stops the release otherwise).
 #
 # Required repo secret (already set): TAURI_SIGNING_PRIVATE_KEY.
 # Optional, for OS code signing when you have the certificates:
 #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
 #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID  (macOS Developer ID + notarization)
-#   WINDOWS_CERTIFICATE, WINDOWS_CERTIFICATE_PASSWORD  (Windows Authenticode)
+# Windows Authenticode is NOT wired up: tauri-action doesn't read certificate
+# secrets. It needs bundle.windows.certificateThumbprint (cert imported on the
+# runner) or bundle.windows.signCommand in tauri.conf.json.
+#
+# Actions are pinned to commit SHAs: this job holds the updater signing key
+# that every installed copy trusts, so a moved tag must not be able to run
+# code here. Bump the SHAs deliberately (the tag each one was is noted).
 name: Release
 
 on:
@@ -38,7 +45,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install system dependencies (Ubuntu)
         if: matrix.platform == 'ubuntu-22.04'
@@ -51,26 +58,39 @@ jobs:
             patchelf
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: lts/*
 
+      # A tag whose version disagrees with the app's publishes a latest.json
+      # carrying the OLD version — and no installed copy ever updates.
+      - name: Check the tag matches the app version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          conf=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
+          cargo=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$tag" != "$conf" ] || [ "$tag" != "$cargo" ]; then
+            echo "::error::Tag v$tag, but tauri.conf.json is $conf and Cargo.toml is $cargo"
+            exit 1
+          fi
+
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Cache Rust build artifacts
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: ". -> target"
 
       - name: Install frontend dependencies
         working-directory: app
-        run: npm install
+        run: npm ci
 
       - name: Build and publish release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

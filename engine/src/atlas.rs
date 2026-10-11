@@ -42,16 +42,41 @@ pub type Machines = BTreeMap<String, BTreeMap<String, String>>;
 /// forgotten a repo drops it from its own row, which is correct — that is
 /// what "it no longer lives here" means.
 pub fn sync_machines(store: &dyn SyncStore, map: &GitMap, home: &str, machine: &str) -> Machines {
+    sync_machines_healing(store, map, home, machine, false).0
+}
+
+/// [`sync_machines`], optionally replacing a store copy this machine can't
+/// decrypt. `heal` is set only when the self-heal check found that copy was
+/// written by THIS machine under a passphrase it no longer uses (and that
+/// its current key matches the fleet's): nobody can read it, and refusing
+/// to republish over it — right for a network failure — left the table
+/// broken forever. Every machine re-adds its own row on its next sync.
+/// Returns whether such a replacement happened.
+pub fn sync_machines_healing(
+    store: &dyn SyncStore,
+    map: &GitMap,
+    home: &str,
+    machine: &str,
+    heal: bool,
+) -> (Machines, bool) {
+    let mut healed = false;
     let (mut all, may_publish): (Machines, bool) = match store.get(MACHINES_KEY) {
         Ok(Some((b, _))) => match serde_json::from_slice(&b) {
             Ok(m) => (m, true),
             Err(_) => (Machines::default(), true),
         },
         Ok(None) => (Machines::default(), true),
+        Err(e) if heal && crate::sync::is_undecryptable(&format!("{e:#}")) => {
+            crate::dlog::warn(|| {
+                "project machines: store copy was encrypted with this computer's old passphrase — replacing it".to_string()
+            });
+            healed = true;
+            (Machines::default(), true)
+        }
         // A failed fetch must never republish over the fleet's copy.
         Err(e) => {
-            crate::dlog::warn(|| format!("project machines: fetch failed ({e})"));
-            return Machines::default();
+            crate::dlog::warn(|| format!("project machines: fetch failed ({e:#})"));
+            return (Machines::default(), false);
         }
     };
     let home = home.trim_end_matches(['/', '\\']);
@@ -75,7 +100,7 @@ pub fn sync_machines(store: &dyn SyncStore, map: &GitMap, home: &str, machine: &
             (id.clone(), rel)
         })
         .collect();
-    let changed = all.get(machine) != Some(&mine);
+    let changed = healed || all.get(machine) != Some(&mine);
     all.insert(machine.to_string(), mine);
     if changed && may_publish {
         if let Ok(bytes) = serde_json::to_vec_pretty(&all) {
@@ -86,20 +111,35 @@ pub fn sync_machines(store: &dyn SyncStore, map: &GitMap, home: &str, machine: &
                 source: machine.to_string(),
             };
             if let Err(e) = store.put(MACHINES_KEY, &bytes, &meta) {
-                crate::dlog::warn(|| format!("project machines: publish failed ({e})"));
+                crate::dlog::warn(|| format!("project machines: publish failed ({e:#})"));
+                healed = false;
             }
         }
     }
-    all
+    (all, healed)
 }
 
 /// Download-merge-publish: fold this machine's roots (and rename aliases)
 /// into the store's atlas, home-tokenized, uploading only when something new
 /// was added. Best-effort — a sync must never fail over atlas trouble.
 pub fn sync_atlas(store: &dyn SyncStore, map: &GitMap, home: &str, machine: &str) -> Atlas {
+    sync_atlas_healing(store, map, home, machine, false).0
+}
+
+/// [`sync_atlas`], optionally replacing a store copy this machine wrote
+/// under a passphrase it no longer uses (see [`sync_machines_healing`] for
+/// when that is safe). Returns whether such a replacement happened.
+pub fn sync_atlas_healing(
+    store: &dyn SyncStore,
+    map: &GitMap,
+    home: &str,
+    machine: &str,
+    heal: bool,
+) -> (Atlas, bool) {
     // An absent atlas is a fresh start; a FAILED fetch is not — republishing
     // over an unreadable store copy would wipe the fleet union. On failure,
     // use local roots for this sync and publish nothing.
+    let mut healed = false;
     let (mut atlas, may_publish): (Atlas, bool) = match store.get(KEY) {
         Ok(Some((b, _))) => match serde_json::from_slice(&b) {
             Ok(a) => (a, true),
@@ -109,8 +149,15 @@ pub fn sync_atlas(store: &dyn SyncStore, map: &GitMap, home: &str, machine: &str
             }
         },
         Ok(None) => (Atlas::default(), true),
+        Err(e) if heal && crate::sync::is_undecryptable(&format!("{e:#}")) => {
+            crate::dlog::warn(|| {
+                "project atlas: store copy was encrypted with this computer's old passphrase — replacing it".to_string()
+            });
+            healed = true;
+            (Atlas::default(), true)
+        }
         Err(e) => {
-            crate::dlog::warn(|| format!("project atlas: fetch failed ({e}) — using local roots only this sync"));
+            crate::dlog::warn(|| format!("project atlas: fetch failed ({e:#}) — using local roots only this sync"));
             (Atlas::default(), false)
         }
     };
@@ -152,7 +199,7 @@ pub fn sync_atlas(store: &dyn SyncStore, map: &GitMap, home: &str, machine: &str
             }
         }
     }
-    if changed && may_publish {
+    if (changed || healed) && may_publish {
         if let Ok(bytes) = serde_json::to_vec_pretty(&atlas) {
             let meta = RemoteMeta {
                 hash: hash_bytes(&bytes),
@@ -164,17 +211,90 @@ pub fn sync_atlas(store: &dyn SyncStore, map: &GitMap, home: &str, machine: &str
                 Ok(()) => {
                     crate::dlog::info(|| format!("project atlas: published {} identities", atlas.len()))
                 }
-                Err(e) => crate::dlog::warn(|| format!("project atlas: publish failed ({e})")),
+                Err(e) => {
+                    crate::dlog::warn(|| format!("project atlas: publish failed ({e:#})"));
+                    healed = false;
+                }
             }
         }
     }
-    atlas
+    (atlas, healed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::FolderStore;
+
+    use crate::codec::AgeCodec;
+
+    /// A store that fails every `get` with a transient (not decryption)
+    /// error — the case where republishing would wipe the fleet's table.
+    struct Offline(FolderStore);
+    impl SyncStore for Offline {
+        fn put(&self, l: &str, p: &[u8], m: &RemoteMeta) -> anyhow::Result<()> {
+            self.0.put(l, p, m)
+        }
+        fn get(&self, _: &str) -> anyhow::Result<Option<(Vec<u8>, RemoteMeta)>> {
+            anyhow::bail!("Could not reach storage on download: Connection Failed")
+        }
+        fn list(&self) -> anyhow::Result<Vec<(String, RemoteMeta)>> {
+            self.0.list()
+        }
+    }
+
+    fn map_with(id: &str, root: &str) -> GitMap {
+        let mut m = GitMap::default();
+        m.roots.insert(id.into(), root.into());
+        m
+    }
+
+    /// The live case (debug.log, every sync since 2026-08): this machine's
+    /// own copy of the shared tables was written under its old passphrase.
+    /// Without `heal` it stays broken forever; with it, it is replaced.
+    #[test]
+    fn tables_written_under_an_old_passphrase_are_replaced_only_when_healing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("store");
+        let old = FolderStore::with_codec(&root, Box::new(AgeCodec::new("old")));
+        let map = map_with("github.com/o/r", "/Users/me/dev/r");
+        sync_machines(&old, &map, "/Users/me", "mac-mini");
+        sync_atlas(&old, &map, "/Users/me", "mac-mini");
+
+        let new = FolderStore::with_codec(&root, Box::new(AgeCodec::new("new")));
+        let (m, healed) = sync_machines_healing(&new, &map, "/Users/me", "mac-mini", false);
+        assert!(!healed && m.is_empty());
+        assert!(new.get(MACHINES_KEY).is_err(), "untouched without heal");
+        let (_, healed) = sync_atlas_healing(&new, &map, "/Users/me", "mac-mini", false);
+        assert!(!healed);
+        assert!(new.get(KEY).is_err());
+
+        let (m, healed) = sync_machines_healing(&new, &map, "/Users/me", "mac-mini", true);
+        assert!(healed);
+        assert_eq!(m["mac-mini"]["github.com/o/r"], "${HOME}/dev/r");
+        assert!(new.get(MACHINES_KEY).unwrap().is_some(), "readable again");
+        let (a, healed) = sync_atlas_healing(&new, &map, "/Users/me", "mac-mini", true);
+        assert!(healed);
+        assert_eq!(a["github.com/o/r"], vec!["${HOME}/dev/r".to_string()]);
+        assert!(new.get(KEY).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_transient_failure_never_republishes_even_when_healing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = FolderStore::new(tmp.path().join("store"));
+        let other = map_with("github.com/o/other", "/Users/them/x");
+        sync_machines(&inner, &other, "/Users/them", "other-mac");
+        let before = inner.list().unwrap();
+
+        let offline = Offline(FolderStore::new(tmp.path().join("store")));
+        let map = map_with("github.com/o/r", "/Users/me/dev/r");
+        let (_, healed) = sync_machines_healing(&offline, &map, "/Users/me", "mac-mini", true);
+        assert!(!healed);
+        let (_, healed) = sync_atlas_healing(&offline, &map, "/Users/me", "mac-mini", true);
+        assert!(!healed);
+        assert_eq!(inner.list().unwrap(), before, "the fleet's copy was not overwritten");
+    }
 
     #[test]
     fn atlas_unions_across_machines() {
