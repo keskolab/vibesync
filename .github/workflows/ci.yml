@@ -45,7 +45,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      # --no-fail-fast: one failing test binary must not hide the others
+      # (a single Windows failure in the engine's unit tests used to skip
+      # every integration suite on that platform).
+      - run: cargo test --workspace --no-fail-fast
 
   # The UI's decision logic (escaping, the setup gates, the finish flow)
   # lives in app/ui/ui-logic.js and is tested with Node's built-in runner —
