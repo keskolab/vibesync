@@ -46,3 +46,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+
+  # The UI's decision logic (escaping, the setup gates, the finish flow)
+  # lives in app/ui/ui-logic.js and is tested with Node's built-in runner —
+  # no npm install, no dependencies.
+  ui:
+    name: UI logic tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+      - run: node --test app/ui/tests/ui-logic.test.js

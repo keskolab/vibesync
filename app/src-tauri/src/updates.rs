@@ -84,12 +84,15 @@ pub async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, Stri
 /// Download + install the update stashed by the last check, then relaunch.
 #[tauri::command]
 pub async fn install_pending_update(app: AppHandle) -> Result<(), String> {
+    // Cloned, not taken: a failed download (Wi-Fi drop, a 5xx) used to empty
+    // the slot while the button still offered "Install", and every retry
+    // answered "No pending update" until the app restarted.
     let update = app
         .state::<PendingUpdate>()
         .0
         .lock()
         .unwrap()
-        .take()
+        .clone()
         .ok_or("No pending update — check for updates first.")?;
     update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
     relaunch(&app);

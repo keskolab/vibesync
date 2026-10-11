@@ -27,13 +27,71 @@ static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 
 const AUTOSYNC_INTERVAL_SECS: u64 = 15 * 60;
 
-/// True while a sync runs — drives the tray spinner.
+/// True while a sync runs — drives the tray spinner. Taken only through
+/// [`SyncGuard`], so two syncs (or a store swap and a sync) never overlap.
 static SYNCING: AtomicBool = AtomicBool::new(false);
+
+/// Exclusive right to run a sync, or to change the store under one.
+///
+/// Check-then-set was two steps, and a manual sync didn't check at all:
+/// a manual sync could start during an autosync, or Change storage could
+/// delete state.json mid-sync and have the running sync write the OLD
+/// store's state back — the new store then silently never received files
+/// the old one had. Released on drop, so a panicking sync can't leave the
+/// flag stuck (which silently disabled autosync until restart).
+struct SyncGuard {
+    app: tauri::AppHandle,
+    _slot: SyncSlot,
+}
+
+/// The flag half of [`SyncGuard`], free of the tray so it can be tested:
+/// claimed atomically, released on drop — including while unwinding.
+struct SyncSlot(&'static AtomicBool);
+
+impl SyncSlot {
+    fn try_claim(flag: &'static AtomicBool) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).ok()?;
+        Some(Self(flag))
+    }
+}
+
+impl Drop for SyncSlot {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+impl SyncGuard {
+    fn try_acquire(app: &tauri::AppHandle) -> Option<Self> {
+        let slot = SyncSlot::try_claim(&SYNCING)?;
+        set_tray_busy(app, true);
+        Some(Self { app: app.clone(), _slot: slot })
+    }
+
+    /// Wait for a running sync to finish, then take the slot. For a manual
+    /// "Sync now": the user's request is satisfied by a sync that starts
+    /// after whatever is running, and the popover shows that sync's progress
+    /// meanwhile.
+    fn acquire(app: &tauri::AppHandle) -> Self {
+        loop {
+            if let Some(g) = Self::try_acquire(app) {
+                return g;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+}
+
+impl Drop for SyncGuard {
+    // The icon goes idle here; the slot (a field) is released right after.
+    fn drop(&mut self) {
+        set_tray_busy(&self.app, false);
+    }
+}
 
 /// One icon swap per state change — animating the tray flickers on macOS,
 /// so "syncing" is a static center-dot variant of the glyph instead.
 fn set_tray_busy(app: &tauri::AppHandle, busy: bool) {
-    SYNCING.store(busy, Ordering::SeqCst);
     if let Some(tray) = app.tray_by_id("main-tray") {
         let _ = tray.set_icon(Some(tray_icon_ex(busy)));
         let _ = tray.set_icon_as_template(true);
@@ -127,26 +185,18 @@ struct OnboardTool {
 /// engine `detect` the syncer's tool table calls, so the wizard and the sync
 /// can't disagree about what's installed. (They did: this probed
 /// `.claude/projects` while the syncer probed `.claude`.)
+///
+/// Async + blocking pool: a synchronous command runs on the main thread, and
+/// this walk over every transcript froze the tray at each launch (the hidden
+/// onboarding window calls it on load).
 #[tauri::command]
-fn detect_onboarding_tools() -> Vec<OnboardTool> {
+async fn detect_onboarding_tools() -> Vec<OnboardTool> {
+    tauri::async_runtime::spawn_blocking(detect_onboarding_tools_blocking).await.unwrap_or_default()
+}
+
+fn detect_onboarding_tools_blocking() -> Vec<OnboardTool> {
     let Some(home) = dirs::home_dir() else { return vec![] };
-    let count_jsonl = |rel: &str| -> usize {
-        let mut n = 0;
-        let mut stack = vec![home.join(rel)];
-        while let Some(d) = stack.pop() {
-            if let Ok(rd) = std::fs::read_dir(&d) {
-                for e in rd.flatten() {
-                    let p = e.path();
-                    if p.is_dir() {
-                        stack.push(p);
-                    } else if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
-                        n += 1;
-                    }
-                }
-            }
-        }
-        n
-    };
+    let count_jsonl = |rel: &str| syncer::count_jsonl(&home.join(rel));
     vec![
         OnboardTool { id: "claude-code", name: "Claude Code", installed: vibesync_engine::claude::detect(&home), supported: true, sessions: count_jsonl(".claude/projects") },
         OnboardTool { id: "codex", name: "Codex", installed: vibesync_engine::codex::detect(&home), supported: true, sessions: count_jsonl(".codex/sessions") },
@@ -202,6 +252,7 @@ async fn create_skills_dir(app: tauri::AppHandle) -> Result<syncer::Status, Stri
 async fn configure_default_store(app: tauri::AppHandle) -> Result<syncer::Status, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let paths = syncer::paths(&app)?;
+        let _cfg_lock = syncer::config_lock();
         if syncer::load_config(&paths)?.is_none() {
             syncer::save_config(&paths, &syncer::default_config()?)?;
         }
@@ -221,6 +272,7 @@ async fn set_tool_enabled(
 ) -> Result<syncer::Status, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let paths = syncer::paths(&app)?;
+        let _cfg_lock = syncer::config_lock();
         let mut cfg = syncer::load_config(&paths)?
             .ok_or_else(|| anyhow::anyhow!("not configured yet"))?;
         cfg.disabled_tools.retain(|t| t != &id);
@@ -245,6 +297,7 @@ async fn set_scope_enabled(
 ) -> Result<syncer::Status, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let paths = syncer::paths(&app)?;
+        let _cfg_lock = syncer::config_lock();
         let mut cfg = syncer::load_config(&paths)?
             .ok_or_else(|| anyhow::anyhow!("not configured yet"))?;
         match scope.as_str() {
@@ -270,6 +323,7 @@ async fn set_scope_enabled(
 async fn set_sync_plugins(app: tauri::AppHandle, enabled: bool) -> Result<syncer::Status, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let paths = syncer::paths(&app)?;
+        let _cfg_lock = syncer::config_lock();
         let mut cfg = syncer::load_config(&paths)?
             .ok_or_else(|| anyhow::anyhow!("not configured yet"))?;
         cfg.sync_plugins = enabled;
@@ -293,7 +347,12 @@ async fn set_store(
     tauri::async_runtime::spawn_blocking(move || {
         // Validate before saving: refuse configs the engine can't open.
         vibesync_engine::open_store(&store, passphrase.as_deref())?;
+        // Never swap the store under a running sync (see SyncGuard).
+        let _guard = SyncGuard::try_acquire(&app).ok_or_else(|| {
+            anyhow::anyhow!("A sync is running right now — try again in a moment, once it finishes.")
+        })?;
         let paths = syncer::paths(&app)?;
+        let _cfg_lock = syncer::config_lock();
         let mut cfg = syncer::load_config(&paths)?.unwrap_or(syncer::default_config()?);
         // A different store means the sync state (what's already uploaded,
         // what was seen) belongs to the OLD store — reset it so the next
@@ -301,19 +360,8 @@ async fn set_store(
         // only: the saved config holds "@keychain" markers where the incoming
         // store has plaintext, so full JSON always differs and re-running
         // setup against the SAME store would wrongly reset state.
-        fn identity(s: &vibesync_engine::StoreConfig) -> String {
-            match s {
-                vibesync_engine::StoreConfig::Folder { path, .. } => format!("folder:{path}"),
-                vibesync_engine::StoreConfig::S3 { endpoint, region, bucket, access_key_id, .. } => {
-                    format!("s3:{endpoint}:{region}:{bucket}:{access_key_id}")
-                }
-                vibesync_engine::StoreConfig::AzureSas { container_sas_url } => {
-                    format!("azure:{}", container_sas_url.split('?').next().unwrap_or(""))
-                }
-            }
-        }
-        if identity(&cfg.store) != identity(&store) {
-            let _ = std::fs::remove_file(&paths.state);
+        if syncer::store_identity(&cfg.store) != syncer::store_identity(&store) {
+            syncer::forget_store_scoped_state(&paths);
         }
         cfg.store = store;
         cfg.passphrase = passphrase;
@@ -507,7 +555,7 @@ async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> 
     tauri::async_runtime::spawn_blocking(move || {
         use tauri::Emitter;
         let paths = syncer::paths(&app)?;
-        set_tray_busy(&app, true);
+        let guard = SyncGuard::acquire(&app);
         let emitter = app.clone();
         let phase_emitter = app.clone();
         let result = syncer::sync_now(
@@ -520,7 +568,7 @@ async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> 
                 let _ = phase_emitter.emit("sync-phase", label.to_string());
             },
         );
-        set_tray_busy(&app, false);
+        drop(guard);
         match &result {
             Ok(outcome) => notify_outcome(&app, outcome),
             Err(e) => syncer::debug_log_error(&paths, &format!("sync failed: {e:#}")),
@@ -566,6 +614,7 @@ fn get_settings(app: tauri::AppHandle) -> SettingsState {
 #[tauri::command]
 fn set_debug_logging(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let _cfg_lock = syncer::config_lock();
     let mut cfg = syncer::load_config(&paths)
         .map_err(|e| e.to_string())?
         .ok_or("VibeSync is not configured yet")?;
@@ -583,6 +632,7 @@ fn set_debug_logging(app: tauri::AppHandle, enabled: bool) -> Result<(), String>
 fn set_autosync_interval(app: tauri::AppHandle, mins: u64) -> Result<(), String> {
     let mins = mins.clamp(1, 24 * 60);
     let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let _cfg_lock = syncer::config_lock();
     let mut cfg = syncer::load_config(&paths)
         .map_err(|e| e.to_string())?
         .ok_or("VibeSync is not configured yet")?;
@@ -602,6 +652,7 @@ fn set_project_mapping(app: tauri::AppHandle, name: String, path: String) -> Res
         return Err(format!("Folder does not exist: {path}"));
     }
     let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let _cfg_lock = syncer::config_lock();
     let mut cfg = syncer::load_config(&paths)
         .map_err(|e| e.to_string())?
         .ok_or("VibeSync is not configured yet")?;
@@ -625,6 +676,7 @@ fn add_code_root(app: tauri::AppHandle, path: String) -> Result<SettingsState, S
         return Err(format!("Folder does not exist: {path}"));
     }
     let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let _cfg_lock = syncer::config_lock();
     let mut cfg = syncer::load_config(&paths)
         .map_err(|e| e.to_string())?
         .ok_or("VibeSync is not configured yet")?;
@@ -639,6 +691,7 @@ fn add_code_root(app: tauri::AppHandle, path: String) -> Result<SettingsState, S
 #[tauri::command]
 fn remove_code_root(app: tauri::AppHandle, path: String) -> Result<SettingsState, String> {
     let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let _cfg_lock = syncer::config_lock();
     let mut cfg = syncer::load_config(&paths)
         .map_err(|e| e.to_string())?
         .ok_or("VibeSync is not configured yet")?;
@@ -650,6 +703,7 @@ fn remove_code_root(app: tauri::AppHandle, path: String) -> Result<SettingsState
 #[tauri::command]
 fn remove_project_mapping(app: tauri::AppHandle, name: String) -> Result<SettingsState, String> {
     let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let _cfg_lock = syncer::config_lock();
     let mut cfg = syncer::load_config(&paths)
         .map_err(|e| e.to_string())?
         .ok_or("VibeSync is not configured yet")?;
@@ -669,6 +723,7 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
 fn set_autosync(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     AUTOSYNC.store(enabled, Ordering::Relaxed);
     let paths = syncer::paths(&app).map_err(|e| e.to_string())?;
+    let _cfg_lock = syncer::config_lock();
     if let Ok(Some(mut cfg)) = syncer::load_config(&paths) {
         cfg.autosync = enabled;
         syncer::save_config(&paths, &cfg).map_err(|e| e.to_string())?;
@@ -681,6 +736,13 @@ fn set_autosync(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
 fn spawn_autosync_worker(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         use tauri::Emitter;
+        // A failed sync never touches state.json, so the due-check below
+        // still sees an overdue machine — offline, that meant a full scan
+        // and a "Sync failed" notification every minute. Failures back off
+        // (2, 4, 8 … minutes, capped at the interval) and only the first
+        // failure in a row notifies.
+        let mut failures_in_a_row: u32 = 0;
+        let mut retry_at_ms: i64 = 0;
         loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
             if !AUTOSYNC.load(Ordering::Relaxed) {
@@ -711,11 +773,12 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
-            if now_ms - last_ms < (interval_secs as i64) * 1000 {
+            if now_ms - last_ms < (interval_secs as i64) * 1000 || now_ms < retry_at_ms {
                 continue;
             }
+            // Lost a race with a manual sync that started since the check.
+            let Some(guard) = SyncGuard::try_acquire(&app) else { continue };
             syncer::debug_log_event(&paths, "autosync: interval reached — starting sync");
-            set_tray_busy(&app, true);
             // Tell an open popover the background sync started — the tray
             // icon alone isn't visible from inside the window.
             let _ = app.emit("autosync-start", ());
@@ -737,7 +800,16 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
                     },
                 )
             }));
-            set_tray_busy(&app, false);
+            drop(guard);
+            if matches!(result, Ok(Ok(_))) {
+                failures_in_a_row = 0;
+                retry_at_ms = 0;
+            } else {
+                failures_in_a_row += 1;
+                retry_at_ms =
+                    now_ms + syncer::autosync_retry_delay_secs(failures_in_a_row, interval_secs) * 1000;
+            }
+            let first_failure = failures_in_a_row == 1;
             match result {
                 Ok(Ok(outcome)) => {
                     notify_outcome(&app, &outcome);
@@ -745,9 +817,9 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
                 }
                 Ok(Err(e)) => {
                     syncer::debug_log_error(&paths, &format!("autosync failed: {e:#}"));
-                    // Failures matter enough to toast — but an open popover
-                    // already shows the error via the event below.
-                    if !popover_visible(&app) {
+                    // Failures matter enough to toast — once per streak, and
+                    // not when an open popover already shows the error.
+                    if first_failure && !popover_visible(&app) {
                         use tauri_plugin_notification::NotificationExt;
                         let _ = app
                             .notification()
@@ -759,7 +831,7 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
                     let _ = app.emit("autosync-error", format!("{e:#}"));
                 }
                 Err(_) => {
-                    if !popover_visible(&app) {
+                    if first_failure && !popover_visible(&app) {
                         use tauri_plugin_notification::NotificationExt;
                         let _ = app
                             .notification()
@@ -1111,4 +1183,48 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One sync at a time: a second claim fails while the first is held,
+    /// and the slot frees itself on drop — even when the sync panics, which
+    /// used to leave autosync silently disabled until restart.
+    #[test]
+    fn only_one_sync_slot_and_it_frees_itself_even_on_panic() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let first = SyncSlot::try_claim(&FLAG).expect("free");
+        assert!(SyncSlot::try_claim(&FLAG).is_none(), "taken");
+        drop(first);
+        assert!(SyncSlot::try_claim(&FLAG).is_some(), "freed on drop");
+
+        let r = std::panic::catch_unwind(|| {
+            let _slot = SyncSlot::try_claim(&FLAG).unwrap();
+            panic!("sync crashed");
+        });
+        assert!(r.is_err());
+        assert!(!FLAG.load(Ordering::SeqCst), "freed while unwinding");
+    }
+
+    #[test]
+    fn racing_claims_admit_exactly_one() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let winners = std::sync::atomic::AtomicUsize::new(0);
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    barrier.wait();
+                    if let Some(slot) = SyncSlot::try_claim(&FLAG) {
+                        winners.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        drop(slot);
+                    }
+                });
+            }
+        });
+        assert_eq!(winners.load(Ordering::SeqCst), 1);
+    }
 }
