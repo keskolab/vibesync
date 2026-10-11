@@ -19,7 +19,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::dbsync::{expand_field, query_maps, tokenize_field};
+use crate::dbsync::{
+    child_rows, expand_field, merge_row, query_maps, table_cols, table_exists, tokenize_field,
+    RowTally, RowVersion,
+};
 use crate::scanner::{hash_bytes, hash_file, mtime_ms, FileEntry};
 use crate::state::{FileState, SyncState};
 use crate::store::{RemoteMeta, SyncStore};
@@ -171,7 +174,9 @@ pub fn push_sessions(
             let raw = std::fs::read(entry.path())?;
             let toked = transform_rollout(&raw, &rollout_tokenize(tok));
             let hash = hash_bytes(&toked);
-            if remote.get(logical.as_str()).map(|h| *h == hash).unwrap_or(false) {
+            if !state.reupload_pending(&logical)
+                && remote.get(logical.as_str()).map(|h| *h == hash).unwrap_or(false)
+            {
                 state.files.insert(
                     logical,
                     FileState { hash, mtime_ms: m, size: toked.len() as u64, deleted_locally: false },
@@ -325,13 +330,21 @@ pub fn apply(home: &Path, tok: &crate::tokenizer::Tokenizer, state: &mut SyncSta
             if !first_line_has_token {
                 continue;
             }
-            let raw = std::fs::read(entry.path())?;
-            let fixed = transform_rollout(&raw, &rollout_expand(tok));
-            if fixed != raw {
-                let tmp = entry.path().with_extension("vibesync-tmp");
-                std::fs::write(&tmp, &fixed)?;
-                std::fs::rename(&tmp, entry.path())?;
-                localized += 1;
+            // A file we can't fix now (locked, unreadable) stays as it is
+            // and is retried next sync — it must not stop the apply.
+            let fixed = std::fs::read(entry.path()).and_then(|raw| {
+                let fixed = transform_rollout(&raw, &rollout_expand(tok));
+                if fixed == raw {
+                    return Ok(false);
+                }
+                write_atomic(entry.path(), &fixed).map(|_| true)
+            });
+            match fixed {
+                Ok(true) => localized += 1,
+                Ok(false) => {}
+                Err(e) => crate::dlog::warn(|| {
+                    format!("codex: cannot localize {}: {e:#} — retried next sync", entry.path().display())
+                }),
             }
         }
         if localized > 0 {
@@ -383,35 +396,60 @@ pub fn apply(home: &Path, tok: &crate::tokenizer::Tokenizer, state: &mut SyncSta
                 continue;
             }
         }
-        if abs.exists() {
+        // Every failure below is this file's problem, not the pass's: skip,
+        // count, leave state untracked so the next sync retries it.
+        let local_exists = abs.exists();
+        if local_exists {
             // Store objects hold the TOKENIZED form; compare in that space.
-            let local_toked = transform_rollout(&std::fs::read(&abs)?, &rollout_tokenize(tok));
-            if hash_bytes(&local_toked) == meta.hash {
-                state.files.insert(
-                    logical.clone(),
-                    FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
-                );
-                report.unchanged += 1;
-                continue;
-            }
-            if mtime_ms(&abs)? > meta.mtime_ms {
-                report.skipped_newer_local += 1;
-                continue;
+            let local = std::fs::read(&abs).map_err(anyhow::Error::from).and_then(|raw| {
+                Ok((hash_bytes(&transform_rollout(&raw, &rollout_tokenize(tok))), mtime_ms(&abs)?))
+            });
+            match local {
+                Ok((h, _)) if h == meta.hash => {
+                    state.files.insert(
+                        logical.clone(),
+                        FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
+                    );
+                    report.unchanged += 1;
+                    continue;
+                }
+                Ok((_, m)) if m > meta.mtime_ms => {
+                    report.skipped_newer_local += 1;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    crate::dlog::warn(|| format!("cannot read local {}: {e:#} — skipping", abs.display()));
+                    report.failed += 1;
+                    continue;
+                }
             }
         }
         let Some(data) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
+        // Local loses: keep its bytes beside it first. No backup, no
+        // overwrite — "nothing is ever lost" outranks applying this file.
+        if local_exists {
+            if let Err(e) = crate::sync::backup_sibling(&abs) {
+                crate::dlog::warn(|| {
+                    format!("cannot back up {}: {e:#} — leaving local copy alone", abs.display())
+                });
+                report.failed += 1;
+                continue;
+            }
+        }
         // Materialize with THIS machine's paths inside the content.
         let localized = transform_rollout(&data, &rollout_expand(tok));
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent)?;
+        let written = write_atomic(&abs, &localized).and_then(|_| {
+            filetime::set_file_mtime(
+                &abs,
+                filetime::FileTime::from_unix_time(meta.mtime_ms / 1000, ((meta.mtime_ms % 1000) * 1_000_000) as u32),
+            )
+        });
+        if let Err(e) = written {
+            crate::dlog::warn(|| format!("cannot write {}: {e:#} — skipping, retried next sync", abs.display()));
+            report.failed += 1;
+            continue;
         }
-        let tmp = abs.with_extension("vibesync-tmp");
-        std::fs::write(&tmp, &localized)?;
-        std::fs::rename(&tmp, &abs)?;
-        filetime::set_file_mtime(
-            &abs,
-            filetime::FileTime::from_unix_time(meta.mtime_ms / 1000, ((meta.mtime_ms % 1000) * 1_000_000) as u32),
-        )?;
         state.files.insert(
             logical.clone(),
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
@@ -459,6 +497,23 @@ pub fn light_counts(home: &Path) -> (usize, u64, usize, Option<i64>) {
 
 fn sanitize(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect()
+}
+
+
+/// Temp file + atomic rename; the temp file never outlives a failure, so a
+/// half-written pull can't be mistaken for content.
+fn write_atomic(abs: &Path, data: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tmp = abs.file_name().unwrap_or_default().to_os_string();
+    tmp.push(".vibesync-tmp");
+    let tmp = abs.with_file_name(tmp);
+    let r = std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, abs));
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
 }
 
 
@@ -524,11 +579,44 @@ pub fn local_dirs(home: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Is the volume `p` lives on attached right now? A folder on an unplugged
+/// external drive (`/Volumes/X/...`, `/media/u/X/...`, `E:\...`) or an
+/// unreachable share is not "moved" — re-pointing its threads would make a
+/// guess permanent the moment the drive is out. Paths on the root volume
+/// always count as mounted.
+fn volume_mounted(p: &str) -> bool {
+    let p = p.strip_prefix("\\\\?\\").unwrap_or(p);
+    let b = p.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return Path::new(&format!("{}:\\", b[0] as char)).exists();
+    }
+    if let Some(rest) = p.strip_prefix("\\\\").or_else(|| p.strip_prefix("//")) {
+        let mut it = rest.split(['\\', '/']).filter(|c| !c.is_empty());
+        return match (it.next(), it.next()) {
+            (Some(server), Some(share)) => Path::new(&format!("\\\\{server}\\{share}")).exists(),
+            _ => false,
+        };
+    }
+    let comps: Vec<&str> = p.split('/').filter(|c| !c.is_empty()).collect();
+    // Mount-point depth: /Volumes/<X>, /mnt/<X>, /media/<user>/<X>,
+    // /run/media/<user>/<X>.
+    let depth = match comps.as_slice() {
+        ["Volumes", ..] | ["mnt", ..] => 2,
+        ["media", ..] => 3,
+        ["run", "media", ..] => 4,
+        _ => return true,
+    };
+    let mount = format!("/{}", comps[..depth.min(comps.len())].join("/"));
+    Path::new(&mount).is_dir()
+}
+
 /// A folder move leaves Codex's cwd pointing at a dead path forever (the
 /// session even drops out of Codex's own list). When the dead path's
 /// basename exists at exactly ONE plausible location under this home —
 /// standard user folders plus wherever live sessions already anchor — the
-/// row re-points there. Ambiguity means never guess.
+/// row re-points there. Ambiguity means never guess, and so does a path
+/// whose volume isn't mounted (see [`volume_mounted`]): callers only treat
+/// a cwd as dead when its volume is present.
 fn relocate_dead_cwd(
     dead: &str,
     home: &str,
@@ -613,13 +701,37 @@ pub fn db_push(
         return Ok(0);
     };
     let conn = open_ro(&db)?;
+    let cols = table_cols(&conn, "threads")?;
+    let has = |c: &str| cols.iter().any(|x| x == c);
+    if !has("id") {
+        crate::dlog::debug(|| format!("codex db: {} has no threads table — nothing to export", db.display()));
+        return Ok(0);
+    }
+    // Codex generations drift (40+ migrations): a column or table this
+    // version lacks must not fail every export. Each missing piece counts
+    // as 0/empty; on the full schema the values are exactly as before.
+    let newest = match (has("updated_at_ms"), has("updated_at")) {
+        (true, true) => "COALESCE(updated_at_ms, updated_at * 1000)",
+        (true, false) => "updated_at_ms",
+        (false, true) => "updated_at * 1000",
+        (false, false) => "0",
+    };
+    let count_of = |t: &str| {
+        if table_exists(&conn, t) { format!("(SELECT COUNT(*) FROM {t})") } else { "0".to_string() }
+    };
+    let ident: Vec<&str> = ["id", "cwd", "rollout_path"].into_iter().filter(|c| has(c)).collect();
     let summary: (i64, i64, i64, i64, String) = conn.query_row(
-        "SELECT (SELECT COUNT(*) FROM threads),
-                (SELECT COALESCE(MAX(COALESCE(updated_at_ms, updated_at * 1000)), 0) FROM threads),
-                (SELECT COUNT(*) FROM thread_dynamic_tools),
-                (SELECT COUNT(*) FROM thread_spawn_edges),
-                (SELECT COALESCE(group_concat(id || cwd || rollout_path), '')
-                   FROM (SELECT id, cwd, rollout_path FROM threads ORDER BY id))",
+        &format!(
+            "SELECT (SELECT COUNT(*) FROM threads),
+                    (SELECT COALESCE(MAX({newest}), 0) FROM threads),
+                    {}, {},
+                    (SELECT COALESCE(group_concat({}), '')
+                       FROM (SELECT {} FROM threads ORDER BY id))",
+            count_of("thread_dynamic_tools"),
+            count_of("thread_spawn_edges"),
+            ident.join(" || "),
+            ident.join(", "),
+        ),
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
@@ -636,7 +748,10 @@ pub fn db_push(
     store_set.sort();
     let summary_hash = hash_bytes(format!("{summary:?}|{}", store_set.join(";")).as_bytes());
     const SUMMARY_KEY: &str = "codex/db#local-summary";
-    if state.files.get(SUMMARY_KEY).map(|s| s.hash == summary_hash).unwrap_or(false) {
+    // ...unless a self-heal re-upload is waiting (state::REUPLOAD).
+    if !state.any_reupload_pending(DB_PREFIX)
+        && state.files.get(SUMMARY_KEY).map(|s| s.hash == summary_hash).unwrap_or(false)
+    {
         crate::dlog::debug(|| "codex db: db and store unchanged since last export — skipping".to_string());
         return Ok(0);
     }
@@ -679,13 +794,8 @@ pub fn db_push(
     let mut unchanged = 0;
     for mut t in threads {
         let Some(id) = t.get("id").and_then(|v| v.as_str()).map(String::from) else { continue };
-        let tools = query_maps(
-            &conn,
-            "SELECT * FROM thread_dynamic_tools WHERE thread_id = ?1 ORDER BY position",
-            &[&id],
-        )?;
-        let edges =
-            query_maps(&conn, "SELECT * FROM thread_spawn_edges WHERE child_thread_id = ?1", &[&id])?;
+        let tools = child_rows(&conn, "thread_dynamic_tools", "thread_id", &id, &["position"])?;
+        let edges = child_rows(&conn, "thread_spawn_edges", "child_thread_id", &id, &[])?;
         let eff = thread_eff(&t);
         for f in THREAD_PATH_FIELDS {
             tokenize_field(&mut t, f, tok);
@@ -709,7 +819,9 @@ pub fn db_push(
             own_slot,
             FileState { hash: hash.clone(), mtime_ms: eff, size: 0, deleted_locally: false },
         );
-        if let Some((rhash, rmtime)) = remote.get(logical.as_str()) {
+        // A queued self-heal re-upload is sent whatever the store holds.
+        let force = state.reupload_pending(&logical);
+        if let (false, Some((rhash, rmtime))) = (force, remote.get(logical.as_str())) {
             // A strictly newer store copy always wins; at EQUAL version we
             // re-publish only when our own canonical bytes changed since we
             // last pushed this thread (a heal, a mapping, an equal-time
@@ -744,11 +856,117 @@ pub fn db_push(
     Ok(pushed)
 }
 
+/// Outcome of merging one thread export.
+enum ThreadMerge {
+    Merged,
+    /// The local copy is same or newer and stays — its path fields may be
+    /// healed, and child rows only the remote has are still added.
+    Kept { healed: usize, rows: RowTally },
+    /// Not yet: its rollout file hasn't landed here (retried next sync).
+    AwaitingRollout,
+}
+
+/// Merge one thread export in ONE transaction (`BEGIN IMMEDIATE`): all of
+/// it lands or none of it does — a failure halfway must never leave the
+/// thread row stamped newest with its child rows missing.
+fn merge_thread(
+    c: &mut rusqlite::Connection,
+    obj: &serde_json::Value,
+    id: &str,
+    tok: &crate::tokenizer::Tokenizer,
+) -> Result<ThreadMerge> {
+    let t = obj.get("thread").and_then(|s| s.as_object()).expect("checked by caller");
+    let rollout = t.get("rollout_path").and_then(|v| v.as_str()).unwrap_or("");
+    let remote_eff = thread_eff(t);
+    let remote_row_t = t
+        .get("updated_at_ms")
+        .and_then(|v| v.as_i64())
+        .or_else(|| t.get("updated_at").and_then(|v| v.as_i64()).map(|s| s * 1000))
+        .unwrap_or(0);
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !table_exists(&tx, "threads") {
+        anyhow::bail!("the Codex db has no threads table");
+    }
+    let local_row = query_maps(&tx, "SELECT * FROM threads WHERE id = ?1", &[&id])?.pop();
+    let kept = local_row.as_ref().is_some_and(|lr| thread_eff(lr) >= remote_eff);
+    let mut healed = 0;
+    match &local_row {
+        Some(lr) if kept => {
+            // Codex backfills threads from synced rollout files BEFORE our
+            // merge runs, planting raw foreign cwds the UI can never scope
+            // to a workspace here. A kept row still gets its path fields
+            // healed from the remote's translated values.
+            for f in THREAD_PATH_FIELDS {
+                let local_v = lr.get(*f).and_then(|v| v.as_str()).unwrap_or("");
+                let remote_v = t.get(*f).and_then(|v| v.as_str()).unwrap_or("");
+                let local_clean = local_v.strip_prefix("\\\\?\\").unwrap_or(local_v);
+                // Missing on a drive that isn't plugged in is not dead.
+                let local_dead = *f == "cwd"
+                    && !local_v.is_empty()
+                    && !Path::new(local_clean).exists()
+                    && volume_mounted(local_clean);
+                let remote_ok = !remote_v.is_empty()
+                    && !crate::dbsync::foreign_shaped(remote_v, tok.home())
+                    && !crate::gitmap::has_unresolved_token(remote_v)
+                    && local_v != remote_v;
+                // A local-shaped path beats a foreign or dead one even
+                // when its folder is missing here — the local move-heal
+                // pass then re-points it to wherever this machine keeps
+                // a folder of that name.
+                if remote_ok && (crate::dbsync::foreign_shaped(local_v, tok.home()) || local_dead) {
+                    tx.execute(
+                        &format!("UPDATE threads SET `{f}` = ?1 WHERE id = ?2"),
+                        rusqlite::params![remote_v, id],
+                    )?;
+                    healed += 1;
+                }
+            }
+        }
+        _ => {
+            // Rollout gate AFTER the newer-local check, so an already-known
+            // thread doesn't re-download its export every sync while waiting.
+            if !rollout.is_empty() && !Path::new(rollout).exists() {
+                crate::dlog::debug(|| {
+                    format!("codex db: {id} awaiting its rollout file ({rollout}) — retrying next sync")
+                });
+                return Ok(ThreadMerge::AwaitingRollout); // nothing written; rolled back
+            }
+            crate::dlog::debug(|| format!("codex db: merging thread {id}"));
+            let local_row_t = local_row.as_ref().map(thread_eff).unwrap_or(0);
+            if local_row.is_none() || remote_row_t > local_row_t {
+                crate::dbsync::insert_map_pk(&tx, "threads", t, true, &["id"])?;
+            }
+        }
+    }
+    // Dynamic tools and spawn edges carry no version of their own, so the
+    // thread ROW's verdict settles a collision: only a strictly newer
+    // remote thread replaces them; otherwise the local rows stay and only
+    // rows missing here are added (in the kept case too). A table this
+    // Codex version lacks is skipped.
+    let remote_newer = !kept && local_row.as_ref().is_none_or(|lr| remote_row_t > thread_eff(lr));
+    let mut rows = RowTally::default();
+    for (key, table, pk) in [
+        ("dynamic_tools", "thread_dynamic_tools", &["thread_id", "position"][..]),
+        ("spawn_edges", "thread_spawn_edges", &["child_thread_id"][..]),
+    ] {
+        for row in obj.get(key).and_then(|v| v.as_array()).into_iter().flatten() {
+            if let Some(row) = row.as_object() {
+                rows.add(merge_row(&tx, table, row, pk, RowVersion::RemoteNewer(remote_newer))?);
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(if kept { ThreadMerge::Kept { healed, rows } } else { ThreadMerge::Merged })
+}
+
 /// Merge foreign threads into the local db: insert missing, update only
 /// when the remote is newer, never delete; the thread row itself is
-/// replaced only when the remote ROW is newer. A thread only applies once
+/// updated only when the remote ROW is newer. A thread only applies once
 /// its rollout file exists locally (the file layer delivers it in the same
-/// sync), so Codex never lists a session it cannot open.
+/// sync), so Codex never lists a session it cannot open. Each thread merges
+/// in one transaction; one that fails is skipped, counted and retried next
+/// sync. The db is backed up once (a consistent snapshot) before this
+/// build's first-ever write — if that backup fails, nothing is written.
 pub fn db_apply(
     home: &Path,
     tok: &crate::tokenizer::Tokenizer,
@@ -771,6 +989,10 @@ pub fn db_apply(
     // Adoption needs no remote data.
     {
         let ro = open_ro(&db)?;
+        if !table_exists(&ro, "threads") {
+            crate::dlog::debug(|| format!("codex db: {} has no threads table — nothing to merge into", db.display()));
+            return Ok(report);
+        }
         let rows = query_maps(&ro, "SELECT * FROM threads", &[])?;
         drop(ro);
         let mut fixes: Vec<(String, &'static str, String)> = Vec::new();
@@ -778,7 +1000,11 @@ pub fn db_apply(
             let Some(id) = r.get("id").and_then(|v| v.as_str()) else { continue };
             if let Some(cwd) = r.get("cwd").and_then(|v| v.as_str()) {
                 let clean = cwd.strip_prefix("\\\\?\\").unwrap_or(cwd);
-                if !crate::dbsync::foreign_shaped(clean, tok.home()) && !Path::new(clean).exists() {
+                // A folder on an unplugged drive isn't moved — don't guess.
+                if !crate::dbsync::foreign_shaped(clean, tok.home())
+                    && !Path::new(clean).exists()
+                    && volume_mounted(clean)
+                {
                     if let Some(moved) = relocate_dead_cwd(clean, tok.home(), &rows) {
                         crate::dlog::info(|| {
                             format!("codex db: {id} re-pointed to moved folder {moved}")
@@ -805,20 +1031,25 @@ pub fn db_apply(
             }
         }
         if !fixes.is_empty() {
-            let bak = db.with_extension("sqlite.vibesync-bak");
-            if !bak.exists() {
-                let _ = std::fs::copy(&db, &bak);
-            }
-            let c = rusqlite::Connection::open(&db)?;
-            c.busy_timeout(std::time::Duration::from_millis(1500))?;
+            // Backup first; if it fails, nothing is written this sync.
+            let c = crate::dbsync::open_for_merge(&db)?;
+            let mut done = 0usize;
             for (id, f, v) in &fixes {
-                c.execute(
+                // Each fix is one atomic statement: one that fails (a lock
+                // held too long) is counted and retried next sync.
+                match c.execute(
                     &format!("UPDATE threads SET `{f}` = ?1 WHERE id = ?2"),
                     rusqlite::params![v, id],
-                )?;
+                ) {
+                    Ok(_) => done += 1,
+                    Err(e) => {
+                        crate::dlog::warn(|| format!("codex db: cannot heal {f} of {id}: {e:#} — retried next sync"));
+                        report.failed += 1;
+                    }
+                }
             }
             crate::dlog::info(|| {
-                format!("codex db: adopted {} foreign path field(s) onto this machine's home", fixes.len())
+                format!("codex db: adopted {done} foreign path field(s) onto this machine's home")
             });
             conn = Some(c);
         }
@@ -842,8 +1073,15 @@ pub fn db_apply(
             }
         }
         let Some(bytes) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
-        let Ok(mut obj) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
-        let Some(t) = obj.get_mut("thread").and_then(|s| s.as_object_mut()) else { continue };
+        let mut obj = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(v) if v.get("thread").is_some_and(|t| t.is_object()) => v,
+            _ => {
+                crate::dlog::warn(|| format!("codex db: {logical} is not a readable thread export — skipping"));
+                report.failed += 1;
+                continue;
+            }
+        };
+        let t = obj.get_mut("thread").and_then(|s| s.as_object_mut()).unwrap();
         for f in THREAD_PATH_FIELDS {
             expand_field(t, f, tok);
         }
@@ -859,69 +1097,33 @@ pub fn db_apply(
             report.parked += 1;
             continue;
         }
-        let (Some(id), rollout) = (
-            t.get("id").and_then(|v| v.as_str()).map(String::from),
-            t.get("rollout_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        ) else {
+        let Some(id) = t.get("id").and_then(|v| v.as_str()).map(String::from) else {
+            crate::dlog::warn(|| format!("codex db: {logical} lacks a thread id — skipping"));
+            report.failed += 1;
             continue;
         };
-        let remote_eff = thread_eff(t);
-        let remote_row_t = t
-            .get("updated_at_ms")
-            .and_then(|v| v.as_i64())
-            .or_else(|| t.get("updated_at").and_then(|v| v.as_i64()).map(|s| s * 1000))
-            .unwrap_or(0);
+        // Open lazily; the one-time backup precedes this build's first-ever
+        // write, and when it fails nothing is written this sync.
         if conn.is_none() {
-            let bak = db.with_extension("sqlite.vibesync-bak");
-            if !bak.exists() {
-                let _ = std::fs::copy(&db, &bak);
-            }
-            let c = rusqlite::Connection::open(&db)?;
-            c.busy_timeout(std::time::Duration::from_millis(1500))?;
-            conn = Some(c);
+            conn = Some(crate::dbsync::open_for_merge(&db)?);
         }
-        let c = conn.as_ref().unwrap();
-        let local_row = query_maps(c, "SELECT * FROM threads WHERE id = ?1", &[&id])?.pop();
-        if let Some(lr) = &local_row {
-            if thread_eff(lr) >= remote_eff {
-                // Codex backfills threads from synced rollout files BEFORE
-                // our merge runs, planting raw foreign cwds the UI can never
-                // scope to a workspace here. A kept row still gets its path
-                // fields healed from the remote's translated values.
-                let mut healed = Vec::new();
-                for f in THREAD_PATH_FIELDS {
-                    let local_v = lr.get(*f).and_then(|v| v.as_str()).unwrap_or("");
-                    let remote_v = t.get(*f).and_then(|v| v.as_str()).unwrap_or("");
-                    let local_dead = *f == "cwd"
-                        && !local_v.is_empty()
-                        && !Path::new(local_v.strip_prefix("\\\\?\\").unwrap_or(local_v)).exists();
-                    let remote_ok = !remote_v.is_empty()
-                        && !crate::dbsync::foreign_shaped(remote_v, tok.home())
-                        && !crate::gitmap::has_unresolved_token(remote_v)
-                        && local_v != remote_v;
-                    // A local-shaped path beats a foreign or dead one even
-                    // when its folder is missing here — the local move-heal
-                    // pass then re-points it to wherever this machine keeps
-                    // a folder of that name.
-                    if remote_ok
-                        && (crate::dbsync::foreign_shaped(local_v, tok.home()) || local_dead)
-                    {
-                        healed.push((*f, remote_v.to_string()));
-                    }
-                }
-                for (f, v) in &healed {
-                    c.execute(
-                        &format!("UPDATE threads SET `{f}` = ?1 WHERE id = ?2"),
-                        rusqlite::params![v, id],
-                    )?;
-                }
-                if !healed.is_empty() {
-                    crate::dlog::debug(|| {
-                        format!("codex db: {id} kept — {} path field(s) healed to local shape", healed.len())
-                    });
-                } else {
-                    crate::dlog::debug(|| format!("codex db: {id} kept — local copy is same or newer"));
-                }
+        let c = conn.as_mut().unwrap();
+        // One thread's failure costs that thread only: rolled back,
+        // counted, untracked so the next sync retries it.
+        match merge_thread(c, &obj, &id, tok) {
+            Ok(ThreadMerge::Merged) => {}
+            Ok(ThreadMerge::AwaitingRollout) => {
+                report.parked += 1;
+                awaiting += 1;
+                continue;
+            }
+            Ok(ThreadMerge::Kept { healed, rows }) => {
+                crate::dlog::debug(|| {
+                    format!(
+                        "codex db: {id} kept — local copy is same or newer ({healed} path field(s) healed, {} remote-only row(s) added)",
+                        rows.added
+                    )
+                });
                 report.skipped_newer_local += 1;
                 state.files.insert(
                     logical.clone(),
@@ -929,31 +1131,10 @@ pub fn db_apply(
                 );
                 continue;
             }
-        }
-        // Rollout gate AFTER the newer-local check, so an already-known
-        // thread doesn't re-download its export every sync while waiting.
-        if !rollout.is_empty() && !Path::new(&rollout).exists() {
-            crate::dlog::debug(|| {
-                format!("codex db: {id} awaiting its rollout file ({rollout}) — retrying next sync")
-            });
-            report.parked += 1;
-            awaiting += 1;
-            continue;
-        }
-        crate::dlog::debug(|| format!("codex db: merging thread {id}"));
-        let local_row_t = local_row.as_ref().map(thread_eff).unwrap_or(0);
-        let t = obj.get("thread").and_then(|s| s.as_object()).unwrap();
-        if local_row.is_none() || remote_row_t > local_row_t {
-            crate::dbsync::insert_map_pk(c, "threads", t, true, &["id"])?;
-        }
-        for row in obj.get("dynamic_tools").and_then(|v| v.as_array()).into_iter().flatten() {
-            if let Some(row) = row.as_object() {
-                crate::dbsync::insert_map_pk(c, "thread_dynamic_tools", row, true, &["thread_id", "position"])?;
-            }
-        }
-        for row in obj.get("spawn_edges").and_then(|v| v.as_array()).into_iter().flatten() {
-            if let Some(row) = row.as_object() {
-                crate::dbsync::insert_map_pk(c, "thread_spawn_edges", row, true, &["child_thread_id"])?;
+            Err(e) => {
+                crate::dlog::warn(|| format!("codex db: {id} not merged: {e:#} — rolled back, retried next sync"));
+                report.failed += 1;
+                continue;
             }
         }
         state.files.insert(
@@ -1148,6 +1329,18 @@ mod db_tests {
             cwd,
             crate::dbsync::normalize_path_shape(&b.join("Documents").join("X").to_string_lossy())
         );
+    }
+
+    #[test]
+    fn only_removable_mount_points_can_be_offline() {
+        // The root volume is always there: a missing folder on it is gone.
+        assert!(volume_mounted("/Users/u/old/X"));
+        assert!(volume_mounted(&std::env::temp_dir().join("x").to_string_lossy()));
+        // External drives / mounts that aren't attached right now.
+        assert!(!volume_mounted("/Volumes/VibeSync-No-Such-Drive/work/X"));
+        assert!(!volume_mounted("/media/u/VibeSync-No-Such-Drive/X"));
+        assert!(!volume_mounted("/run/media/u/VibeSync-No-Such-Drive/X"));
+        assert!(!volume_mounted("/mnt/VibeSync-No-Such-Drive/X"));
     }
 
     #[test]

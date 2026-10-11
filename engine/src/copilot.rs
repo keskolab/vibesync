@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::dbsync::{child_rows, merge_row, table_cols, table_exists, RowTally, RowVersion};
 use crate::scanner::{hash_file, mtime_ms, FileEntry};
 use crate::state::{FileState, SyncState};
 use crate::store::{RemoteMeta, SyncStore};
@@ -71,6 +72,12 @@ pub fn scan(home: &Path) -> Result<Vec<FileEntry>> {
             continue;
         }
         let path = entry.path();
+        // Conflict backups and atomic-write temps are this machine's own
+        // safety residue, never session content to publish.
+        let name = entry.file_name().to_string_lossy();
+        if name.ends_with(".vibesync-bak") || name.ends_with(".vibesync-tmp") {
+            continue;
+        }
         let rel = path
             .strip_prefix(&dir)?
             .components()
@@ -108,23 +115,44 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
                 continue;
             }
         }
-        if abs.exists() {
-            if hash_file(&abs)? == meta.hash {
-                report.unchanged += 1;
-                continue;
-            }
-            if mtime_ms(&abs)? > meta.mtime_ms {
-                report.skipped_newer_local += 1;
-                continue;
+        // Every failure below is this file's problem, not the pass's: skip,
+        // count, leave state untracked so the next sync retries it.
+        let local_exists = abs.exists();
+        if local_exists {
+            match hash_file(&abs).and_then(|h| Ok((h, mtime_ms(&abs)?))) {
+                Ok((h, _)) if h == meta.hash => {
+                    report.unchanged += 1;
+                    continue;
+                }
+                Ok((_, m)) if m > meta.mtime_ms => {
+                    report.skipped_newer_local += 1;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    crate::dlog::warn(|| format!("cannot read local {}: {e:#} — skipping", abs.display()));
+                    report.failed += 1;
+                    continue;
+                }
             }
         }
         let Some(data) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent)?;
+        // Local loses: keep its bytes beside it first. No backup, no
+        // overwrite — "nothing is ever lost" outranks applying this file.
+        if local_exists {
+            if let Err(e) = crate::sync::backup_sibling(&abs) {
+                crate::dlog::warn(|| {
+                    format!("cannot back up {}: {e:#} — leaving local copy alone", abs.display())
+                });
+                report.failed += 1;
+                continue;
+            }
         }
-        let tmp = abs.with_extension("vibesync-tmp");
-        std::fs::write(&tmp, &data)?;
-        std::fs::rename(&tmp, &abs)?;
+        if let Err(e) = write_atomic(&abs, &data) {
+            crate::dlog::warn(|| format!("cannot write {}: {e:#} — skipping, retried next sync", abs.display()));
+            report.failed += 1;
+            continue;
+        }
         state.files.insert(
             logical.clone(),
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
@@ -133,6 +161,23 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
         report.applied += 1;
     }
     Ok(report)
+}
+
+
+/// Temp file + atomic rename; the temp file never outlives a failure, so a
+/// half-written pull can't be mistaken for content.
+fn write_atomic(abs: &Path, data: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tmp = abs.file_name().unwrap_or_default().to_os_string();
+    tmp.push(".vibesync-tmp");
+    let tmp = abs.with_file_name(tmp);
+    let r = std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, abs));
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
 }
 
 // ---------------------------------------------------------------- db layer
@@ -221,13 +266,31 @@ pub fn db_push(
         return Ok(0);
     }
     let conn = open_ro(&db)?;
+    let cols = table_cols(&conn, "sessions")?;
+    let has = |c: &str| cols.iter().any(|x| x == c);
+    if !has("id") {
+        crate::dlog::debug(|| format!("copilot db: {} has no sessions table — nothing to export", db.display()));
+        return Ok(0);
+    }
+    // A table or column this Copilot version lacks counts as 0/empty
+    // instead of failing every export; on the full schema the values are
+    // exactly as before.
+    let newest = if has("updated_at") { "(SELECT COALESCE(MAX(updated_at), '') FROM sessions)" } else { "''" };
+    let (turns, turns_newest) = if !table_exists(&conn, "turns") {
+        ("0", "''")
+    } else if crate::dbsync::has_column(&conn, "turns", "timestamp") {
+        ("(SELECT COUNT(*) FROM turns)", "(SELECT COALESCE(MAX(timestamp), '') FROM turns)")
+    } else {
+        ("(SELECT COUNT(*) FROM turns)", "''")
+    };
+    let (ident, ident_cols) =
+        if has("cwd") { ("id || COALESCE(cwd, '')", "id, cwd") } else { ("id", "id") };
     let summary: (i64, String, i64, String, String) = conn.query_row(
-        "SELECT (SELECT COUNT(*) FROM sessions),
-                (SELECT COALESCE(MAX(updated_at), '') FROM sessions),
-                (SELECT COUNT(*) FROM turns),
-                (SELECT COALESCE(MAX(timestamp), '') FROM turns),
-                (SELECT COALESCE(group_concat(id || COALESCE(cwd, '')), '')
-                   FROM (SELECT id, cwd FROM sessions ORDER BY id))",
+        &format!(
+            "SELECT (SELECT COUNT(*) FROM sessions), {newest}, {turns}, {turns_newest},
+                    (SELECT COALESCE(group_concat({ident}), '')
+                       FROM (SELECT {ident_cols} FROM sessions ORDER BY id))"
+        ),
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
@@ -244,7 +307,10 @@ pub fn db_push(
     store_set.sort();
     let summary_hash =
         crate::scanner::hash_bytes(format!("{summary:?}|{}", store_set.join(";")).as_bytes());
-    if state.files.get(SUMMARY_KEY).map(|s| s.hash == summary_hash).unwrap_or(false) {
+    // ...unless a self-heal re-upload is waiting (state::REUPLOAD).
+    if !state.any_reupload_pending(DB_PREFIX)
+        && state.files.get(SUMMARY_KEY).map(|s| s.hash == summary_hash).unwrap_or(false)
+    {
         crate::dlog::debug(|| "copilot db: db and store unchanged since last export — skipping".to_string());
         return Ok(0);
     }
@@ -283,12 +349,8 @@ pub fn db_push(
         let Some(id) = s.get("id").and_then(|v| v.as_str()).map(String::from) else { continue };
         let mut obj = serde_json::Map::new();
         for (table, keys, _) in CHILDREN {
-            let order = keys.join("`,`");
-            let mut rows = crate::dbsync::query_maps(
-                &conn,
-                &format!("SELECT * FROM `{table}` WHERE session_id = ?1 ORDER BY `{order}`"),
-                &[&id],
-            )?;
+            // A child table this Copilot version lacks exports no rows.
+            let mut rows = child_rows(&conn, table, "session_id", &id, keys)?;
             for r in rows.iter_mut() {
                 r.remove("id"); // AUTOINCREMENT — meaningless off-machine
                 if *table == "session_files" {
@@ -316,7 +378,9 @@ pub fn db_push(
             own_slot,
             FileState { hash: hash.clone(), mtime_ms: eff, size: 0, deleted_locally: false },
         );
-        if let Some((rhash, rmtime)) = remote.get(logical.as_str()) {
+        // A queued self-heal re-upload is sent whatever the store holds.
+        let force = state.reupload_pending(&logical);
+        if let (false, Some((rhash, rmtime))) = (force, remote.get(logical.as_str())) {
             if *rmtime > 0 && (*rhash == hash || *rmtime > eff || (*rmtime >= eff && own_prev)) {
                 unchanged += 1;
                 continue;
@@ -346,11 +410,106 @@ pub fn db_push(
     Ok(pushed)
 }
 
-/// Merge foreign sessions into the local db: insert missing, replace the
+/// Outcome of merging one session export.
+enum SessionMerge {
+    Merged,
+    /// The local copy is same or newer and stays — yet rows only the remote
+    /// has were still added (a "kept" verdict must not hide them forever).
+    Kept(RowTally),
+    /// Not yet: its session-state dir hasn't landed here (retried next sync).
+    AwaitingStateDir,
+}
+
+/// Merge one session export in ONE transaction (`BEGIN IMMEDIATE`): all of
+/// it lands or none of it does — a failure halfway must never leave the
+/// session row stamped newest with its turns missing.
+fn merge_session(
+    c: &mut rusqlite::Connection,
+    obj: &serde_json::Value,
+    id: &str,
+    home: &Path,
+    tok: &crate::tokenizer::Tokenizer,
+) -> Result<SessionMerge> {
+    let s = obj.get("session").and_then(|v| v.as_object()).expect("checked by caller");
+    let remote_eff = export_eff(obj);
+    let remote_row_t = map_iso(s, "updated_at").max(map_iso(s, "created_at"));
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !table_exists(&tx, "sessions") {
+        anyhow::bail!("session-store.db has no sessions table");
+    }
+    let local_row_t = crate::dbsync::query_maps(&tx, "SELECT * FROM sessions WHERE id = ?1", &[&id])?
+        .pop()
+        .map(|lr| map_iso(&lr, "updated_at").max(map_iso(&lr, "created_at")));
+    let kept = match local_row_t {
+        Some(row_t) => {
+            let mut local_eff = row_t;
+            for (table, _, ts) in CHILDREN {
+                let m: String = tx
+                    .query_row(
+                        &format!("SELECT COALESCE(MAX(`{ts}`), '') FROM `{table}` WHERE session_id = ?1"),
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or_default();
+                local_eff = local_eff.max(iso_ms(&m));
+            }
+            local_eff >= remote_eff
+        }
+        None => false,
+    };
+    if !kept {
+        // Scaffolding gate AFTER the newer-local check, so a known session
+        // doesn't re-download its export every sync while waiting.
+        if !root(home).join("session-state").join(id).exists() {
+            crate::dlog::debug(|| {
+                format!("copilot db: {id} awaiting its session-state dir — retrying next sync")
+            });
+            return Ok(SessionMerge::AwaitingStateDir); // nothing written; rolled back
+        }
+        crate::dlog::debug(|| format!("copilot db: merging session {id}"));
+        if local_row_t.is_none_or(|t| remote_row_t > t) {
+            crate::dbsync::insert_map_pk(&tx, "sessions", s, true, &["id"])?;
+        }
+    }
+    // Child rows carry only CREATION times — a turn's `timestamp` says when
+    // it started, not which copy is newer — and two machines that continued
+    // a session from the same point hold DIFFERENT turns under the same
+    // index. So a collision always keeps the local row (only filling in
+    // columns it has no value for yet, e.g. a reply synced mid-turn), and
+    // rows missing here are added — in the kept case too.
+    let mut rows = RowTally::default();
+    for (table, keys, _) in CHILDREN {
+        for row in obj.get(*table).and_then(|v| v.as_array()).into_iter().flatten() {
+            let Some(row) = row.as_object() else { continue };
+            let mut row = row.clone();
+            row.remove("id"); // defensive: old exports may carry it
+            if *table == "session_files" {
+                crate::dbsync::expand_field(&mut row, "file_path", tok);
+                if row
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .map(crate::gitmap::has_unresolved_token)
+                    .unwrap_or(false)
+                {
+                    continue; // auxiliary row for a project not here
+                }
+            }
+            rows.add(merge_row(&tx, table, &row, keys, RowVersion::RemoteNewer(false))?);
+        }
+    }
+    tx.commit()?;
+    Ok(if kept { SessionMerge::Kept(rows) } else { SessionMerge::Merged })
+}
+
+/// Merge foreign sessions into the local db: insert missing, update the
 /// session row only when the remote ROW is newer, child rows merge on their
-/// natural keys, never delete. A session applies only once its session-state
-/// dir exists locally (the file layer delivers it in the same sync), so
-/// Copilot never lists a session missing its on-disk scaffolding.
+/// natural keys without ever overwriting a local row, never delete. A
+/// session applies only once its session-state dir exists locally (the
+/// file layer delivers it in the same sync), so Copilot never lists a
+/// session missing its on-disk scaffolding. Each session merges in one
+/// transaction; one that fails is skipped, counted and retried next sync.
+/// The db is backed up once (a consistent snapshot) before this build's
+/// first-ever write — if that backup fails, nothing is written.
 pub fn db_apply(
     home: &Path,
     tok: &crate::tokenizer::Tokenizer,
@@ -374,7 +533,15 @@ pub fn db_apply(
     // loop-dependent heal would starve — same lesson as Codex).
     {
         let ro = open_ro(&db)?;
-        let rows = crate::dbsync::query_maps(&ro, "SELECT id, cwd FROM sessions WHERE cwd IS NOT NULL", &[])?;
+        if !table_exists(&ro, "sessions") {
+            crate::dlog::debug(|| format!("copilot db: {} has no sessions table — nothing to merge into", db.display()));
+            return Ok(report);
+        }
+        let rows = if crate::dbsync::has_column(&ro, "sessions", "cwd") {
+            crate::dbsync::query_maps(&ro, "SELECT id, cwd FROM sessions WHERE cwd IS NOT NULL", &[])?
+        } else {
+            Vec::new()
+        };
         drop(ro);
         let mut fixes: Vec<(String, String)> = Vec::new();
         for r in &rows {
@@ -394,18 +561,21 @@ pub fn db_apply(
             }
         }
         if !fixes.is_empty() {
-            let bak = db.with_extension("db.vibesync-bak");
-            if !bak.exists() {
-                let _ = std::fs::copy(&db, &bak);
-            }
-            let c = rusqlite::Connection::open(&db)?;
-            c.busy_timeout(std::time::Duration::from_millis(1500))?;
+            // Backup first; if it fails, nothing is written this sync.
+            let c = crate::dbsync::open_for_merge(&db)?;
+            let mut done = 0usize;
             for (id, v) in &fixes {
-                c.execute("UPDATE sessions SET cwd = ?1 WHERE id = ?2", rusqlite::params![v, id])?;
+                // Each fix is one atomic statement: one that fails (a lock
+                // held too long) is counted and retried next sync.
+                match c.execute("UPDATE sessions SET cwd = ?1 WHERE id = ?2", rusqlite::params![v, id]) {
+                    Ok(_) => done += 1,
+                    Err(e) => {
+                        crate::dlog::warn(|| format!("copilot db: cannot heal cwd of {id}: {e:#} — retried next sync"));
+                        report.failed += 1;
+                    }
+                }
             }
-            crate::dlog::info(|| {
-                format!("copilot db: adopted {} foreign cwd(s) onto this machine's home", fixes.len())
-            });
+            crate::dlog::info(|| format!("copilot db: adopted {done} foreign cwd(s) onto this machine's home"));
             conn = Some(c);
         }
     }
@@ -424,8 +594,15 @@ pub fn db_apply(
             }
         }
         let Some(bytes) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
-        let Ok(mut obj) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
-        let Some(s) = obj.get_mut("session").and_then(|v| v.as_object_mut()) else { continue };
+        let mut obj = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(v) if v.get("session").is_some_and(|s| s.is_object()) => v,
+            _ => {
+                crate::dlog::warn(|| format!("copilot db: {logical} is not a readable session export — skipping"));
+                report.failed += 1;
+                continue;
+            }
+        };
+        let s = obj.get_mut("session").and_then(|v| v.as_object_mut()).unwrap();
         crate::dbsync::expand_field(s, "cwd", tok);
         if s.get("cwd")
             .and_then(|v| v.as_str())
@@ -436,38 +613,33 @@ pub fn db_apply(
             report.parked += 1;
             continue;
         }
-        let Some(id) = s.get("id").and_then(|v| v.as_str()).map(String::from) else { continue };
-        let remote_eff = export_eff(&obj);
-        let remote_row_t = {
-            let s = obj.get("session").and_then(|v| v.as_object()).unwrap();
-            map_iso(s, "updated_at").max(map_iso(s, "created_at"))
+        let Some(id) = s.get("id").and_then(|v| v.as_str()).map(String::from) else {
+            crate::dlog::warn(|| format!("copilot db: {logical} lacks a session id — skipping"));
+            report.failed += 1;
+            continue;
         };
+        // Open lazily; the one-time backup precedes this build's first-ever
+        // write, and when it fails nothing is written this sync.
         if conn.is_none() {
-            let bak = db.with_extension("db.vibesync-bak");
-            if !bak.exists() {
-                let _ = std::fs::copy(&db, &bak);
-            }
-            let c = rusqlite::Connection::open(&db)?;
-            c.busy_timeout(std::time::Duration::from_millis(1500))?;
-            conn = Some(c);
+            conn = Some(crate::dbsync::open_for_merge(&db)?);
         }
-        let c = conn.as_ref().unwrap();
-        let local_row =
-            crate::dbsync::query_maps(c, "SELECT * FROM sessions WHERE id = ?1", &[&id])?.pop();
-        if let Some(lr) = &local_row {
-            let mut local_eff = map_iso(lr, "updated_at").max(map_iso(lr, "created_at"));
-            for (table, _, ts) in CHILDREN {
-                let m: String = c
-                    .query_row(
-                        &format!("SELECT COALESCE(MAX(`{ts}`), '') FROM `{table}` WHERE session_id = ?1"),
-                        [&id],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or_default();
-                local_eff = local_eff.max(iso_ms(&m));
+        let c = conn.as_mut().unwrap();
+        // One session's failure costs that session only: rolled back,
+        // counted, untracked so the next sync retries it.
+        match merge_session(c, &obj, &id, home, tok) {
+            Ok(SessionMerge::Merged) => {}
+            Ok(SessionMerge::AwaitingStateDir) => {
+                report.parked += 1;
+                awaiting += 1;
+                continue;
             }
-            if local_eff >= remote_eff {
-                crate::dlog::debug(|| format!("copilot db: {id} kept — local copy is same or newer"));
+            Ok(SessionMerge::Kept(rows)) => {
+                crate::dlog::debug(|| {
+                    format!(
+                        "copilot db: {id} kept — local copy is same or newer ({} remote-only row(s) added)",
+                        rows.added
+                    )
+                });
                 report.skipped_newer_local += 1;
                 state.files.insert(
                     logical.clone(),
@@ -475,44 +647,10 @@ pub fn db_apply(
                 );
                 continue;
             }
-        }
-        // Scaffolding gate AFTER the newer-local check, so a known session
-        // doesn't re-download its export every sync while waiting.
-        let state_dir = root(home).join("session-state").join(&id);
-        if !state_dir.exists() {
-            crate::dlog::debug(|| {
-                format!("copilot db: {id} awaiting its session-state dir — retrying next sync")
-            });
-            report.parked += 1;
-            awaiting += 1;
-            continue;
-        }
-        crate::dlog::debug(|| format!("copilot db: merging session {id}"));
-        let local_row_t = local_row
-            .as_ref()
-            .map(|lr| map_iso(lr, "updated_at").max(map_iso(lr, "created_at")))
-            .unwrap_or(0);
-        let s = obj.get("session").and_then(|v| v.as_object()).unwrap();
-        if local_row.is_none() || remote_row_t > local_row_t {
-            crate::dbsync::insert_map_pk(c, "sessions", s, true, &["id"])?;
-        }
-        for (table, keys, _) in CHILDREN {
-            for row in obj.get(*table).and_then(|v| v.as_array()).into_iter().flatten() {
-                let Some(row) = row.as_object() else { continue };
-                let mut row = row.clone();
-                row.remove("id"); // defensive: old exports may carry it
-                if *table == "session_files" {
-                    crate::dbsync::expand_field(&mut row, "file_path", tok);
-                    if row
-                        .get("file_path")
-                        .and_then(|v| v.as_str())
-                        .map(crate::gitmap::has_unresolved_token)
-                        .unwrap_or(false)
-                    {
-                        continue; // auxiliary row for a project not here
-                    }
-                }
-                crate::dbsync::insert_map_pk(c, table, &row, true, keys)?;
+            Err(e) => {
+                crate::dlog::warn(|| format!("copilot db: {id} not merged: {e:#} — rolled back, retried next sync"));
+                report.failed += 1;
+                continue;
             }
         }
         state.files.insert(

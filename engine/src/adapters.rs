@@ -146,12 +146,11 @@ impl Adapter {
         for root in self.active_roots(include_optional) {
             let rel = root.home_rel.replacen(".claude", dir, 1);
             let abs = join_home(home, &rel);
-            let mut entries =
-                scan_root(&abs, root.logical_prefix, tok, root.exts, root.exclude_dirs, root.exclude_files)?;
-            for e in &mut entries {
-                e.logical = format!("{ns}{}", e.logical);
-            }
-            out.extend(entries);
+            // Scan straight into the namespaced key, so anything the scan
+            // reports (including paths it could not read) is in the same
+            // key space as sync state.
+            let prefix = format!("{ns}{}", root.logical_prefix);
+            out.extend(scan_root(&abs, &prefix, tok, root.exts, root.exclude_dirs, root.exclude_files)?);
         }
         Ok(out)
     }

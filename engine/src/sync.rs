@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use filetime::FileTime;
 
 use crate::adapters::Adapter;
@@ -29,6 +29,9 @@ pub struct Report {
     /// Objects this pass could not take (undecryptable, unreachable, or
     /// unwritable). Skipped and retried next sync — never fatal.
     pub failed: usize,
+    /// Push only: the last upload error, so a caller that sees the store
+    /// refusing upload after upload can stop and say why.
+    pub last_error: Option<String>,
 }
 
 /// True when an error means "this machine's passphrase cannot read that
@@ -145,6 +148,103 @@ pub fn own_unreadable(
     out
 }
 
+/// This machine's uploads that its current key cannot open — checked from
+/// each object's encryption header, so it costs a few KB per object, not a
+/// download.
+///
+/// Why it's needed: a machine never downloads its OWN objects (state and the
+/// local file already match them), so uploads made under a passphrase it no
+/// longer uses were never noticed by the fetch-failure path, and fixing the
+/// passphrase healed nothing. Run once per key (see
+/// `SyncState::own_checked_key`). `Err` = the store couldn't be asked; the
+/// caller retries next sync.
+///
+/// Which side is stale matters. If THIS machine is the one holding the wrong
+/// passphrase, its earlier (correct) uploads are what it can't open — and
+/// re-sending them would re-encrypt good fleet copies under the wrong key.
+/// So a sample of other machines' objects is checked too, and nothing is
+/// reported stale unless this machine's key opens most of them
+/// ([`OwnUploadCheck::key_matches_fleet`]).
+pub fn stale_own_uploads(
+    store: &dyn SyncStore,
+    listing: &[(String, RemoteMeta)],
+    is_me: &(dyn Fn(&str) -> bool + Sync),
+) -> Result<OwnUploadCheck> {
+    use rayon::prelude::*;
+    const OTHERS_SAMPLE: usize = 12;
+    let mine: Vec<&String> =
+        listing.iter().filter(|(_, m)| is_me(&m.source)).map(|(k, _)| k).collect();
+    let others: Vec<&String> =
+        listing.iter().filter(|(_, m)| !is_me(&m.source)).map(|(k, _)| k).collect();
+    // Spread across the listing: objects cluster by machine and namespace.
+    let step = (others.len() / OTHERS_SAMPLE).max(1);
+    let sample: Vec<&String> = others.into_iter().step_by(step).take(OTHERS_SAMPLE).collect();
+    let probe = |keys: &[&String]| -> Result<Vec<(String, Option<bool>)>> {
+        keys.par_iter()
+            .map(|k| Ok(((*k).clone(), store.opens(k)?)))
+            .collect::<Result<Vec<_>>>()
+    };
+    let fleet = probe(&sample)?;
+    let mut check = OwnUploadCheck {
+        others_readable: fleet.iter().filter(|(_, o)| *o == Some(true)).count(),
+        others_unreadable: fleet.iter().filter(|(_, o)| *o == Some(false)).count(),
+        stale: Vec::new(),
+    };
+    if !check.key_matches_fleet() {
+        return Ok(check);
+    }
+    check.stale = probe(&mine)?
+        .into_iter()
+        .filter(|(_, o)| *o == Some(false))
+        .map(|(k, _)| k)
+        .collect();
+    check.stale.sort();
+    Ok(check)
+}
+
+/// Result of [`stale_own_uploads`].
+#[derive(Debug, Default, PartialEq)]
+pub struct OwnUploadCheck {
+    /// This machine's uploads its current key cannot open. Always empty when
+    /// the key doesn't match the fleet's.
+    pub stale: Vec<String>,
+    /// Sampled objects written by other machines that this key opens…
+    pub others_readable: usize,
+    /// …and that it doesn't.
+    pub others_unreadable: usize,
+}
+
+impl OwnUploadCheck {
+    /// Does this machine's key open the fleet's data? With no other
+    /// machine's objects to compare against (a fleet of one), it is by
+    /// definition the key that matters.
+    /// A tie proves nothing, so it doesn't count as a match.
+    pub fn key_matches_fleet(&self) -> bool {
+        self.others_unreadable == 0 || self.others_readable > self.others_unreadable
+    }
+}
+
+/// Make the next push re-send `keys` even though the store holds the same
+/// content (see [`crate::state::REUPLOAD`]). A key the tool has since
+/// deleted here stays deleted — there is no local copy to re-send. The
+/// mark survives until an upload succeeds (pull leaves it alone).
+pub fn mark_for_reupload(state: &mut SyncState, keys: &[String]) -> usize {
+    let mut n = 0;
+    for k in keys {
+        let st = state.files.entry(k.clone()).or_insert_with(|| FileState {
+            hash: String::new(),
+            mtime_ms: 0,
+            size: 0,
+            deleted_locally: false,
+        });
+        if !st.deleted_locally && st.hash != crate::state::REUPLOAD {
+            st.hash = crate::state::REUPLOAD.to_string();
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Classify a sync's decrypt failures. `listing` supplies the author of
 /// each object (`RemoteMeta::source`).
 pub fn diagnose_passphrase(
@@ -218,8 +318,13 @@ pub fn push_with_listing(
                     report.unchanged += 1;
                     return false;
                 }
-                // A deletion this machine recorded must stay recorded.
-                Some(st) if st.deleted_locally => return true,
+                // Self-heal: the store's copy has this content but no other
+                // machine can read it. Adopting it would leave it that way.
+                Some(st) if st.hash == crate::state::REUPLOAD => return true,
+                // A file marked deleted that is in the scan is evidently back
+                // (restored by the user, or marked while unreadable). It is
+                // adopted or uploaded like any other — re-uploading identical
+                // bytes would only churn every other machine's listing cache.
                 _ => {}
             }
             // Content already in the store: adopt it into state instead of
@@ -251,40 +356,114 @@ pub fn push_with_listing(
         }
     }
     // Encrypt + upload in parallel; state is updated afterwards, serially.
-    let results: Vec<Result<(String, FileState)>> = todo
+    // Failures are per file, like the apply side: a file that vanished or
+    // can't be read, or one upload the store refused, costs that file. Its
+    // state stays as it was, so the next sync tries again.
+    enum Outcome {
+        Pushed(String, FileState),
+        Gone,
+        Failed(String),
+    }
+    let results: Vec<Outcome> = todo
         .par_iter()
         .map(|entry| {
-            let data = std::fs::read(&entry.abs)
-                .with_context(|| format!("read {}", entry.abs.display()))?;
+            let data = match std::fs::read(&entry.abs) {
+                Ok(d) => d,
+                // Deleted since the scan: nothing to send.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Outcome::Gone,
+                Err(e) => return Outcome::Failed(format!("read {}: {e}", entry.abs.display())),
+            };
             // The file may have changed between scan and read; hash what we send.
             let hash = hash_bytes(&data);
-            store.put(
-                &entry.logical,
-                &data,
-                &RemoteMeta {
-                    hash: hash.clone(),
-                    mtime_ms: entry.mtime_ms,
-                    size: data.len() as u64,
-                    source: source.to_string(),
-                },
-            )?;
-            Ok((
-                entry.logical.clone(),
-                FileState {
-                    hash,
-                    mtime_ms: entry.mtime_ms,
-                    size: data.len() as u64,
-                    deleted_locally: false,
-                },
-            ))
+            let meta = RemoteMeta {
+                hash: hash.clone(),
+                mtime_ms: entry.mtime_ms,
+                size: data.len() as u64,
+                source: source.to_string(),
+            };
+            match store.put(&entry.logical, &data, &meta) {
+                Ok(()) => Outcome::Pushed(
+                    entry.logical.clone(),
+                    FileState {
+                        hash,
+                        mtime_ms: entry.mtime_ms,
+                        size: data.len() as u64,
+                        deleted_locally: false,
+                    },
+                ),
+                Err(e) => Outcome::Failed(format!("upload {}: {e:#}", entry.logical)),
+            }
         })
         .collect();
     for r in results {
-        let (logical, st) = r?;
-        state.files.insert(logical, st);
-        report.pushed += 1;
+        match r {
+            Outcome::Pushed(logical, st) => {
+                state.files.insert(logical, st);
+                report.pushed += 1;
+            }
+            Outcome::Gone => {}
+            Outcome::Failed(msg) => {
+                crate::dlog::warn(|| format!("{msg} — skipping, retried next sync"));
+                report.failed += 1;
+                report.last_error = Some(msg);
+            }
+        }
     }
     Ok(report)
+}
+
+/// Copy `abs` to a `.vibesync-bak` sibling before it is overwritten, and
+/// return where it went.
+///
+/// "Nothing is ever lost" includes the SECOND conflict on the same file: a
+/// fixed backup name was overwritten by it, losing the first loser. An
+/// existing backup with the same bytes is reused; otherwise the next free
+/// `<name>.<n>.vibesync-bak` is taken. Every name still ends in
+/// `.vibesync-bak`, which the scanners exclude. The one helper every
+/// adapter uses, so the rules can't drift apart:
+/// - names stay OS strings (a non-UTF-8 file name is not mangled);
+/// - a symlink or folder sitting at a backup name is never followed or
+///   written through — that is an error, and the original stays untouched;
+/// - a new backup is created exclusively, so nothing is ever overwritten,
+///   and a half-written one is removed rather than left looking complete.
+pub fn backup_sibling(abs: &Path) -> std::io::Result<std::path::PathBuf> {
+    use std::io::{ErrorKind, Write};
+    let name = abs
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidInput, "no file name"))?;
+    let current = std::fs::read(abs)?;
+    for n in 1..=10_000u32 {
+        let mut bak_name = name.to_os_string();
+        bak_name.push(if n == 1 { ".vibesync-bak".to_string() } else { format!(".{n}.vibesync-bak") });
+        let bak = abs.with_file_name(bak_name);
+        match std::fs::symlink_metadata(&bak) {
+            Ok(m) if m.is_file() => {
+                if m.len() == current.len() as u64 && std::fs::read(&bak)? == current {
+                    return Ok(bak);
+                }
+                continue;
+            }
+            Ok(_) => {
+                return Err(std::io::Error::other(format!("{} is not a regular file", bak.display())))
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&bak) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(&current).and_then(|()| f.sync_all()) {
+                    drop(f);
+                    let _ = std::fs::remove_file(&bak);
+                    return Err(e);
+                }
+                return Ok(bak);
+            }
+            // Appeared between the check and the create: next name.
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other(format!("too many backups beside {}", abs.display())))
 }
 
 /// Download store entries this machine doesn't have (or has older versions of).
@@ -331,6 +510,18 @@ pub fn pull_dir(
     on_pulled: &(dyn Fn(&str) + Sync),
 ) -> Result<Report> {
     let mut report = Report::default();
+    // Deletions by (file name, content). The deleted mark is keyed by logical
+    // path, and a project's path can change under it — a project name added,
+    // a plain folder gaining a git remote. Another machine then uploads the
+    // same old session under the NEW key, and a key-only check would bring
+    // back what this machine's tool cleaned up. Session files are named by a
+    // UUID, so name + content identifies the same file across a re-key.
+    let tombstones: std::collections::HashSet<(String, String)> = state
+        .files
+        .iter()
+        .filter(|(_, st)| st.deleted_locally)
+        .map(|(k, st)| (file_name_of(k).to_string(), st.hash.clone()))
+        .collect();
     // Pass 1 (serial, cheap): classify every entry in our namespace; collect
     // the downloads so pass 2 can fetch them in parallel.
     let mut to_fetch: Vec<(&String, &RemoteMeta, std::path::PathBuf)> = Vec::new();
@@ -349,21 +540,52 @@ pub fn pull_dir(
             on_file();
             continue;
         }
-        if let Some(st) = state.files.get(logical) {
-            if st.deleted_locally {
+        let exists = abs.exists();
+        match state.files.get(logical) {
+            // A deletion is only real while the file is really gone. One that
+            // is on disk was marked by mistake (a sync that couldn't read it,
+            // or a scope switched off) or restored — treating it as deleted
+            // would hide every later update from other machines forever.
+            Some(st) if st.deleted_locally && !exists => {
                 report.skipped_deleted += 1;
+                on_file();
+                continue;
+            }
+            // Waiting to be re-sent (self-heal) after an upload that failed:
+            // the local file is the good copy, and recording the store's
+            // hash here would cancel the re-send for good.
+            Some(st) if st.hash == crate::state::REUPLOAD && exists => {
+                report.unchanged += 1;
                 on_file();
                 continue;
             }
             // State is trusted only while the file is really there — a
             // synced-then-cleaned file must re-download, not skip forever.
-            if st.hash == meta.hash && abs.exists() {
+            Some(st) if !st.deleted_locally && st.hash == meta.hash && exists => {
                 report.unchanged += 1;
                 on_file();
                 continue;
             }
+            None if !exists
+                && tombstones.contains(&(file_name_of(logical).to_string(), meta.hash.clone())) =>
+            {
+                crate::dlog::debug(|| format!("deleted here under an older key: {logical}"));
+                state.files.insert(
+                    logical.clone(),
+                    FileState {
+                        hash: meta.hash.clone(),
+                        mtime_ms: meta.mtime_ms,
+                        size: meta.size,
+                        deleted_locally: true,
+                    },
+                );
+                report.skipped_deleted += 1;
+                on_file();
+                continue;
+            }
+            _ => {}
         }
-        if abs.exists() {
+        if exists {
             // A local file we cannot read (permissions, or one being
             // rewritten under us) is that file's problem, not the pass's.
             let local_hash = match crate::scanner::hash_file(&abs) {
@@ -410,13 +632,9 @@ pub fn pull_dir(
             }
             // Local loses: keep its content as a backup sibling before replacing.
             crate::dlog::debug(|| format!("conflict: backing up {}", abs.display()));
-            let bak = abs.with_extension(match abs.extension().and_then(|e| e.to_str()) {
-                Some(ext) => format!("{ext}.vibesync-bak"),
-                None => "vibesync-bak".to_string(),
-            });
             // No backup, no overwrite — "nothing is ever lost" outranks
             // applying this one file.
-            if let Err(e) = std::fs::copy(&abs, &bak) {
+            if let Err(e) = backup_sibling(&abs) {
                 crate::dlog::warn(|| {
                     format!("cannot back up {}: {e:#} — leaving local copy alone", abs.display())
                 });
@@ -449,6 +667,19 @@ pub fn pull_dir(
     for (i, data) in fetched {
         let (logical, meta, abs) = &to_fetch[i];
         let Some(data) = data else { continue };
+        // The content must be what the listing promised. A cloud-synced
+        // folder (Dropbox, iCloud, OneDrive) delivers an object's small
+        // metadata file and its large data file independently, so the new
+        // metadata can arrive while the data is still the previous version.
+        // Writing that and recording the new hash made the next push send
+        // the OLD content back up as the newest version — reverting the
+        // session on every machine. Skipped, it lands next sync.
+        if hash_bytes(&data) != meta.hash {
+            crate::dlog::info(|| {
+                format!("{logical}: store content doesn't match its metadata yet (still arriving?) — retried next sync")
+            });
+            continue;
+        }
         // One unwritable path (permissions, a full disk, a folder that
         // vanished) costs that file only — state stays untracked, so the
         // next sync tries again.
@@ -472,6 +703,10 @@ pub fn pull_dir(
         report.pulled += 1;
     }
     Ok(report)
+}
+
+fn file_name_of(logical: &str) -> &str {
+    logical.rsplit('/').next().unwrap_or(logical)
 }
 
 /// Materialize one pulled object: temp file, atomic rename, store mtime.

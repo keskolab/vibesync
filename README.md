@@ -4,7 +4,7 @@
 
 Start a Claude Code session on your desktop, open your laptop, and carry on where you left off — the conversation, plans, memory, custom agents, skills and settings all came with you. Works on **macOS and Windows**, in any mix.
 
-Your data goes to a place **you** own: a folder you already sync (iCloud Drive, OneDrive, Dropbox, Google Drive), your own cloud bucket (Cloudflare R2, Amazon S3, Azure), or a USB disk. No account, no middleman server, and anything bound for the cloud is encrypted on your machine first.
+Your data goes to a place **you** own: a folder you already sync (iCloud Drive, OneDrive, Dropbox, Google Drive), your own cloud bucket (Cloudflare R2, Amazon S3, Azure), or a USB disk. No account, no middleman server, and anything bound for a cloud bucket is encrypted on your machine first (a synced folder is compressed but not encrypted — [details](#where-your-data-lives)).
 
 <p align="left"><b><a href="https://github.com/keskolab/vibesync/releases">⬇ Download VibeSync for macOS and Windows</a></b></p>
 
@@ -173,7 +173,7 @@ flowchart TD
 
 Four rules hold for every sync:
 
-- **Nothing is ever lost.** Sync never deletes. If the same session changed on two computers, the newer version wins and the older one is kept beside it as a `.vibesync-bak` file.
+- **Nothing is ever lost.** Sync never deletes. If the same session changed on two computers, the newer version wins and the older one is kept beside it as a `.vibesync-bak` file (a later conflict adds `.2.vibesync-bak`, `.3.vibesync-bak`, … — never overwriting an earlier backup).
 - **Nothing comes back from the dead.** When a tool cleans up old sessions, your storage keeps them — but they're never pushed back onto a computer that already cleaned them up.
 - **Only changes transfer.** After the first sync, routine syncs take seconds.
 - **A problem with one file costs one file.** An item that can't be read or written is skipped, counted and explained in the log; everything else still syncs, and the skipped item is retried automatically.
@@ -231,7 +231,7 @@ As many as you like. Each one installs VibeSync, points at the same storage, and
 <details>
 <summary><b>What happens if I edit the same session on two computers?</b></summary>
 
-The newer version wins and the older one is kept next to it as a `.vibesync-bak` file. Sync never deletes anything, so nothing is lost either way.
+The newer version wins and the older one is kept next to it as a `.vibesync-bak` file; if it happens again, the next one is `.2.vibesync-bak`, and so on. Sync never deletes anything, so nothing is lost either way.
 
 </details>
 
@@ -346,15 +346,14 @@ Nothing is lost either way. Files that machine uploaded with the wrong passphras
 
 They repair themselves. You don't need to do anything.
 
-While a computer had the wrong passphrase, whatever it uploaded went into your storage encrypted with a key nobody else has — including, after you correct it, that computer itself. But the original files never left its disk. So when VibeSync finds a file **it uploaded itself** that it can no longer read, it draws the only possible conclusion: the copy in storage is stale, the local file is the good one. It forgets the upload and re-sends it with the current passphrase on the next sync. You'll see it in the log:
+While a computer had the wrong passphrase, whatever it uploaded went into your storage encrypted with a key nobody else has — including, after you correct it, that computer itself. But the original files never left its disk. So when VibeSync finds a file **it uploaded itself** that it can no longer read, it draws the only possible conclusion: the copy in storage is stale, the local file is the good one. It re-sends it with the current passphrase. The first sync after a passphrase change checks every file this computer uploaded (reading only a few KB of each), so this happens right away — including for files that never change again. You'll see it in the log:
 
 ```
-self-heal: 50 object(s) uploaded by this computer are unreadable here — they were
-encrypted with a passphrase it no longer uses. Forgetting them so the next sync
-re-uploads the local copies with the current passphrase.
+self-heal check: 50 of this computer's objects unreadable with the current
+passphrase, 50 queued for re-upload
 ```
 
-Two syncs after correcting the passphrase, everything is readable everywhere and the `PASSPHRASE PROBLEM` block stops appearing on all your computers.
+After the corrected computer has synced once, everything is readable everywhere and the `PASSPHRASE PROBLEM` block stops appearing on all your computers.
 
 It only ever redoes its **own** uploads. Files another computer wrote are never overwritten from here — that machine has the good local copies, so it must be fixed there.
 
@@ -443,7 +442,7 @@ Nothing outside this list is read or written. `~` is your home folder (`C:\Users
 | Codex | `~/.codex/state_<N>.sqlite` | Merges synced threads in (insert/update-newer only, never deletes); one-time backup before the first write |
 | OpenCode | `~/.local/share/opencode/opencode.db` | Merges synced sessions in (insert/update-newer only, never deletes); one-time backup before the first write |
 | OpenCode | `~/.local/share/opencode/project/`, `storage/` | Syncs each project's records (current and legacy layouts) |
-| Zed | `.../Zed/threads/threads.db` ³ | Syncs thread rows, newest wins |
+| Zed | `.../Zed/threads/threads.db` ³ | Syncs thread rows, newest wins; one-time backup before the first write |
 | Copilot CLI | `~/.copilot/session-state/` | Syncs |
 | Copilot CLI | `~/.copilot/session-store.db` | Merges synced conversations in (insert/update-newer only, never deletes); one-time backup before the first write |
 | Copilot CLI | `~/.copilot/config.json`, `settings.json`, `logs/` | Never touched — auth/trust stays local |
