@@ -215,6 +215,10 @@ header {
 .count b {
   font-size: 15px;
   font-weight: 600;
+  /* Equal-width digits and no wrapping: a changing count must never
+     resize its card (big values are compacted to "123K" in JS). */
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .count span {
   font-size: 10px;
@@ -583,6 +587,43 @@ button {
 }
 #sync-now:hover {
   filter: brightness(1.08);
+}
+/* Progress fill behind the label (width = --progress, set by JS). The
+   button is its own stacking context, so the fill sits above its background
+   and below its text. */
+#sync-now {
+  overflow: hidden;
+  isolation: isolate;
+}
+#sync-now::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--progress, 0%);
+  background: rgba(255, 255, 255, 0.18);
+  transition: width 0.25s ease;
+  z-index: -1;
+  pointer-events: none;
+}
+/* One line, always: a long stage name is cut, never wrapped (wrapping
+   changed the button's height mid-sync). */
+#sync-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* "7%" and "100%" take exactly the same space, so the label and spinner
+   never move. A fixed width (not a minimum in `ch`): "%" is wider than a
+   digit, so "100%" overflowed 4ch and nudged everything at the end. */
+#sync-pct {
+  flex: none;
+  width: 2.8em;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+#sync-pct:empty {
+  display: none;
 }
 #sync-now:active {
   filter: brightness(0.92);
