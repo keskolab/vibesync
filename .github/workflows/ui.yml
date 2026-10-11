@@ -1,0 +1,26 @@
+name: UI
+
+# The UI's decision logic (escaping, the setup gates, the finish flow) lives
+# in app/ui/ui-logic.js and is tested with Node's built-in runner — no npm
+# install, no dependencies, a few seconds. Only when the UI changes.
+on:
+  pull_request:
+    paths:
+      - 'app/ui/**'
+      - '.github/workflows/ui.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ui-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ui:
+    name: UI logic tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+      - run: node --test app/ui/tests/ui-logic.test.js

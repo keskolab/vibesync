@@ -14,3 +14,18 @@ repository = "https://github.com/JohnKesko/vibesync"
 # (PDB generation at link time); this cuts it while panics stay readable.
 [profile.dev]
 debug = "line-tables-only"
+
+# The passphrase KDF (scrypt, ~128 MB of salsa20 rounds) is the test suite's
+# hot path: unoptimized, every encrypted-store test spends seconds deriving
+# a key. Optimizing just these crates keeps debug builds debuggable and cuts
+# CI time (Windows runners most of all). Cached by rust-cache like any dep.
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
