@@ -101,7 +101,7 @@ function renderTools() {
     const li = document.createElement("li");
     let sub, control;
     if (t.installed && t.supported) {
-      sub = `${t.sessions} session${t.sessions === 1 ? "" : "s"}`;
+      sub = `${UI.fmtCount(t.sessions)} session${t.sessions === 1 ? "" : "s"}`;
       control = `<label class="switch"><input type="checkbox" ${t.on ? "checked" : ""} data-id="${t.id}" /><span class="knob"></span></label>`;
     } else if (t.installed) {
       sub = "Detected \u00b7 adapter coming soon";

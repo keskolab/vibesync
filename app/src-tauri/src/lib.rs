@@ -558,11 +558,14 @@ async fn sync_now(app: tauri::AppHandle) -> Result<syncer::SyncOutcome, String> 
         let guard = SyncGuard::acquire(&app);
         let emitter = app.clone();
         let phase_emitter = app.clone();
+        let mut gate = syncer::ProgressGate::for_ui();
         let result = syncer::sync_now(
             &paths,
             move |done, total| {
-                let _ = emitter
-                    .emit("sync-progress", serde_json::json!({ "done": done, "total": total }));
+                if gate.admit(std::time::Instant::now(), done, total) {
+                    let _ = emitter
+                        .emit("sync-progress", serde_json::json!({ "done": done, "total": total }));
+                }
             },
             move |label| {
                 let _ = phase_emitter.emit("sync-phase", label.to_string());
@@ -786,14 +789,17 @@ fn spawn_autosync_worker(app: tauri::AppHandle) {
             let phase_emitter = app.clone();
             // A panic inside a sync must not kill this thread — that would
             // silently disable autosync until the next app launch.
+            let mut gate = syncer::ProgressGate::for_ui();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 syncer::sync_now(
                     &paths,
                     move |done, total| {
-                        let _ = emitter.emit(
-                            "sync-progress",
-                            serde_json::json!({ "done": done, "total": total }),
-                        );
+                        if gate.admit(std::time::Instant::now(), done, total) {
+                            let _ = emitter.emit(
+                                "sync-progress",
+                                serde_json::json!({ "done": done, "total": total }),
+                            );
+                        }
                     },
                     move |label| {
                         let _ = phase_emitter.emit("sync-phase", label.to_string());
