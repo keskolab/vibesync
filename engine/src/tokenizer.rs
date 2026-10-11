@@ -12,7 +12,16 @@
 pub const HOME_TOKEN: &str = "${HOME}";
 pub const EHOME_TOKEN: &str = "${EHOME}";
 
-use crate::gitmap::{git_token, parse_git_token, parse_proj_token, proj_token, GitMap};
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use crate::gitmap::{covers_home, git_token, parse_git_token, parse_proj_token, proj_token, GitMap};
+
+/// Upper bound on `read_dir` calls spent deciding one ambiguous encoded
+/// name: the walk follows real entries matching the name, so a sane layout
+/// needs a handful; the bound only stops a pathological one.
+const DECODE_BUDGET: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct Tokenizer {
@@ -32,6 +41,11 @@ pub struct Tokenizer {
     /// User-configured project mappings: (name, plain root, encoded root),
     /// longest root first. Outrank git roots — an explicit mapping is intent.
     proj_roots: Vec<(String, String, String)>,
+    /// Filesystem verdicts for ambiguous encoded names, `(root, name) ->
+    /// claimed` (see [`Tokenizer::tokenize_encoded`]). Memoized because the
+    /// scanner tokenizes a project dir's name once per FILE inside it. Fresh
+    /// after every builder call; a tokenizer lives for one sync.
+    encoded_verdicts: Arc<Mutex<HashMap<(String, String), bool>>>,
 }
 
 /// Claude Code's cwd encoding: every non-alphanumeric byte becomes '-'.
@@ -49,7 +63,14 @@ impl Tokenizer {
     pub fn with_case_sensitivity(home: &str, case_insensitive: bool) -> Self {
         let home = home.trim_end_matches(['/', '\\']).to_string();
         let encoded_home = encode_cwd(&home);
-        Self { home, encoded_home, case_insensitive, git_roots: Vec::new(), proj_roots: Vec::new() }
+        Self {
+            home,
+            encoded_home,
+            case_insensitive,
+            git_roots: Vec::new(),
+            proj_roots: Vec::new(),
+            encoded_verdicts: Default::default(),
+        }
     }
 
     /// Attach user-configured project mappings (fleet name -> local folder);
@@ -69,6 +90,7 @@ impl Tokenizer {
             })
             .collect();
         self.proj_roots.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+        self.encoded_verdicts = Default::default();
         self
     }
 
@@ -95,7 +117,9 @@ impl Tokenizer {
                     plain.replace('\\', "/")
                 };
                 let plain = plain.trim_end_matches(['/', '\\']).to_string();
-                if plain.is_empty() {
+                // `${HOME}` itself: some machine's dotfiles repo. Never a
+                // root here (see `gitmap::covers_home`).
+                if plain.is_empty() || covers_home(&plain, &self.home, self.case_insensitive) {
                     continue;
                 }
                 // Any locally-known root wins over an atlas alias — whether
@@ -114,14 +138,16 @@ impl Tokenizer {
                 }
                 // A real local folder that isn't a clone of this repo must
                 // not be hijacked by a fleet path coincidence. A dead path is
-                // safe: it can only match encoded transcript-dir names.
-                // (Known limit: Claude's `-` dir encoding is lossy, so a
-                // sibling like `decksy-tools` can prefix-match a `decksy`
-                // alias — same ambiguity local roots always had.)
-                let p = std::path::Path::new(&plain);
+                // safe: it can only match encoded transcript-dir names (and
+                // a look-alike sibling such as `decksy-tools` next to a
+                // `decksy` alias is settled by the filesystem check in
+                // `tokenize_encoded`).
+                let p = Path::new(&plain);
                 if p.exists() {
+                    // It must BE a clone root of this repo — not a folder
+                    // inside one, and not a worktree (never a root).
                     match crate::gitmap::discover(p) {
-                        Some((_, found)) if found == *id => {}
+                        Some((root, found)) if found == *id && root == p => {}
                         _ => continue,
                     }
                 }
@@ -130,12 +156,14 @@ impl Tokenizer {
             }
         }
         self.git_roots.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+        self.encoded_verdicts = Default::default();
         self
     }
 
     /// Attach known git repo roots; their identities then take priority over
     /// `${HOME}` in both tokenize directions.
     pub fn with_gitmap(mut self, map: &GitMap) -> Self {
+        let (home, ci) = (self.home.clone(), self.case_insensitive);
         self.git_roots = map
             .roots
             .iter()
@@ -150,10 +178,14 @@ impl Tokenizer {
                 let encoded = encode_cwd(&root);
                 (id.clone(), root, encoded, current)
             })
+            // A dotfiles repo at home (persisted by an older build) would
+            // claim every plain folder under it.
+            .filter(|(_, root, _, _)| !covers_home(root, &home, ci))
             .collect();
         // Longest plain root first (encode_cwd is length-preserving, so this
         // orders the encoded forms identically).
         self.git_roots.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+        self.encoded_verdicts = Default::default();
         self
     }
 
@@ -243,23 +275,30 @@ impl Tokenizer {
     /// `C--Temp-vibesync-app` → `${GIT:...}-app` when the component starts
     /// with a known repo root's encoding, else
     /// `-Users-alice-dev-proj` → `${EHOME}-dev-proj` (boundary-aware).
+    ///
+    /// Claude's encoding turns every non-alphanumeric into `-`, so a root's
+    /// encoding followed by `-web` reads both as the folder `web` under the
+    /// root and as a SIBLING (`app-web`, `app.web`, `app web` next to
+    /// `app`). The filesystem settles it — see [`Tokenizer::claims_encoded`];
+    /// a root that loses falls through to shorter roots and `${EHOME}`,
+    /// matching what `tokenize_plain` gives the same folder's real path.
     pub fn tokenize_encoded(&self, s: &str) -> String {
-        for (name, _, eroot) in &self.proj_roots {
+        for (name, root, eroot) in &self.proj_roots {
             if let Some(rest) = self.strip(s, eroot) {
                 if rest.is_empty() {
                     return proj_token(name);
                 }
-                if rest.starts_with('-') {
+                if rest.starts_with('-') && self.claims_encoded(root, eroot, s) {
                     return format!("{}{}", proj_token(name), rest);
                 }
             }
         }
-        for (id, _, eroot, _) in &self.git_roots {
+        for (id, root, eroot, _) in &self.git_roots {
             if let Some(rest) = self.strip(s, eroot) {
                 if rest.is_empty() {
                     return git_token(id);
                 }
-                if rest.starts_with('-') {
+                if rest.starts_with('-') && self.claims_encoded(root, eroot, s) {
                     return format!("{}{}", git_token(id), rest);
                 }
             }
@@ -295,6 +334,86 @@ impl Tokenizer {
             Some(rest) => format!("{}{}", self.encoded_home, rest),
             None => s.to_string(),
         }
+    }
+
+    /// Does `root` own the encoded name `s` (= `eroot` + `-` + tail)?
+    ///
+    /// Yes when the tail names a folder that exists under the root; no when
+    /// it doesn't but a sibling reading does (`app-web` beside `app`); yes
+    /// when neither exists — a deleted folder keeps the key it always had,
+    /// since nothing on disk says otherwise. Only the remainder is decoded,
+    /// by walking real directory entries whose encodings match it, so the
+    /// cost is a few `read_dir`s per distinct name, never a search.
+    fn claims_encoded(&self, root: &str, eroot: &str, s: &str) -> bool {
+        let key = (root.to_string(), s.to_string());
+        if let Some(v) = self.encoded_verdicts.lock().ok().and_then(|m| m.get(&key).copied()) {
+            return v;
+        }
+        let mut budget = DECODE_BUDGET;
+        // `strip` matched `eroot` (ASCII, as all encodings are) and the next
+        // byte is the `-` standing for the root's separator.
+        let tail = &s[eroot.len() + 1..];
+        let verdict = self.encoded_exists(Path::new(root), tail, None, &mut budget) || {
+            match root.rfind(['/', '\\']) {
+                None => true,
+                Some(cut) => {
+                    let (parent, own_name) = (&root[..cut], &root[cut + 1..]);
+                    let parent_dir = if parent.is_empty() {
+                        "/".to_string() // root directly under `/`
+                    } else if parent.ends_with(':') {
+                        format!("{parent}\\") // root directly under a drive
+                    } else {
+                        parent.to_string()
+                    };
+                    // The parent's encoding is a prefix of `eroot`, followed
+                    // by the `-` for the separator before `own_name`.
+                    let from_parent = &s[encode_cwd(parent).len() + 1..];
+                    !self.encoded_exists(Path::new(&parent_dir), from_parent, Some(own_name), &mut budget)
+                }
+            }
+        };
+        if let Ok(mut m) = self.encoded_verdicts.lock() {
+            m.insert(key, verdict);
+        }
+        verdict
+    }
+
+    /// Is there a directory below `dir` whose path relative to it, encoded
+    /// Claude's way, reads `rest`? Walks only entries whose own encoding is
+    /// a prefix of `rest` at a `-` boundary. `skip` leaves out one entry of
+    /// `dir` (the root itself, when looking for its siblings).
+    fn encoded_exists(&self, dir: &Path, rest: &str, skip: Option<&str>, budget: &mut usize) -> bool {
+        if rest.is_empty() {
+            return dir.is_dir();
+        }
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let Ok(rd) = std::fs::read_dir(dir) else { return false };
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let skipped = skip.is_some_and(|k| {
+                k == name || (self.case_insensitive && k.eq_ignore_ascii_case(&name))
+            });
+            if skipped {
+                continue;
+            }
+            let Some(after) = self.strip(rest, &encode_cwd(&name)) else { continue };
+            let child = e.path();
+            let found = if after.is_empty() {
+                child.is_dir()
+            } else if let Some(deeper) = after.strip_prefix('-') {
+                child.is_dir() && self.encoded_exists(&child, deeper, None, budget)
+            } else {
+                false
+            };
+            if found {
+                return true;
+            }
+        }
+        false
     }
 }
 

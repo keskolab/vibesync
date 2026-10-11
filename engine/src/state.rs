@@ -23,7 +23,20 @@ pub struct FileState {
 pub struct SyncState {
     /// Keyed by logical path.
     pub files: BTreeMap<String, FileState>,
+    /// Fingerprint of the encryption key this machine's own uploads were
+    /// last verified against (see `SyncStore::opens`). A different key — a
+    /// corrected passphrase, or a first run of this version — re-verifies
+    /// them once, so uploads made under a passphrase this machine no longer
+    /// uses get re-sent instead of staying unreadable to the fleet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_checked_key: Option<String>,
 }
+
+/// State hash meaning "upload this again even though the store holds the
+/// same content": the store copy exists but is unreadable to the fleet
+/// (encrypted under a passphrase no machine uses any more). Push never
+/// adopts a store copy for an entry carrying it.
+pub const REUPLOAD: &str = "!reupload";
 
 impl SyncState {
     pub fn load(path: &Path) -> Result<Self> {
@@ -54,13 +67,50 @@ impl SyncState {
     /// is one-way and permanently suppresses the pull, so a caller that can't
     /// vouch for its keying must skip this entirely rather than pass a scan it
     /// doesn't trust — see `GitMap::load`'s `trusted` flag.
+    /// `key` is queued for re-upload ([`REUPLOAD`]): every "the store
+    /// already holds these bytes" shortcut — in any adapter — must not skip
+    /// it, or the unreadable store copy stays.
+    pub fn reupload_pending(&self, key: &str) -> bool {
+        self.files.get(key).map(|s| s.hash == REUPLOAD).unwrap_or(false)
+    }
+
+    /// Anything under `prefix` queued for re-upload? Export passes that skip
+    /// themselves when "nothing changed" must still run then.
+    pub fn any_reupload_pending(&self, prefix: &str) -> bool {
+        self.files
+            .range(prefix.to_string()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .any(|(_, s)| s.hash == REUPLOAD)
+    }
+
     pub fn mark_deletions(&mut self, logical_prefix: &str, present: &[crate::FileEntry]) -> usize {
+        self.mark_deletions_except(logical_prefix, present, &[])
+    }
+
+    /// [`mark_deletions`](Self::mark_deletions), leaving alone every entry at
+    /// or under a path in `unreadable` (files or folders the scan could not
+    /// read — see `scanner::scan_skips`).
+    pub fn mark_deletions_except(
+        &mut self,
+        logical_prefix: &str,
+        present: &[crate::FileEntry],
+        unreadable: &[String],
+    ) -> usize {
         let present: std::collections::BTreeSet<&str> =
             present.iter().map(|e| e.logical.as_str()).collect();
         let prefix = format!("{logical_prefix}/");
+        let under_unreadable = |logical: &str| {
+            unreadable.iter().any(|u| {
+                logical == u || (logical.starts_with(u.as_str()) && logical[u.len()..].starts_with('/'))
+            })
+        };
         let mut marked = 0;
         for (logical, st) in self.files.iter_mut() {
-            if logical.starts_with(&prefix) && !st.deleted_locally && !present.contains(logical.as_str()) {
+            if logical.starts_with(&prefix)
+                && !st.deleted_locally
+                && !present.contains(logical.as_str())
+                && !under_unreadable(logical)
+            {
                 st.deleted_locally = true;
                 marked += 1;
             }
@@ -120,6 +170,41 @@ mod tests {
         let mut s = tracked_state(&["claude/projects/p/a.jsonl"]);
         assert_eq!(s.mark_deletions("claude/projects", &[]), 1);
         assert_eq!(s.mark_deletions("claude/projects", &[]), 0);
+    }
+
+    /// state.json files written before `own_checked_key` existed must load,
+    /// and an unset key must not appear in the file (older versions read it).
+    #[test]
+    fn state_files_from_older_versions_still_load() {
+        let old = br#"{"files":{"a":{"hash":"h","mtime_ms":1,"size":2}}}"#;
+        let s: SyncState = serde_json::from_slice(old).unwrap();
+        assert_eq!(s.own_checked_key, None);
+        assert!(!s.files["a"].deleted_locally);
+        let out = String::from_utf8(serde_json::to_vec(&s).unwrap()).unwrap();
+        assert!(!out.contains("own_checked_key"), "{out}");
+        let mut s = s;
+        s.own_checked_key = Some("abcd".into());
+        let back: SyncState = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+        assert_eq!(back.own_checked_key.as_deref(), Some("abcd"));
+    }
+
+    #[test]
+    fn unreadable_paths_are_not_marked_deleted() {
+        let mut s = tracked_state(&[
+            "claude/projects/p/a.jsonl",
+            "claude/projects/locked/b.jsonl",
+            "claude/projects/lockedx/c.jsonl",
+        ]);
+        let marked = s.mark_deletions_except(
+            "claude/projects",
+            &[],
+            &["claude/projects/p/a.jsonl".into(), "claude/projects/locked".into()],
+        );
+        // Only the sibling that merely shares a name prefix is marked.
+        assert_eq!(marked, 1);
+        assert!(!s.files["claude/projects/p/a.jsonl"].deleted_locally);
+        assert!(!s.files["claude/projects/locked/b.jsonl"].deleted_locally);
+        assert!(s.files["claude/projects/lockedx/c.jsonl"].deleted_locally);
     }
 
     #[test]

@@ -1,11 +1,13 @@
 //! Content codecs: how bytes are transformed before they reach a store.
 //!
-//! - `GzipCodec` — compression only. For local folders and USB disks where
-//!   the disk itself is under the user's control.
-//! - `AgeCodec` — gzip, then age passphrase encryption (scrypt). Mandatory
-//!   for any third-party storage (cloud folders, S3/R2): providers only ever
-//!   see ciphertext. Note: object *names* still reveal logical paths
-//!   (project dir names); content, titles, and code never leave in plaintext.
+//! - `GzipCodec` — compression only. For folders the user picks: local and
+//!   USB disks, and also cloud-synced folders (iCloud Drive, Dropbox, ...),
+//!   which setup deliberately leaves unencrypted (README: "Where your data
+//!   lives").
+//! - `AgeCodec` — gzip, then age passphrase encryption (scrypt). Always used
+//!   for S3/R2/Azure buckets: providers only ever see ciphertext. Note:
+//!   object *names* and the `.meta.json` sidecars (content hash, size,
+//!   mtime, machine name) are not encrypted.
 
 use std::io::{Read, Write};
 
@@ -16,6 +18,16 @@ pub trait Codec: Send + Sync {
     fn decode(&self, stored: &[u8]) -> Result<Vec<u8>>;
     /// Suffix appended to object names, e.g. ".gz" or ".gz.age".
     fn suffix(&self) -> &'static str;
+    /// Short fingerprint of the content key; `None` when nothing is
+    /// encrypted. Never the key itself.
+    fn key_id(&self) -> Option<String> {
+        None
+    }
+    /// Given the first bytes of a stored object, can this codec open it?
+    /// `None` = can't tell without the whole object or a full KDF run.
+    fn opens(&self, _head: &[u8]) -> Option<bool> {
+        Some(true)
+    }
 }
 
 pub struct GzipCodec;
@@ -134,6 +146,29 @@ impl Codec for AgeCodec {
     fn suffix(&self) -> &'static str {
         ".gz.age"
     }
+
+    fn key_id(&self) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(self.keys().1.to_string().as_bytes());
+        Some(crate::scanner::hex(&digest[..8]))
+    }
+
+    /// age unwraps the file key from the header alone (`decrypt` returns a
+    /// lazy reader), so the first few KB are enough to tell "my key" from
+    /// "someone else's" — no download, no decompression.
+    fn opens(&self, head: &[u8]) -> Option<bool> {
+        let Ok(dec) = age::Decryptor::new(head) else {
+            // Not even a valid header: nobody can read this object.
+            return Some(false);
+        };
+        if dec.is_scrypt() {
+            // Legacy per-file passphrase mode: checking costs a full scrypt
+            // run per object. Not worth it for a probe.
+            return None;
+        }
+        let id: &dyn age::Identity = &self.keys().0;
+        Some(dec.decrypt(std::iter::once(id)).is_ok())
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +191,31 @@ mod tests {
         let stored = c.encode(&data).unwrap();
         assert_ne!(stored, data);
         assert_eq!(c.decode(&stored).unwrap(), data);
+    }
+
+    #[test]
+    fn age_header_probe_tells_own_key_from_others() {
+        let right = AgeCodec::new("right");
+        let wrong = AgeCodec::new("wrong");
+        // Incompressible, so the stored object really is larger than the head.
+        let mut x = 0x2545_f491u32;
+        let big: Vec<u8> = (0..64 * 1024)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect();
+        let mine = right.encode(&big).unwrap();
+        let theirs = wrong.encode(&big).unwrap();
+        // Only the head is offered, as the stores do.
+        assert_eq!(right.opens(&mine[..4096]), Some(true));
+        assert_eq!(right.opens(&theirs[..4096]), Some(false));
+        assert_eq!(right.opens(b"not an age file"), Some(false));
+        assert_ne!(right.key_id(), wrong.key_id());
+        assert_eq!(right.key_id(), AgeCodec::new("right").key_id());
+        assert_eq!(GzipCodec.key_id(), None);
     }
 
     #[test]

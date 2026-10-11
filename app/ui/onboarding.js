@@ -11,6 +11,10 @@ const IS_MAC = /Mac/i.test(navigator.platform || navigator.userAgent);
 const DEVICE = IS_MAC ? "Mac" : "PC";       // "this Mac" / "this PC"
 const DEVICES = IS_MAC ? "Macs" : "computers"; // "your Macs" / "your computers"
 const $ = (id) => document.getElementById(id);
+// Shared, tested decisions (ui-logic.js): escaping, the Continue gate, the
+// latest-check-wins rule, the two-click override, and the finish flow.
+const UI = globalThis.VibeSyncUI;
+const esc = UI.esc;
 
 // ---------- data ----------
 
@@ -43,10 +47,17 @@ let existing = null; // current app status, if already configured
 // so it blocks Continue — but never traps the user.
 let passphraseChecked = null;
 let passphraseOverride = false;
-// True while the storage check is in flight. Continue stays disabled: if
-// this is the same storage as another computer, letting the user click
-// past the check is exactly how a wrong passphrase gets committed.
+// True from the first keystroke until the verdict for THIS passphrase and
+// storage is in — including the debounce before the check starts. Continue
+// stays disabled throughout: if this is the same storage as another
+// computer, letting the user click past the check is exactly how a wrong
+// passphrase gets committed.
 let passphraseChecking = false;
+// Every check gets a ticket; only the latest may set the verdict. Module
+// level, not per render: going Back, changing the storage and returning
+// renders a new step, and a check still running from the old render must
+// not land its (old storage's) verdict on the new one.
+const verifyTickets = UI.makeLatest();
 
 function buildStore() {
   const f = chosen.fields;
@@ -153,7 +164,7 @@ function renderConfigure() {
     $("configure-sub").textContent =
       "Pick any folder \u2014 an iCloud Drive / OneDrive / Dropbox / Google Drive folder syncs it between machines automatically; a local or USB folder stays where it is.";
     body.innerHTML = `
-      <div class="path-row"><span class="path" id="cfg-path">${chosen.path || "No folder selected"}</span>
+      <div class="path-row"><span class="path" id="cfg-path">${esc(chosen.path || "No folder selected")}</span>
       <button class="mini-btn" id="cfg-choose">Choose\u2026</button></div>
       <p class="inline-note" style="margin-top:10px">On your other machines, pick the same folder.</p>`;
     body.querySelector("#cfg-choose").addEventListener("click", async () => {
@@ -271,7 +282,6 @@ function renderEncryption() {
     // is the only way to catch that before weeks of broken syncing.
     const verdict = body.querySelector("#pp-verdict");
     let verifyTimer = null;
-    let verifySeq = 0;
     // state: "checking" | "ok" | "warn" | "bad" | "info"
     const show = (text, state) => {
       verdict.textContent = text;
@@ -280,35 +290,60 @@ function renderEncryption() {
     };
     const scheduleVerify = () => {
       clearTimeout(verifyTimer);
+      const seq = verifyTickets.next(); // anything still in flight is now stale
       passphraseChecked = null;
       passphraseOverride = false;
-      passphraseChecking = false;
       if (!passphraseValid()) {
+        passphraseChecking = false;
         verdict.style.display = "none";
         refreshNav();
         return;
       }
-      verifyTimer = setTimeout(verify, 250);
-    };
-    const verify = async () => {
-      const store = buildStore();
-      if (!store) { verdict.style.display = "none"; return; }
-      const seq = ++verifySeq;
       passphraseChecking = true;
       refreshNav();
+      verifyTimer = setTimeout(() => verify(seq), 250);
+    };
+    // Explicit, two-click way past a "wrong passphrase" verdict — for a user
+    // who lost the old phrase and is deliberately starting over in the same
+    // storage. Without it, a mismatch was a dead end.
+    const offerOverride = () => {
+      const btn = document.createElement("button");
+      btn.className = "mini-btn";
+      btn.style.marginTop = "8px";
+      btn.textContent = "Use this passphrase anyway\u2026";
+      const click = UI.makeTwoClick(() => {
+        passphraseOverride = true;
+        show("Using this passphrase anyway. Set the same one on every other computer, or they can't read each other's data.", "warn");
+        refreshNav();
+      });
+      btn.addEventListener("click", () => {
+        if (click() === "armed") {
+          btn.textContent = "Click again: this computer won't read existing data, and the others won't read its uploads";
+        }
+      });
+      verdict.appendChild(document.createElement("br"));
+      verdict.appendChild(btn);
+    };
+    const verify = async (seq) => {
+      if (!verifyTickets.isCurrent(seq)) return;
+      const store = buildStore();
+      if (!store) { passphraseChecking = false; verdict.style.display = "none"; refreshNav(); return; }
       show("Checking this passphrase against your storage\u2026", "checking");
       let r;
       try {
         obLogUi("check_passphrase");
         r = await tauri?.core.invoke("check_passphrase", { store, passphrase: chosen.passphrase });
       } catch (e) {
-        if (seq !== verifySeq) return;
+        if (!verifyTickets.isCurrent(seq)) return;
         passphraseChecking = false;
-        show(`Couldn't check right now (${String(e).slice(0, 80)}) \u2014 you can continue.`, "info");
+        // The storage settings themselves were rejected (e.g. a SAS URL
+        // without its token) — no sync could work, so this blocks.
+        passphraseChecked = "invalid";
+        show(`\u2717 These storage settings don't work: ${String(e).slice(0, 160)}`, "bad");
         refreshNav();
         return;
       }
-      if (seq !== verifySeq || !r) return;
+      if (!verifyTickets.isCurrent(seq) || !r) return;
       passphraseChecking = false;
       passphraseChecked = r.kind;
       if (r.kind === "newStorage") {
@@ -317,10 +352,12 @@ function renderEncryption() {
         show("\u2713 Correct \u2014 this passphrase opens the data already in this storage.", "ok");
       } else if (r.kind === "mismatch") {
         show("\u2717 Wrong passphrase for this storage. It must be exactly the one you used on your other computer \u2014 otherwise this computer can't read anything the others uploaded, and they can't read this one.", "bad");
+        offerOverride();
       } else if (r.kind === "mixed") {
         show(`\u26a0 This passphrase works, but ${r.unreadable} of ${r.readable + r.unreadable} checked items were written with a different one \u2014 another computer is set up with the wrong passphrase.`, "warn");
       } else {
-        show("Couldn't check your storage right now \u2014 you can continue.", "info");
+        const why = r.reason ? ` (${String(r.reason).slice(0, 120)})` : "";
+        show(`Couldn't check your storage right now${why} \u2014 you can continue.`, "info");
       }
       refreshNav();
     };
@@ -337,7 +374,7 @@ function renderDone() {
     <div><span>Storage</span><b>${b.name}</b></div>
     <div><span>Encryption</span><b>${needsPassphrase() ? "Passphrase (age)" : "None (your folder)"}</b></div>
     <div><span>Tools</span><b>${OB_TOOLS.filter((t) => t.on).map((t) => t.name).join(", ") || "None selected"}</b></div>
-    <div><span>This machine</span><b>${existing?.machine || "\u2014"}</b></div>`;
+    <div><span>This machine</span><b>${esc(existing?.machine || "\u2014")}</b></div>`;
   const old = document.getElementById("switch-warning");
   if (old) old.remove();
   if (existing?.configured) {
@@ -372,14 +409,21 @@ function refreshNav() {
   $("ob-back").classList.toggle("hidden-btn", step === 0 || step === STEPS - 1);
   const next = $("ob-next");
   next.textContent = step === 0 ? "Get Started" : step === STEPS - 1 ? (existing?.configured ? "Switch Storage & Sync" : "Start First Sync") : "Continue";
-  next.disabled =
-    (step === 3 && !buildStore()) ||
-    (step === 4 && needsPassphrase() && !passphraseValid()) ||
-    (step === 4 && needsPassphrase() && passphraseChecking) ||
-    (step === 4 && needsPassphrase() && passphraseChecked === "mismatch" && !passphraseOverride);
+  next.disabled = UI.continueBlocked({
+    step,
+    storeOk: !!buildStore(),
+    needsPassphrase: needsPassphrase(),
+    passphraseValid: passphraseValid(),
+    checking: passphraseChecking,
+    checked: passphraseChecked,
+    override: passphraseOverride,
+    finishing,
+  });
 }
 
 let renderedStep = -1;
+// The finish button is saving the storage — no second click.
+let finishing = false;
 
 function update() {
   $("steps-track").style.transform = `translateX(${-step * (100 / STEPS)}%)`;
@@ -419,16 +463,37 @@ window.addEventListener("DOMContentLoaded", async () => {
   // Replay-first-launch reset from the main window.
   tauri?.event.listen("first-run-reset", () => location.reload());
 
-  $("ob-next").addEventListener("click", () => {
+  $("ob-next").addEventListener("click", async () => {
     if (step === STEPS - 1) {
+      if (finishing) return;
       obLogUi(`finish setup (storage: ${storage})`);
-      tauri?.event.emit("setup-complete", {
+      // Save here, and close only once it worked: on failure the user stays
+      // on this step with the reason, instead of the assistant vanishing and
+      // the popover showing a stray error (or just "Not set up").
+      finishing = true;
+      refreshNav();
+      $("ob-next").textContent = "Saving\u2026";
+      document.getElementById("done-error")?.remove();
+      const done = await UI.finishSetup({
+        invoke: (cmd, args) => tauri.core.invoke(cmd, args),
+        emit: (ev, payload) => tauri.event.emit(ev, payload),
+        close: () => tauri.core.invoke("close_onboarding"),
         store: buildStore(),
         passphrase: needsPassphrase() ? chosen.passphrase || null : null,
         // Every deselected (installed, supported) tool — not just Claude.
         disabledTools: OB_TOOLS.filter((t) => t.installed && t.supported && !t.on).map((t) => t.id),
       });
-      tauri?.core.invoke("close_onboarding");
+      finishing = false;
+      if (!done.ok) {
+        const err = document.createElement("p");
+        err.id = "done-error";
+        err.className = "inline-note";
+        err.style.cssText = "margin-top:12px;max-width:330px;text-align:left;color:var(--destructive)";
+        err.textContent = `Couldn't save this storage: ${done.error.slice(0, 200)}`;
+        $("done-summary").after(err);
+        refreshNav();
+        return;
+      }
       // reset so reopening from Settings starts fresh
       setTimeout(() => {
         step = 0;

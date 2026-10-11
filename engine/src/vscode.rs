@@ -114,17 +114,13 @@ pub fn scan(tok: &crate::tokenizer::Tokenizer) -> Result<Vec<FileEntry>> {
 }
 
 pub fn scan_roots(roots: &[PathBuf], tok: &crate::tokenizer::Tokenizer) -> Result<Vec<FileEntry>> {
-    let mut out = Vec::new();
-    for root in roots {
-        let Ok(dirs) = std::fs::read_dir(root) else { continue };
-        for ws in dirs.flatten() {
-            if !ws.path().is_dir() {
-                continue;
-            }
-            let Some(folder) = workspace_folder(&ws.path()) else { continue };
-            let ws_key = sanitize(&tokenize_folder(&folder, tok));
+    // Each entry with the rank of its workspace folder among those sharing
+    // its key (0 = most recently used).
+    let mut out: Vec<(FileEntry, usize)> = Vec::new();
+    for (ws_key, folders) in local_workspaces(roots, tok) {
+        for (rank, ws) in folders.iter().enumerate() {
             for sub in SESSION_DIRS {
-                let dir = ws.path().join(sub);
+                let dir = ws.join(sub);
                 if !dir.exists() {
                     continue;
                 }
@@ -147,33 +143,108 @@ pub fn scan_roots(roots: &[PathBuf], tok: &crate::tokenizer::Tokenizer) -> Resul
                         .map(|c| c.as_os_str().to_string_lossy().into_owned())
                         .collect::<Vec<_>>()
                         .join("/");
-                    out.push(FileEntry {
+                    let file = FileEntry {
                         logical: format!("{LOGICAL_PREFIX}/{ws_key}/{sub}/{rel}"),
                         abs: path.to_path_buf(),
                         size: entry.metadata()?.len(),
                         mtime_ms: mtime_ms(path)?,
                         hash: hash_file(path)?,
-                    });
+                    };
+                    out.push((file, rank));
                 }
             }
         }
     }
-    out.sort_by(|a, b| a.logical.cmp(&b.logical));
-    Ok(out)
+    // One entry per logical key. Pushing every copy of a chat held by
+    // several workspace folders made the store flip between them on every
+    // sync (and two parallel puts of one key race in a folder store). Keep
+    // the newest copy; on a tie, the most recently used folder's.
+    out.sort_by(|(a, ra), (b, rb)| {
+        a.logical
+            .cmp(&b.logical)
+            .then(b.mtime_ms.cmp(&a.mtime_ms))
+            .then(ra.cmp(rb))
+            .then_with(|| a.abs.cmp(&b.abs))
+    });
+    out.dedup_by(|(cur, _), (prev, _)| cur.logical == prev.logical);
+    Ok(out.into_iter().map(|(e, _)| e).collect())
 }
 
-/// folder-path (tokenized, sanitized) → local workspace hash dir.
-fn local_workspace_map(roots: &[PathBuf], tok: &crate::tokenizer::Tokenizer) -> HashMap<String, PathBuf> {
-    let mut map = HashMap::new();
-    for root in roots {
-        let Ok(dirs) = std::fs::read_dir(root) else { continue };
-        for ws in dirs.flatten() {
-            if let Some(folder) = workspace_folder(&ws.path()) {
-                map.insert(sanitize(&tokenize_folder(&folder, tok)), ws.path());
+/// When VS Code last used a workspace-storage folder: the newest of its
+/// `state.vscdb` (written while a window has the folder open), its
+/// `workspace.json` (written when the folder is created) and its chats.
+fn ws_recency(ws: &Path) -> i64 {
+    let mut newest = [ws.join("state.vscdb"), ws.join("workspace.json")]
+        .iter()
+        .filter_map(|p| mtime_ms(p).ok())
+        .max()
+        .unwrap_or(0);
+    if let Ok(rd) = std::fs::read_dir(ws.join("chatSessions")) {
+        for e in rd.flatten() {
+            if let Ok(m) = mtime_ms(&e.path()) {
+                newest = newest.max(m);
             }
         }
     }
-    map
+    newest
+}
+
+/// folder-path key (tokenized, sanitized) → every local workspace-storage
+/// folder for it, most recently used first (ties by path, so the order is
+/// stable). VS Code keeps several for one folder: a re-clone gets a fresh
+/// one (the id hashes the folder's creation time), Code and Insiders keep
+/// their own, and aliased paths can tokenize alike.
+fn local_workspaces(roots: &[PathBuf], tok: &crate::tokenizer::Tokenizer) -> HashMap<String, Vec<PathBuf>> {
+    let mut map: HashMap<String, Vec<(i64, PathBuf)>> = HashMap::new();
+    for root in roots {
+        let Ok(dirs) = std::fs::read_dir(root) else { continue };
+        for ws in dirs.flatten() {
+            let path = ws.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if let Some(folder) = workspace_folder(&path) {
+                let key = sanitize(&tokenize_folder(&folder, tok));
+                map.entry(key).or_default().push((ws_recency(&path), path));
+            }
+        }
+    }
+    map.into_iter()
+        .map(|(key, mut found)| {
+            found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            (key, found.into_iter().map(|(_, p)| p).collect())
+        })
+        .collect()
+}
+
+/// folder-path key → the ONE workspace folder applies and the panel index
+/// target: the most recently used, i.e. the one VS Code opens today.
+/// (Previously whichever directory listing order put last — so chats could
+/// land in a stale folder VS Code never shows.)
+fn local_workspace_map(roots: &[PathBuf], tok: &crate::tokenizer::Tokenizer) -> HashMap<String, PathBuf> {
+    local_workspaces(roots, tok)
+        .into_iter()
+        .filter_map(|(key, folders)| folders.into_iter().next().map(|ws| (key, ws)))
+        .collect()
+}
+
+
+/// Write a pulled chat file atomically and stamp the remote mtime.
+fn write_chat(abs: &Path, data: &[u8], mtime_ms: i64) -> Result<()> {
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = abs.with_extension("vibesync-tmp");
+    std::fs::write(&tmp, data)?;
+    if let Err(e) = std::fs::rename(&tmp, abs) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).context("apply vscode chat");
+    }
+    filetime::set_file_mtime(
+        abs,
+        FileTime::from_unix_time(mtime_ms.div_euclid(1000), (mtime_ms.rem_euclid(1000) * 1_000_000) as u32),
+    )?;
+    Ok(())
 }
 
 /// Apply `vscode/ws/...` store entries into matching local workspaces;
@@ -225,14 +296,13 @@ pub fn apply_roots_opts(
         }
         let ws_key = comps[..marker].join("/");
         on_file();
-        if let Some(st) = state.files.get(logical) {
-            if st.deleted_locally {
-                report.unchanged += 1;
-                continue;
-            }
-        }
+        let marked_deleted = state.files.get(logical).map(|s| s.deleted_locally).unwrap_or(false);
         let Some(ws_dir) = map.get(&ws_key) else {
-            report.parked += 1; // workspace not on this machine (yet)
+            if marked_deleted {
+                report.unchanged += 1;
+            } else {
+                report.parked += 1; // workspace not on this machine (yet)
+            }
             continue;
         };
         let mut abs = ws_dir.clone();
@@ -242,13 +312,28 @@ pub fn apply_roots_opts(
         if let Some(st) = state.files.get(logical) {
             // State is trusted only while the file is really there — a
             // synced-then-cleaned file must re-download, not skip forever.
-            if st.deleted_locally || (st.hash == meta.hash && abs.exists()) {
+            // Likewise a deletion is only real while the file is gone: one
+            // that is on disk was marked by mistake or restored, and
+            // treating it as deleted hid every later update from it.
+            let exists = abs.exists();
+            if (st.deleted_locally && !exists) || (!st.deleted_locally && st.hash == meta.hash && exists) {
                 report.unchanged += 1;
                 continue;
             }
         }
+        // A problem with one chat costs that chat only: it is counted,
+        // logged, left untracked and retried next sync.
         if abs.exists() {
-            if hash_file(&abs)? == meta.hash {
+            let local = hash_file(&abs).and_then(|h| Ok((h, mtime_ms(&abs)?)));
+            let (local_hash, local_mtime) = match local {
+                Ok(l) => l,
+                Err(e) => {
+                    crate::dlog::warn(|| format!("cannot read local {}: {e:#} — skipping", abs.display()));
+                    report.failed += 1;
+                    continue;
+                }
+            };
+            if local_hash == meta.hash {
                 report.unchanged += 1;
                 state.files.insert(
                     logical.clone(),
@@ -256,27 +341,27 @@ pub fn apply_roots_opts(
                 );
                 continue;
             }
-            if mtime_ms(&abs)? > meta.mtime_ms {
+            if local_mtime > meta.mtime_ms {
                 report.skipped_newer_local += 1;
                 continue;
             }
-            let bak = abs.with_extension(match abs.extension().and_then(|e| e.to_str()) {
-                Some(ext) => format!("{ext}.vibesync-bak"),
-                None => "vibesync-bak".to_string(),
-            });
-            std::fs::copy(&abs, &bak)?;
+            // Local loses: no backup, no overwrite.
+            if let Err(e) = crate::sync::backup_sibling(&abs) {
+                crate::dlog::warn(|| {
+                    format!("cannot back up {}: {e:#} — leaving local copy alone", abs.display())
+                });
+                report.failed += 1;
+                continue;
+            }
         }
         let Some(data) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent)?;
+        if let Err(e) = write_chat(&abs, &data, meta.mtime_ms) {
+            crate::dlog::warn(|| {
+                format!("cannot write {}: {e:#} — skipping, retried next sync", abs.display())
+            });
+            report.failed += 1;
+            continue;
         }
-        let tmp = abs.with_extension("vibesync-tmp");
-        std::fs::write(&tmp, &data)?;
-        std::fs::rename(&tmp, &abs).context("apply vscode chat")?;
-        filetime::set_file_mtime(
-            &abs,
-            FileTime::from_unix_time(meta.mtime_ms / 1000, ((meta.mtime_ms % 1000) * 1_000_000) as u32),
-        )?;
         state.files.insert(
             logical.clone(),
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
@@ -359,29 +444,72 @@ fn extract_title(path: &Path) -> Option<String> {
     None
 }
 
+/// The index layout this merge was validated against (dumped from a live
+/// db): `{"version": 1, "entries": {<sessionId>: {...}}, ...}`.
+fn index_shape_ok(index: &serde_json::Value) -> bool {
+    index.get("version").and_then(|v| v.as_i64()) == Some(1)
+        && index.get("entries").is_some_and(|e| e.is_object())
+}
+
 /// Register synced sessions in `chat.ChatSessionStore.index` inside the
 /// workspace's state.vscdb (the key VS Code's history panel reads — found by
-/// dumping a live db). Existing entries are never modified. Returns how many
-/// new entries were added.
+/// dumping a live db). Returns how many new entries were added.
+///
+/// The index is VS Code's, so this only ever ADDS entries for sessions it
+/// lacks: every existing entry and every other field round-trips as read.
+/// Anything short of a clean read of the validated layout leaves it
+/// untouched — a failed read (busy, missing table) is not "no index", and
+/// an unparseable or unfamiliar value is not ours to replace: either used
+/// to be swapped for a fresh index holding only the synced chats, losing
+/// the user's native titles.
 fn merge_chat_index(ws_dir: &Path, sessions: &[(String, i64)]) -> Result<usize> {
+    use rusqlite::types::Value;
+    use rusqlite::{OpenFlags, OptionalExtension, TransactionBehavior};
     const KEY: &str = "chat.ChatSessionStore.index";
     let db_path = ws_dir.join("state.vscdb");
     if !db_path.exists() {
         anyhow::bail!("no state.vscdb");
     }
-    let conn = rusqlite::Connection::open(&db_path)?;
+    // No CREATE: a db that vanished since the check must not reappear empty.
+    let mut conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
     conn.busy_timeout(std::time::Duration::from_millis(1500))?;
-    let existing: Option<String> = conn
+    // IMMEDIATE takes the write lock before the read, so nothing (VS Code
+    // included) can change the index between our read and our write.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let stored: Option<Value> = tx
         .query_row("SELECT value FROM ItemTable WHERE key = ?1", [KEY], |r| r.get(0))
-        .ok();
-    let mut index: serde_json::Value = existing
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_else(|| serde_json::json!({ "version": 1, "entries": {} }));
-    if !index.get("entries").map(|e| e.is_object()).unwrap_or(false) {
-        index["entries"] = serde_json::json!({});
-    }
-    let entries = index["entries"].as_object_mut().unwrap();
+        .optional()?;
+    let existed = stored.is_some();
+    // VS Code declares the column BLOB; write back in the type we read.
+    let (mut index, as_blob) = match stored {
+        None => (serde_json::json!({ "version": 1, "entries": {} }), false),
+        Some(v) => {
+            let (bytes, as_blob) = match v {
+                Value::Text(t) => (t.into_bytes(), false),
+                Value::Blob(b) => (b, true),
+                other => anyhow::bail!("chat index is a {:?} value — left untouched", other.data_type()),
+            };
+            match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(v) if index_shape_ok(&v) => (v, as_blob),
+                parsed => {
+                    let why = match parsed {
+                        Ok(_) => "has an unfamiliar layout".to_string(),
+                        Err(e) => format!("is not valid JSON ({e})"),
+                    };
+                    crate::dlog::warn(|| {
+                        format!("vscode: chat index in {} {why} — left untouched", db_path.display())
+                    });
+                    anyhow::bail!("chat index {why} — left untouched");
+                }
+            }
+        }
+    };
+    let Some(entries) = index.get_mut("entries").and_then(|e| e.as_object_mut()) else {
+        anyhow::bail!("chat index has no entries map — left untouched");
+    };
     let mut added = 0usize;
     for (uuid, mtime) in sessions {
         if entries.contains_key(uuid) {
@@ -408,11 +536,15 @@ fn merge_chat_index(ws_dir: &Path, sessions: &[(String, i64)]) -> Result<usize> 
         added += 1;
     }
     if added > 0 {
-        conn.execute(
-            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![KEY, serde_json::to_string(&index)?],
-        )?;
+        let text = serde_json::to_string(&index)?;
+        let value = if as_blob { Value::Blob(text.into_bytes()) } else { Value::Text(text) };
+        let sql = if existed {
+            "UPDATE ItemTable SET value = ?2 WHERE key = ?1"
+        } else {
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)"
+        };
+        tx.execute(sql, rusqlite::params![KEY, value])?;
+        tx.commit()?;
     }
     Ok(added)
 }
@@ -485,7 +617,7 @@ mod tests {
         std::fs::write(ws_a.join("chatSessions/s1.jsonl"), "{\"chat\":1}\n").unwrap();
 
         let tok_a = crate::tokenizer::Tokenizer::with_case_sensitivity(&a_home.to_string_lossy(), false);
-        let entries = scan_roots(&[a_root.clone()], &tok_a).unwrap();
+        let entries = scan_roots(std::slice::from_ref(&a_root), &tok_a).unwrap();
         assert_eq!(entries.len(), 1);
         assert!(
             entries[0].logical.starts_with("vscode/ws/${HOME}/dev/app/chatSessions/"),
@@ -518,7 +650,7 @@ mod tests {
         }
         let mut state_b = SyncState::default();
         let tok_b = crate::tokenizer::Tokenizer::with_case_sensitivity(&b_home.to_string_lossy(), false);
-        let report = apply_roots(&[b_root.clone()], &store, &mut state_b, &tok_b).unwrap();
+        let report = apply_roots(std::slice::from_ref(&b_root), &store, &mut state_b, &tok_b).unwrap();
         assert_eq!(report.applied, 1);
 
         let landed = ws_b.join("chatSessions/s1.jsonl");

@@ -679,12 +679,28 @@ pub fn load_config(paths: &Paths) -> Result<Option<AppConfig>> {
     Ok(Some(cfg)) // markers intact; resolve_secrets() when credentials needed
 }
 
+/// Held across a command's load -> modify -> save of config.json. Commands
+/// run concurrently (two quick toggles), and without it the later save
+/// silently dropped the earlier change. Never taken inside load/save
+/// themselves (load can save during migration).
+pub fn config_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 pub fn save_config(paths: &Paths, cfg: &AppConfig) -> Result<()> {
     // Prefer keychain-scrubbed; fall back to plaintext (0600) if the
     // keychain is unavailable rather than losing the credentials.
     let on_disk = scrub_secrets(cfg).unwrap_or_else(|| cfg.clone());
-    std::fs::write(&paths.config, serde_json::to_vec_pretty(&on_disk)?)?;
-    restrict_perms(&paths.config);
+    // Temp file + rename: a crash mid-write used to leave a truncated
+    // config.json that failed to parse on every launch after. Permissions
+    // are restricted before the content lands, so a plaintext fallback is
+    // never briefly world-readable.
+    let tmp = paths.config.with_extension("json.tmp");
+    std::fs::write(&tmp, b"")?;
+    restrict_perms(&tmp);
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&on_disk)?)?;
+    std::fs::rename(&tmp, &paths.config)?;
     Ok(())
 }
 
@@ -1088,7 +1104,7 @@ pub fn sync_now(
                 else {
                     continue;
                 };
-                for key in ["cwd", "originCwd"] {
+                for key in REGISTRY_CWD_KEYS {
                     if let Some(cwd) = v.get(key).and_then(|c| c.as_str()) {
                         if learned_cwds.insert(cwd.to_string()) {
                             gitmap_changed |= gitmap.learn(std::path::Path::new(cwd));
@@ -1129,10 +1145,32 @@ pub fn sync_now(
     // sidebar projects and retires legacy path-keyed store objects.
     let home_s = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
     let machine = engine::machine_name();
-    let mut atlas = engine::atlas::sync_atlas(store.as_ref(), &gitmap, &home_s, &machine);
+    // Loaded this early for the shared project tables: a self-heal check in
+    // an earlier sync may have found this machine's copy of one encrypted
+    // under a passphrase it no longer uses (see reupload_pending).
+    let mut state = engine::SyncState::load(&paths.state)?;
+    let (mut atlas, healed) = engine::atlas::sync_atlas_healing(
+        store.as_ref(),
+        &gitmap,
+        &home_s,
+        &machine,
+        reupload_pending(&state, engine::atlas::KEY),
+    );
+    if healed {
+        state.files.remove(engine::atlas::KEY);
+    }
     // Same information keyed by machine, for the Projects view.
     {
-        let fleet = engine::atlas::sync_machines(store.as_ref(), &gitmap, &home_s, &machine);
+        let (fleet, healed) = engine::atlas::sync_machines_healing(
+            store.as_ref(),
+            &gitmap,
+            &home_s,
+            &machine,
+            reupload_pending(&state, engine::atlas::MACHINES_KEY),
+        );
+        if healed {
+            state.files.remove(engine::atlas::MACHINES_KEY);
+        }
         if let Ok(b) = serde_json::to_vec(&fleet) {
             let _ = std::fs::write(machines_cache_path(paths), b);
         }
@@ -1196,11 +1234,7 @@ pub fn sync_now(
         }
         for id in &missing {
             for r in &atlas[*id] {
-                let p = r
-                    .strip_prefix("${HOME}")
-                    .map(|rest| format!("{home_s}{rest}"))
-                    .unwrap_or_else(|| r.clone());
-                candidates.push(std::path::PathBuf::from(p));
+                candidates.push(expand_atlas_root(r, &home_s));
             }
         }
         // Includes the parents of roots learned in earlier rounds — that is
@@ -1264,7 +1298,6 @@ pub fn sync_now(
     let home = dirs::home_dir().context("no home dir")?;
 
     let include_plugins = config.sync_plugins;
-    let mut state = engine::SyncState::load(&paths.state)?;
     let on = |id: &str| !config.disabled_tools.iter().any(|t| t == id);
     // Never sync a tool onto a machine where it isn't installed — pulling
     // would create its data dirs and make the machine "become" an OpenCode/
@@ -1332,6 +1365,9 @@ pub fn sync_now(
     phase("Scanning files…");
     let scan_t0 = std::time::Instant::now();
     let mut entries = Vec::new();
+    let mut scan_errors: Vec<String> = Vec::new();
+    let mut scan_failed: std::collections::HashSet<&str> = Default::default();
+    engine::scanner::clear_scan_skips();
     let scan_env =
         ScanEnv { home: &home, dirs: &dirs, tok: &tok, include_plugins, gitmap_trusted };
     for (t, (inst, enabled)) in tools.iter().zip(&tool_state) {
@@ -1341,7 +1377,18 @@ pub fn sync_now(
         }
         let before = entries.len();
         let t0 = std::time::Instant::now();
-        entries.extend(scan(&scan_env, &mut state)?);
+        // One tool's scan failing costs that tool's uploads this sync, not
+        // the whole sync — and never its deletion marks (below): an empty
+        // scan would read as "every file was deleted".
+        match scan(&scan_env, &mut state) {
+            Ok(found) => entries.extend(found),
+            Err(e) => {
+                dlog.error(format!("scan {} failed: {e:#}", t.id));
+                scan_errors.push(format!("{}: scan failed: {e:#}", t.id));
+                scan_failed.insert(t.id);
+                continue;
+            }
+        }
         dlog.info(format!(
             "scan {}: {} files in {} ms",
             t.id,
@@ -1349,31 +1396,41 @@ pub fn sync_now(
             t0.elapsed().as_millis()
         ));
     }
-    // Per-scope switches: drop disabled scopes from the push set.
-    let off: Vec<String> = config.disabled_scopes.clone();
-    entries.retain(|e| scope_of(&e.logical).map(|s| !off.iter().any(|o| o == s)).unwrap_or(true));
     // Deletion marking is one-way and permanently suppresses the pull, so it
     // runs only when the inputs it depends on are sound. An unreadable
     // project map re-keys every path (${GIT:id} -> ${EHOME}-...), which would
     // otherwise present as "every file under this prefix was deleted".
+    //
+    // It runs on the FULL scan, before the scope switches below filter it:
+    // marking after the filter recorded every file of a switched-off scope
+    // as deleted, and switching it back on never brought another update.
+    // Files the scan couldn't read are likewise not "deleted".
     if !gitmap_trusted {
         dlog.warn("project map unreadable — skipping deletion marking this sync".to_string());
     }
-    if claude_on && gitmap_trusted {
+    let mut mark_prefixes: Vec<String> = Vec::new();
+    if claude_on && gitmap_trusted && !scan_failed.contains("claude-code") {
         for dir in &dirs {
             for prefix in CLAUDE_CODE.logical_prefixes(include_plugins) {
-                let p = if dir == ".claude" {
+                mark_prefixes.push(if dir == ".claude" {
                     format!("claude/{prefix}")
                 } else {
                     format!("claude/profiles/{dir}/{prefix}")
-                };
-                state.mark_deletions(&p, &entries);
+                });
             }
         }
     }
-    if runs("vscode") && gitmap_trusted {
-        state.mark_deletions("vscode/ws", &entries);
+    if runs("vscode") && gitmap_trusted && !scan_failed.contains("vscode") {
+        mark_prefixes.push("vscode/ws".to_string());
     }
+    let off: Vec<String> = config.disabled_scopes.clone();
+    let mut entries = mark_deletions_then_filter_scopes(
+        &mut state,
+        entries,
+        &mark_prefixes,
+        &engine::scanner::scan_skips(),
+        &off,
+    );
 
     // ONE store listing for the whole sync — every pull below shares it.
     // (Each adapter used to list separately: 7+ full listings with per-object
@@ -1404,6 +1461,43 @@ pub fn sync_now(
                     "slowest file: {} took {ms} ms — repeated slow reads usually mean antivirus is scanning every file VibeSync opens",
                     path.display()
                 ));
+            }
+        }
+    }
+    // Self-heal, proactive half: once per encryption key, check this
+    // machine's own uploads against its current key (header bytes only).
+    // Anything it can't open was written under a passphrase it no longer
+    // uses — unreadable to the whole fleet — so the push below re-sends the
+    // local copy. Without this a corrected passphrase healed nothing: a
+    // machine never downloads its own objects, so it never noticed.
+    if let Some(key) = store.key_id() {
+        if state.own_checked_key.as_deref() != Some(key.as_str()) {
+            let me = canon_machine(&machine);
+            let t0 = std::time::Instant::now();
+            match engine::sync::stale_own_uploads(store.as_ref(), &listing, &|src| canon_machine(src) == me) {
+                Ok(check) if !check.key_matches_fleet() => {
+                    // This machine is the odd one out: re-sending its uploads
+                    // would re-encrypt the fleet's good copies under the
+                    // wrong key. The passphrase diagnosis says what to fix.
+                    dlog.warn(format!(
+                        "self-heal check: this computer's passphrase opens {} of {} sampled objects from \
+                         other computers — it doesn't match theirs, so nothing is re-uploaded",
+                        check.others_readable,
+                        check.others_readable + check.others_unreadable
+                    ));
+                    state.own_checked_key = Some(key);
+                }
+                Ok(check) => {
+                    let n = engine::sync::mark_for_reupload(&mut state, &check.stale);
+                    dlog.info(format!(
+                        "self-heal check: {} of this computer's objects unreadable with the current passphrase, {n} queued for re-upload ({} ms)",
+                        check.stale.len(),
+                        t0.elapsed().as_millis()
+                    ));
+                    state.own_checked_key = Some(key);
+                }
+                // Retried next sync; never blocks this one.
+                Err(e) => dlog.warn(format!("self-heal check skipped: {e:#}")),
             }
         }
     }
@@ -1465,13 +1559,36 @@ pub fn sync_now(
     phase("Uploading\u{2026}");
     dlog.info(format!("step: pushing changes ({:.1} MB to upload)", to_push_bytes as f64 / (1024.0 * 1024.0)));
     let push_t0 = std::time::Instant::now();
+    // Upload failures are per file. Only a store refusing upload after
+    // upload with nothing getting through — offline, revoked credentials —
+    // ends the sync, instead of grinding through every remaining file.
+    let mut refused_in_a_row = 0usize;
     for chunk in entries.chunks(10) {
         let r =
             engine::sync::push_with_listing(chunk, &mut state, store.as_ref(), &machine, &listing)?;
         push.pushed += r.pushed;
         push.unchanged += r.unchanged;
+        push.failed += r.failed;
+        if r.pushed > 0 {
+            refused_in_a_row = 0;
+        }
+        refused_in_a_row += r.failed;
+        if refused_in_a_row >= 5 {
+            // Keep what did get through, so the next sync doesn't redo it.
+            state.save(&paths.state)?;
+            anyhow::bail!(
+                "storage refused {refused_in_a_row} uploads in a row: {}",
+                r.last_error.unwrap_or_default()
+            );
+        }
         let d = done.fetch_add(chunk.len(), std::sync::atomic::Ordering::Relaxed) + chunk.len();
         report_progress(d);
+    }
+    if push.failed > 0 {
+        dlog.warn(format!(
+            "push: {} file(s) could not be uploaded — kept as they are, retried next sync",
+            push.failed
+        ));
     }
 
     {
@@ -1541,7 +1658,7 @@ pub fn sync_now(
         tick: &tick,
         record: &record_pull,
     };
-    let mut tool_errors: Vec<String> = Vec::new();
+    let mut tool_errors: Vec<String> = std::mem::take(&mut scan_errors);
     let mut parked_counts: std::collections::BTreeMap<String, usize> = Default::default();
     for (t, (inst, enabled)) in tools.iter().zip(&tool_state) {
         if !(*inst && *enabled) {
@@ -1663,23 +1780,30 @@ pub fn sync_now(
         };
     report_progress(total);
 
-    // Self-heal before saving state: an object THIS machine uploaded that it
-    // can no longer read was encrypted with a passphrase it no longer uses.
-    // The local file is the good copy, so forget the upload and let the next
-    // push redo it — otherwise the stale copy sits there unreadable to the
-    // whole fleet until someone edits state.json by hand.
+    // Self-heal, reactive half (the proactive check runs before push): an
+    // object THIS machine uploaded that a download here failed to decrypt was
+    // encrypted with a passphrase it no longer uses. The local file is the
+    // good copy, so queue it for re-upload. (Merely forgetting the upload
+    // didn't work: the next push "adopted" the unreadable copy right back,
+    // since the store's hash still matched the local file.)
     let unreadable_keys = engine::sync::take_unreadable();
-    let mine = engine::sync::own_unreadable(&unreadable_keys, &listing, &|src| {
-        canon_machine(src) == this_machine
-    });
+    let diagnosis = engine::sync::diagnose_passphrase(&unreadable_keys, &listing);
+    // Not when THIS machine holds the odd passphrase: then its own earlier
+    // uploads are the good ones, and re-sending would re-encrypt them under
+    // the wrong key.
+    let mine = if matches!(diagnosis, engine::sync::PassphraseDiagnosis::ThisMachine { .. }) {
+        Vec::new()
+    } else {
+        engine::sync::own_unreadable(&unreadable_keys, &listing, &|src| {
+            canon_machine(src) == this_machine
+        })
+    };
     if !mine.is_empty() {
-        for k in &mine {
-            state.files.remove(k);
-        }
+        engine::sync::mark_for_reupload(&mut state, &mine);
         dlog.warn(format!(
             "self-heal: {} object(s) uploaded by this computer are unreadable here — they were \
-             encrypted with a passphrase it no longer uses. Forgetting them so the next sync \
-             re-uploads the local copies with the current passphrase.",
+             encrypted with a passphrase it no longer uses. The next sync re-uploads the \
+             local copies with the current passphrase.",
             mine.len()
         ));
     }
@@ -1706,7 +1830,7 @@ pub fn sync_now(
     // whose passphrase is wrong, say which side must fix it, and say that
     // nothing is lost. Printed as a block so it cannot be missed in a log
     // full of routine lines.
-    match engine::sync::diagnose_passphrase(&unreadable_keys, &listing) {
+    match diagnosis {
         engine::sync::PassphraseDiagnosis::None => {}
         engine::sync::PassphraseDiagnosis::ThisMachine { unreadable, total, machines } => {
             let who = machines
@@ -1779,6 +1903,106 @@ pub fn sync_now(
 }
 
 /// Which user-facing scope a Claude logical path belongs to.
+/// An atlas root (`${HOME}`-relative, written by any machine) as a path on
+/// this machine. Atlas paths keep the publishing machine's separators: a
+/// Windows `${HOME}\dev\app` joined raw on macOS was one bogus folder name,
+/// so a clone at the same place was never found. Absolute foreign paths are
+/// left as they are.
+fn expand_atlas_root(r: &str, home: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        r.strip_prefix("${HOME}")
+            .map(|rest| format!("{home}{}", rest.replace(['\\', '/'], std::path::MAIN_SEPARATOR_STR)))
+            .unwrap_or_else(|| r.to_string()),
+    )
+}
+
+/// Registry fields the project map learns from, in order. `originCwd`
+/// first: a worktree session's `cwd` is the short-lived worktree, its
+/// `originCwd` the real clone — the clone must be what the map learns.
+const REGISTRY_CWD_KEYS: [&str; 2] = ["originCwd", "cwd"];
+
+/// Non-secret identity of a store: what decides "is this the same store?"
+/// when the setup is re-run. Secrets are excluded (the saved config holds
+/// keychain markers where a fresh setup holds the plaintext), and an Azure
+/// SAS URL counts without its query (the token rotates; the container
+/// doesn't).
+pub fn store_identity(s: &engine::StoreConfig) -> String {
+    match s {
+        engine::StoreConfig::Folder { path, .. } => format!("folder:{path}"),
+        engine::StoreConfig::S3 { endpoint, region, bucket, access_key_id, .. } => {
+            format!("s3:{endpoint}:{region}:{bucket}:{access_key_id}")
+        }
+        engine::StoreConfig::AzureSas { container_sas_url } => {
+            format!("azure:{}", container_sas_url.split('?').next().unwrap_or(""))
+        }
+    }
+}
+
+/// Everything that describes what THIS machine did with the OLD store, so a
+/// switch to a new one starts clean: sync state (what was uploaded) and the
+/// sidebar push gate (kept, it stopped every unchanged sidebar entry from
+/// ever reaching the new store).
+pub fn forget_store_scoped_state(paths: &Paths) {
+    let _ = std::fs::remove_file(&paths.state);
+    if let Some(dir) = paths.config.parent() {
+        let _ = std::fs::remove_file(dir.join("registry_push_gate.json"));
+    }
+}
+
+/// `.jsonl` files under `root`, never following a symlink (a loop would
+/// walk forever) — the onboarding session counts.
+pub fn count_jsonl(root: &std::path::Path) -> usize {
+    let mut n = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            let p = e.path();
+            if ft.is_dir() {
+                stack.push(p);
+            } else if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Wait before the next autosync attempt after `failures` failed ones in a
+/// row: 2, 4, 8 … minutes, never longer than the normal interval. A failed
+/// sync doesn't touch state.json, so the interval check alone retried an
+/// offline machine every minute — each with a full scan and a notification.
+pub fn autosync_retry_delay_secs(failures: u32, interval_secs: u64) -> i64 {
+    if failures == 0 {
+        return 0;
+    }
+    (60i64 << failures.min(10)).min(interval_secs as i64)
+}
+
+/// Record deletions, then apply the per-scope switches — in THIS order.
+///
+/// Marking sees the full scan. Marking after the scope filter recorded
+/// every file of a switched-off scope as deleted (the mark is one-way), and
+/// switching the scope back on never brought another update to those files.
+/// Paths the scan couldn't read (`unreadable`) are never marked. Returns
+/// the push set: the scan minus disabled scopes.
+fn mark_deletions_then_filter_scopes(
+    state: &mut engine::SyncState,
+    mut entries: Vec<engine::FileEntry>,
+    mark_prefixes: &[String],
+    unreadable: &[String],
+    disabled_scopes: &[String],
+) -> Vec<engine::FileEntry> {
+    for p in mark_prefixes {
+        state.mark_deletions_except(p, &entries, unreadable);
+    }
+    entries.retain(|e| {
+        scope_of(&e.logical).map(|s| !disabled_scopes.iter().any(|o| o == s)).unwrap_or(true)
+    });
+    entries
+}
+
 pub fn scope_of(logical: &str) -> Option<&'static str> {
     let rest = logical.strip_prefix("claude/")?;
     let rest = match rest.strip_prefix("profiles/") {
@@ -1794,6 +2018,14 @@ pub fn scope_of(logical: &str) -> Option<&'static str> {
         }
         _ => return None, // plugins/registry have their own flags
     })
+}
+
+/// A self-heal check marked `key` (one of this machine's uploads) for
+/// re-upload: its store copy is encrypted under a passphrase this machine no
+/// longer uses. Files are re-sent by push; the shared project tables, which
+/// aren't files, read this before they publish.
+fn reupload_pending(state: &engine::SyncState, key: &str) -> bool {
+    state.reupload_pending(key)
 }
 
 /// Hostnames flap between mDNS suffixes on macOS (Foo.local / Foo.lan /
@@ -1983,7 +2215,7 @@ fn scan_copilot(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engi
 fn scan_shared(env: &ScanEnv, state: &mut engine::SyncState) -> Result<Vec<engine::FileEntry>> {
     let out = engine::adapters::SHARED_SKILLS.scan(env.home, env.tok, false)?;
     if env.gitmap_trusted {
-        state.mark_deletions("shared/skills", &out);
+        state.mark_deletions_except("shared/skills", &out, &engine::scanner::scan_skips());
     }
     Ok(out)
 }
@@ -2228,18 +2460,40 @@ fn claude_desktop_present() -> bool {
 }
 
 /// First <org>/<user> directory two levels below `base`, if any.
+/// With several accounts there are several `<org>/<user>` dirs, and "the
+/// first" was whatever order the OS listed them in — so the push sweep could
+/// work against a different account from one sync to the next. The most
+/// recently written one is the account in use. One unreadable org dir no
+/// longer hides the rest.
 fn first_org_user_dir(base: &std::path::Path) -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for org in std::fs::read_dir(base).ok()?.flatten() {
         if !org.path().is_dir() {
             continue;
         }
-        for user in std::fs::read_dir(org.path()).ok()?.flatten() {
-            if user.path().is_dir() {
-                return Some(user.path());
+        let Ok(users) = std::fs::read_dir(org.path()) else { continue };
+        for user in users.flatten() {
+            let p = user.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let t = newest_mtime(&p);
+            if best.as_ref().map(|(bt, _)| t > *bt).unwrap_or(true) {
+                best = Some((t, p));
             }
         }
     }
-    None
+    best.map(|(_, p)| p)
+}
+
+fn newest_mtime(dir: &std::path::Path) -> std::time::SystemTime {
+    let own = std::fs::metadata(dir).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .fold(own, |a, b| a.max(b))
 }
 
 /// The transcript a registry entry points at: <projects>/<encode(cwd)>/<cli>.jsonl.
@@ -2264,7 +2518,12 @@ fn backup_registry(
     let _ = std::fs::create_dir_all(&backup);
     for (_, (_, p)) in local {
         if let Some(name) = p.file_name() {
-            let _ = std::fs::copy(p, backup.join(name));
+            // The FIRST copy is the original. Re-copying on every writing run
+            // overwrote it with an entry this code had already merged into.
+            let dest = backup.join(name);
+            if !dest.exists() {
+                let _ = std::fs::copy(p, dest);
+            }
         }
     }
 }
@@ -2686,6 +2945,216 @@ fn sync_registry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(logical: &str) -> engine::FileEntry {
+        engine::FileEntry {
+            logical: logical.into(),
+            abs: PathBuf::from("/x"),
+            size: 1,
+            mtime_ms: 1,
+            hash: "h".into(),
+        }
+    }
+
+    fn tracked(keys: &[&str]) -> engine::SyncState {
+        let mut s = engine::SyncState::default();
+        for k in keys {
+            s.files.insert(
+                k.to_string(),
+                engine::FileState { hash: "h".into(), mtime_ms: 1, size: 1, deleted_locally: false },
+            );
+        }
+        s
+    }
+
+    /// The scope-switch bug: switching "sessions" off for one sync marked
+    /// every tracked session deleted, and no update ever arrived again.
+    #[test]
+    fn a_switched_off_scope_is_filtered_from_push_but_never_marked_deleted() {
+        let mut state = tracked(&[
+            "claude/projects/p/a.jsonl",
+            "claude/projects/p/gone.jsonl",
+            "claude/plans/x.md",
+        ]);
+        let scan = vec![entry("claude/projects/p/a.jsonl"), entry("claude/plans/x.md")];
+        let push = mark_deletions_then_filter_scopes(
+            &mut state,
+            scan,
+            &["claude/projects".into(), "claude/plans".into()],
+            &[],
+            &["sessions".into()],
+        );
+        assert_eq!(push.iter().map(|e| e.logical.as_str()).collect::<Vec<_>>(), ["claude/plans/x.md"]);
+        assert!(!state.files["claude/projects/p/a.jsonl"].deleted_locally, "switched off ≠ deleted");
+        assert!(state.files["claude/projects/p/gone.jsonl"].deleted_locally, "really gone is still recorded");
+        assert!(!state.files["claude/plans/x.md"].deleted_locally);
+    }
+
+    #[test]
+    fn unreadable_paths_are_never_marked_deleted_by_the_sync_step() {
+        let mut state = tracked(&["claude/projects/locked/a.jsonl"]);
+        mark_deletions_then_filter_scopes(
+            &mut state,
+            vec![],
+            &["claude/projects".into()],
+            &["claude/projects/locked".into()],
+            &[],
+        );
+        assert!(!state.files["claude/projects/locked/a.jsonl"].deleted_locally);
+    }
+
+    #[test]
+    fn store_identity_ignores_secrets_and_the_sas_token() {
+        let s3 = |secret: &str| engine::StoreConfig::S3 {
+            endpoint: "https://x.r2".into(),
+            region: "auto".into(),
+            bucket: "b".into(),
+            access_key_id: "AK".into(),
+            secret_access_key: secret.into(),
+        };
+        assert_eq!(store_identity(&s3("@keychain")), store_identity(&s3("plaintext")));
+        let az = |q: &str| engine::StoreConfig::AzureSas { container_sas_url: format!("https://a.blob/c?{q}") };
+        assert_eq!(store_identity(&az("sig=old")), store_identity(&az("sig=new")));
+        assert!(!store_identity(&az("sig=secret")).contains("secret"));
+        let folder = |p: &str| engine::StoreConfig::Folder { path: p.into(), encrypted: false };
+        assert_ne!(store_identity(&folder("/a")), store_identity(&folder("/b")));
+    }
+
+    #[test]
+    fn switching_stores_forgets_state_and_the_sidebar_push_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths { config: tmp.path().join("config.json"), state: tmp.path().join("state.json") };
+        for f in ["state.json", "registry_push_gate.json", "config.json", "git_roots.json"] {
+            std::fs::write(tmp.path().join(f), "{}").unwrap();
+        }
+        forget_store_scoped_state(&paths);
+        assert!(!paths.state.exists());
+        assert!(!tmp.path().join("registry_push_gate.json").exists());
+        // Machine-local knowledge survives a store switch.
+        assert!(paths.config.exists() && tmp.path().join("git_roots.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_counting_survives_a_symlink_loop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("projects/a");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("s1.jsonl"), "").unwrap();
+        std::fs::write(p.join("notes.md"), "").unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("projects"), p.join("loop")).unwrap();
+        assert_eq!(count_jsonl(&tmp.path().join("projects")), 1);
+        assert_eq!(count_jsonl(&tmp.path().join("missing")), 0);
+    }
+
+    #[test]
+    fn autosync_backs_off_after_failures_up_to_the_interval() {
+        let interval = 15 * 60;
+        let delays: Vec<i64> = (0..6).map(|n| autosync_retry_delay_secs(n, interval)).collect();
+        assert_eq!(delays, [0, 120, 240, 480, 900, 900]);
+        assert_eq!(autosync_retry_delay_secs(40, interval), 900, "no overflow on long outages");
+        assert_eq!(autosync_retry_delay_secs(3, 60), 60, "short interval caps it");
+    }
+
+    fn temp_paths(dir: &std::path::Path) -> Paths {
+        Paths { config: dir.join("config.json"), state: dir.join("state.json") }
+    }
+
+    #[test]
+    fn config_saves_are_atomic_and_private() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = temp_paths(tmp.path());
+        let cfg = default_config().unwrap();
+        save_config(&paths, &cfg).unwrap();
+        assert!(load_config(&paths).unwrap().is_some());
+        let names: Vec<String> =
+            std::fs::read_dir(tmp.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["config.json"], "no temp file left behind");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&paths.config).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    /// Two quick toggles used to race load -> modify -> save, and the later
+    /// save dropped the earlier change.
+    #[test]
+    fn concurrent_settings_changes_are_all_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = temp_paths(tmp.path());
+        save_config(&paths, &default_config().unwrap()).unwrap();
+        std::thread::scope(|s| {
+            for i in 0..12 {
+                let paths = &paths;
+                s.spawn(move || {
+                    let _cfg_lock = config_lock();
+                    let mut cfg = load_config(paths).unwrap().unwrap();
+                    cfg.disabled_tools.push(format!("tool-{i}"));
+                    save_config(paths, &cfg).unwrap();
+                });
+            }
+        });
+        let cfg = load_config(&paths).unwrap().unwrap();
+        assert_eq!(cfg.disabled_tools.len(), 12, "{:?}", cfg.disabled_tools);
+    }
+
+    #[test]
+    fn the_first_sidebar_backup_is_the_one_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = temp_paths(tmp.path());
+        let entry = tmp.path().join("local_abc.json");
+        std::fs::write(&entry, "original").unwrap();
+        let mut local = std::collections::HashMap::new();
+        local.insert("abc".to_string(), (serde_json::json!({}), entry.clone()));
+        backup_registry(&paths, &local);
+        std::fs::write(&entry, "merged by vibesync").unwrap();
+        backup_registry(&paths, &local);
+        let kept = std::fs::read_to_string(tmp.path().join("registry-backup/local_abc.json")).unwrap();
+        assert_eq!(kept, "original");
+    }
+
+    #[test]
+    fn the_most_recently_used_account_dir_is_picked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("org1/userA");
+        let new = tmp.path().join("org2/userB");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("local_1.json"), "{}").unwrap();
+        std::fs::write(new.join("local_2.json"), "{}").unwrap();
+        let t = |secs| filetime::FileTime::from_unix_time(secs, 0);
+        filetime::set_file_mtime(old.join("local_1.json"), t(1_000)).unwrap();
+        filetime::set_file_mtime(&old, t(1_000)).unwrap();
+        filetime::set_file_mtime(new.join("local_2.json"), t(9_000)).unwrap();
+        filetime::set_file_mtime(&new, t(9_000)).unwrap();
+        assert_eq!(first_org_user_dir(tmp.path()), Some(new));
+        assert_eq!(first_org_user_dir(&tmp.path().join("missing")), None);
+    }
+
+    #[test]
+    fn atlas_roots_from_any_platform_expand_with_local_separators() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let home = if cfg!(windows) { "C:\\Users\\me" } else { "/Users/me" };
+        let want = format!("{home}{sep}dev{sep}app");
+        assert_eq!(expand_atlas_root("${HOME}\\dev\\app", home), PathBuf::from(&want));
+        assert_eq!(expand_atlas_root("${HOME}/dev/app", home), PathBuf::from(&want));
+        assert_eq!(expand_atlas_root("D:\\elsewhere", home), PathBuf::from("D:\\elsewhere"));
+    }
+
+    #[test]
+    fn the_project_map_learns_a_sessions_origin_before_its_cwd() {
+        assert_eq!(REGISTRY_CWD_KEYS, ["originCwd", "cwd"]);
+    }
+
+    #[test]
+    fn a_pending_reupload_is_seen_for_the_shared_tables() {
+        let mut state = engine::SyncState::default();
+        assert!(!reupload_pending(&state, engine::atlas::MACHINES_KEY));
+        engine::sync::mark_for_reupload(&mut state, &[engine::atlas::MACHINES_KEY.to_string()]);
+        assert!(reupload_pending(&state, engine::atlas::MACHINES_KEY));
+    }
 
     #[test]
     fn debug_log_caps_itself_mid_run_and_keeps_two_generations() {

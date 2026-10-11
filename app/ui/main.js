@@ -224,9 +224,9 @@ function applySettings(s) {
 		const sub = li.querySelector(".coderoot-path");
 		sub.textContent = path;
 		sub.title = path;
-		li.querySelector("button").addEventListener("click", async () => {
-			applySettings(await invoke("remove_code_root", { path }));
-		});
+		li.querySelector("button").addEventListener("click", () =>
+			invoke("remove_code_root", { path }).then(applySettings, (e) => setSubText(String(e))),
+		);
 		cul.appendChild(li);
 	}
 	const ul = $("mapping-list");
@@ -237,12 +237,12 @@ function applySettings(s) {
 	for (const [name, path] of entries) {
 		const li = document.createElement("li");
 		li.innerHTML = `
-      <div class="tlabel">${name}<span class="tsub mapping-path-sub"></span></div>
+      <div class="tlabel">${esc(name)}<span class="tsub mapping-path-sub"></span></div>
       <button class="row-btn danger" aria-label="Remove mapping">Remove</button>`;
 		li.querySelector(".mapping-path-sub").textContent = path;
-		li.querySelector("button").addEventListener("click", async () => {
-			applySettings(await invoke("remove_project_mapping", { name }));
-		});
+		li.querySelector("button").addEventListener("click", () =>
+			invoke("remove_project_mapping", { name }).then(applySettings, (e) => setSubText(String(e))),
+		);
 		ul.appendChild(li);
 	}
 	renderStatusLine();
@@ -351,8 +351,19 @@ function fmtClock(ms) {
 
 // Remote-controlled strings (machine names from the store) must never reach
 // innerHTML raw.
-const esc = (s) =>
-	String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const { esc } = globalThis.VibeSyncUI; // ui-logic.js
+
+// A settings switch whose write fails must not keep showing a state the
+// backend never took: flip it back and say why (ui-logic.js).
+function applySwitch(input, call) {
+	return globalThis.VibeSyncUI.applySwitch(input, call, {
+		onOk: (s) => {
+			status = s;
+			renderAll();
+		},
+		onError: (e) => setSubText(String(e)),
+	});
+}
 
 // "+N new · 16:04" chip for a tool/shared card with unseen synced items.
 // When the tool's GUI was running while they arrived (and hasn't restarted
@@ -366,7 +377,9 @@ function newBadge(count, ms, seen, restartName) {
 function renderStatusLine() {
 	if (!status || !status.configured) return;
 	const when = status.lastSyncMs ? syncStamp(status.lastSyncMs) : "never";
-	const loc = status.storeDesc || "not set";
+	// Built from folder names, which can contain markup characters (macOS
+	// allows them) — escaped like every other store-derived string here.
+	const loc = esc(status.storeDesc || "not set");
 	let auto = "";
 	if (autosyncOn === false) {
 		auto = `<span class="kv-label">Auto-sync:</span> off`;
@@ -431,13 +444,11 @@ function renderAll() {
 			li.querySelector("label.switch").addEventListener("click", (e) =>
 				e.stopPropagation(),
 			);
-			li.querySelector("input").addEventListener("change", async (e) => {
-				status = await invoke("set_tool_enabled", {
-					id: t.id,
-					enabled: e.target.checked,
-				});
-				renderAll();
-			});
+			li.querySelector("input").addEventListener("change", (e) =>
+				applySwitch(e.target, () =>
+					invoke("set_tool_enabled", { id: t.id, enabled: e.target.checked }),
+				),
+			);
 			li.addEventListener("click", () => openTool(t));
 		}
 		ul.appendChild(li);
@@ -461,13 +472,11 @@ function renderAll() {
 		sl.querySelector("label.switch").addEventListener("click", (e) =>
 			e.stopPropagation(),
 		);
-		sl.querySelector("input").addEventListener("change", async (e) => {
-			status = await invoke("set_scope_enabled", {
-				scope: "shared",
-				enabled: e.target.checked,
-			});
-			renderAll();
-		});
+		sl.querySelector("input").addEventListener("change", (e) =>
+			applySwitch(e.target, () =>
+				invoke("set_scope_enabled", { scope: "shared", enabled: e.target.checked }),
+			),
+		);
 		if (status.sharedNew > 0 && !status.sharedNewSeen) {
 			sl.querySelector("li").addEventListener("click", () => {
 				invoke("ack_new", { id: "shared" })
@@ -484,7 +493,12 @@ function renderAll() {
       <div class="tlabel"><span class="tname">Global Skills</span><span class="tsub">No skills folder on this ${DEVICE} yet.<br>Path: ${SKILLS_PATH} — press Create to make it.</span></div>
       <button class="row-btn" id="create-skills">Create</button>`;
 		sl.querySelector("#create-skills").addEventListener("click", async () => {
-			status = await invoke("create_skills_dir");
+			try {
+				status = await invoke("create_skills_dir");
+			} catch (e) {
+				setSubText(String(e));
+				return;
+			}
 			renderAll();
 		});
 	}
@@ -655,23 +669,18 @@ function openTool(t) {
 		li.innerHTML = `
       <div class="tlabel">${s.name}<span class="tsub">${s.sub}</span></div>
       <label class="switch"><input type="checkbox" ${s.on ? "checked" : ""} /><span class="knob"></span></label>`;
-		li.querySelector("input").addEventListener("change", async (e) => {
-			status = s.tool
-				? await invoke("set_tool_enabled", {
-						id: s.tool,
-						enabled: e.target.checked,
-					})
-				: await invoke("set_scope_enabled", {
-						scope: s.scope,
-						enabled: e.target.checked,
-					});
-			renderAll();
-		});
+		li.querySelector("input").addEventListener("change", (e) =>
+			applySwitch(e.target, () =>
+				s.tool
+					? invoke("set_tool_enabled", { id: s.tool, enabled: e.target.checked })
+					: invoke("set_scope_enabled", { scope: s.scope, enabled: e.target.checked }),
+			),
+		);
 		ul.appendChild(li);
 	}
 	$("tool-storage").innerHTML = `
     <div><span>Last activity</span><b>${t.lastActivityMs ? syncStamp(t.lastActivityMs) : "—"}</b></div>
-    <div><span>Store</span><b>${status.storeDesc || "—"}</b></div>
+    <div><span>Store</span><b>${esc(status.storeDesc || "—")}</b></div>
     <div><span>Adapter</span><b>${t.id}</b></div>`;
 	goTo(1);
 }
@@ -906,22 +915,22 @@ window.addEventListener("DOMContentLoaded", async () => {
 	}
 
 	// Onboarding finished → default store + real first sync.
+	// The assistant saves the storage itself and only reports back once that
+	// succeeded — it used to close first and leave this window to discover a
+	// failed save, where the next status refresh painted over the error.
 	tauri?.event.listen("setup-complete", async (e) => {
+		const choice = e.payload || {};
+		try {
+			status = choice.storeSaved
+				? await invoke("get_status")
+				: await invoke("configure_default_store");
+		} catch (err) {
+			setSubText(String(err));
+			return;
+		}
 		localStorage.setItem("setupDone", "1");
 		setPending(false);
 		invoke("show_popover");
-		const choice = e.payload || {};
-		try {
-			status = choice.store
-				? await invoke("set_store", {
-						store: choice.store,
-						passphrase: choice.passphrase ?? null,
-					})
-				: await invoke("configure_default_store");
-		} catch (err) {
-			$("substatus").textContent = String(err);
-			return;
-		}
 		for (const id of choice.disabledTools || []) {
 			try {
 				status = await invoke("set_tool_enabled", { id, enabled: false });

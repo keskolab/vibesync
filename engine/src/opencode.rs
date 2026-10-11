@@ -27,7 +27,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::dbsync::{expand_field, max_time_of, max_time_of_json, query_maps, tokenize_field};
+use crate::dbsync::{
+    child_rows, expand_field, max_time_of, max_time_of_json, merge_row, query_maps, table_exists,
+    tokenize_field, RowTally, RowVersion,
+};
 use crate::scanner::{hash_bytes, hash_file, mtime_ms, FileEntry};
 use crate::state::{FileState, SyncState};
 use crate::store::{RemoteMeta, SyncStore};
@@ -175,23 +178,44 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
                 continue;
             }
         }
-        if abs.exists() {
-            if hash_file(&abs)? == meta.hash {
-                report.unchanged += 1;
-                continue;
-            }
-            if mtime_ms(&abs)? > meta.mtime_ms {
-                report.skipped_newer_local += 1;
-                continue;
+        // Every failure below is this file's problem, not the pass's: skip,
+        // count, leave state untracked so the next sync retries it.
+        let local_exists = abs.exists();
+        if local_exists {
+            match hash_file(&abs).and_then(|h| Ok((h, mtime_ms(&abs)?))) {
+                Ok((h, _)) if h == meta.hash => {
+                    report.unchanged += 1;
+                    continue;
+                }
+                Ok((_, m)) if m > meta.mtime_ms => {
+                    report.skipped_newer_local += 1;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    crate::dlog::warn(|| format!("cannot read local {}: {e:#} — skipping", abs.display()));
+                    report.failed += 1;
+                    continue;
+                }
             }
         }
         let Some(data) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent)?;
+        // Local loses: keep its bytes beside it first. No backup, no
+        // overwrite — "nothing is ever lost" outranks applying this file.
+        if local_exists {
+            if let Err(e) = crate::sync::backup_sibling(&abs) {
+                crate::dlog::warn(|| {
+                    format!("cannot back up {}: {e:#} — leaving local copy alone", abs.display())
+                });
+                report.failed += 1;
+                continue;
+            }
         }
-        let tmp = abs.with_extension("vibesync-tmp");
-        std::fs::write(&tmp, &data)?;
-        std::fs::rename(&tmp, &abs)?;
+        if let Err(e) = write_atomic(&abs, &data) {
+            crate::dlog::warn(|| format!("cannot write {}: {e:#} — skipping, retried next sync", abs.display()));
+            report.failed += 1;
+            continue;
+        }
         state.files.insert(
             logical.clone(),
             FileState { hash: meta.hash.clone(), mtime_ms: meta.mtime_ms, size: meta.size, deleted_locally: false },
@@ -202,9 +226,24 @@ pub fn apply(home: &Path, state: &mut SyncState, store: &dyn SyncStore, listing:
     Ok(report)
 }
 
+
+/// Temp file + atomic rename; the temp file never outlives a failure, so a
+/// half-written pull can't be mistaken for content.
+fn write_atomic(abs: &Path, data: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tmp = abs.file_name().unwrap_or_default().to_os_string();
+    tmp.push(".vibesync-tmp");
+    let tmp = abs.with_file_name(tmp);
+    let r = std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, abs));
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
+
 pub const DB_PREFIX: &str = "opencode/db";
-
-
 
 fn db_path(home: &Path) -> Option<PathBuf> {
     data_root(home).map(|r| r.join("opencode.db")).filter(|p| p.exists())
@@ -259,15 +298,30 @@ pub fn db_push(
         &db,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )?;
+    if !table_exists(&conn, "session") {
+        crate::dlog::warn(|| format!("opencode db: {} has no session table — nothing to export", db.display()));
+        return Ok(0);
+    }
     // Short-circuit: exporting every session (plus messages/parts) each sync
     // is wasted work when nothing moved. "Nothing moved" must cover BOTH
     // sides: one summary row for the local db, plus the store's current
     // opencode/db object set — so store-side changes re-trigger a full pass.
+    // A table or column this OpenCode version lacks counts as 0 instead of
+    // failing every export.
+    let count_of = |t: &str| {
+        if table_exists(&conn, t) { format!("(SELECT COUNT(*) FROM {t})") } else { "0".to_string() }
+    };
+    let newest = if crate::dbsync::has_column(&conn, "session", "time_updated") {
+        "(SELECT COALESCE(MAX(time_updated),0) FROM session)"
+    } else {
+        "0"
+    };
     let summary: (i64, i64, i64, i64) = conn.query_row(
-        "SELECT (SELECT COUNT(*) FROM session),
-                (SELECT COALESCE(MAX(time_updated),0) FROM session),
-                (SELECT COUNT(*) FROM message),
-                (SELECT COUNT(*) FROM part)",
+        &format!(
+            "SELECT (SELECT COUNT(*) FROM session), {newest}, {}, {}",
+            count_of("message"),
+            count_of("part")
+        ),
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
@@ -331,11 +385,15 @@ pub fn db_push(
     store_set.sort();
     let summary_hash = hash_bytes(format!("{summary:?}|{}", store_set.join(";")).as_bytes());
     const SUMMARY_KEY: &str = "opencode/db#local-summary";
-    if state.files.get(SUMMARY_KEY).map(|s| s.hash == summary_hash).unwrap_or(false) {
+    // ...unless a self-heal re-upload is waiting (state::REUPLOAD).
+    if !state.any_reupload_pending(DB_PREFIX)
+        && state.files.get(SUMMARY_KEY).map(|s| s.hash == summary_hash).unwrap_or(false)
+    {
         crate::dlog::debug(|| "opencode db: db and store unchanged since last export — skipping".to_string());
         return Ok(0);
     }
     let sessions = query_maps(&conn, "SELECT * FROM session", &[])?;
+    let has_project = table_exists(&conn, "project");
     let mut pushed = 0;
     let mut unchanged = 0;
     for mut session in sessions {
@@ -345,13 +403,12 @@ pub fn db_push(
         let project = session
             .get("project_id")
             .and_then(|v| v.as_str())
+            .filter(|_| has_project)
             .map(|pid| query_maps(&conn, "SELECT * FROM project WHERE id = ?1", &[&pid]))
             .transpose()?
             .and_then(|mut v| v.pop());
-        let messages =
-            query_maps(&conn, "SELECT * FROM message WHERE session_id = ?1 ORDER BY id", &[&id])?;
-        let parts =
-            query_maps(&conn, "SELECT * FROM part WHERE session_id = ?1 ORDER BY id", &[&id])?;
+        let messages = child_rows(&conn, "message", "session_id", &id, &["id"])?;
+        let parts = child_rows(&conn, "part", "session_id", &id, &["id"])?;
         tokenize_field(&mut session, "directory", tok);
         let local_eff = session
             .get("time_updated")
@@ -378,7 +435,9 @@ pub fn db_push(
         // Versions are OpenCode's wall-clock stamps — with badly skewed
         // machine clocks, last-writer-wins can briefly favor the wrong copy,
         // the same trade OpenCode itself makes.
-        if let Some((rhash, rmtime)) = remote.get(logical.as_str()) {
+        // A queued self-heal re-upload is sent whatever the store holds.
+        let force = state.reupload_pending(&logical);
+        if let (false, Some((rhash, rmtime))) = (force, remote.get(logical.as_str())) {
             if *rmtime > 0 && (*rhash == hash || *rmtime >= local_eff) {
                 unchanged += 1;
                 continue;
@@ -410,11 +469,115 @@ pub fn db_push(
     Ok(pushed)
 }
 
+/// Outcome of merging one session export.
+enum SessionMerge {
+    /// The remote copy was newer: its rows merged in.
+    Merged(RowTally),
+    /// The local copy is same or newer and stays — yet rows only the remote
+    /// has were still added (a "kept" verdict must not hide them forever).
+    Kept(RowTally),
+}
+
+/// Merge one session export in ONE transaction (`BEGIN IMMEDIATE`): all of
+/// it lands or none of it does. Without that, a failure halfway left the
+/// session row stamped with the newest time and its children missing — and
+/// the retry then saw "local is up to date" and never completed it.
+fn merge_session(
+    c: &mut rusqlite::Connection,
+    obj: &mut serde_json::Value,
+    id: &str,
+    remote_ses_t: i64,
+    remote_eff: i64,
+    ses_dir: &str,
+    tok: &Tokenizer,
+) -> Result<SessionMerge> {
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !table_exists(&tx, "session") {
+        anyhow::bail!("opencode.db has no session table");
+    }
+    let local_ses_t = query_maps(&tx, "SELECT * FROM session WHERE id = ?1", &[&id])?
+        .pop()
+        .map(|r| r.get("time_updated").and_then(|v| v.as_i64()).unwrap_or(0));
+    let kept = match local_ses_t {
+        Some(local_t) => {
+            let local_child: i64 = tx
+                .query_row(
+                    "SELECT COALESCE((SELECT MAX(MAX(time_created, time_updated)) FROM message WHERE session_id = ?1), 0),
+                            COALESCE((SELECT MAX(MAX(time_created, time_updated)) FROM part WHERE session_id = ?1), 0)",
+                    [id],
+                    |r| Ok(std::cmp::max(r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .unwrap_or(0);
+            local_t.max(local_child) >= remote_eff
+        }
+        None => false,
+    };
+    if !kept {
+        crate::dlog::debug(|| format!("opencode db: merging session {id} into opencode.db"));
+        // OpenCode's project ids are repo-derived and identical across
+        // machines, but each machine clones the repo wherever it likes
+        // (live-verified 2026-07-12: two Macs, one repo, two paths, same
+        // id). When this project already exists here at a different
+        // worktree, a root-anchored session is relocated to the local clone
+        // so OpenCode lists it there.
+        let mut relocate: Option<String> = None;
+        if let Some(project) = obj.get_mut("project").and_then(|p| p.as_object_mut()) {
+            expand_field(project, "worktree", tok);
+            let pid = project.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let remote_worktree =
+                project.get("worktree").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if pid != "global" && !remote_worktree.is_empty() && ses_dir == remote_worktree {
+                if let Ok(lw) = tx.query_row(
+                    "SELECT worktree FROM project WHERE id = ?1",
+                    [&pid],
+                    |r| r.get::<_, String>(0),
+                ) {
+                    if lw != ses_dir && Path::new(&lw).is_dir() {
+                        relocate = Some(lw);
+                    }
+                }
+            }
+            crate::dbsync::insert_map_pk(&tx, "project", project, false, &["id"])?; // never clobber a local project row
+        }
+        if let Some(lw) = &relocate {
+            crate::dlog::debug(|| format!("opencode db: {id} relocated to local clone {lw}"));
+            if let Some(sm) = obj.get_mut("session").and_then(|v| v.as_object_mut()) {
+                sm.insert("directory".to_string(), serde_json::Value::String(lw.clone()));
+            }
+        }
+        let session = obj.get("session").and_then(|s| s.as_object()).unwrap();
+        // Replace the session ROW only when the remote row itself is newer —
+        // a remote that wins on child-row activity alone must not revert
+        // local session metadata (title, archive state, ...).
+        if local_ses_t.is_none_or(|t| remote_ses_t > t) {
+            crate::dbsync::insert_map_pk(&tx, "session", session, true, &["id"])?;
+        }
+    }
+    // Messages and parts merge row by row on their own timestamps, in BOTH
+    // outcomes: a local row is only ever replaced by a strictly newer copy
+    // of itself, and a kept session still gains the rows only the remote
+    // has. Messages first — parts reference them.
+    let version = RowVersion::Columns(&["time_created", "time_updated"]);
+    let mut rows = RowTally::default();
+    for (key, table) in [("messages", "message"), ("parts", "part")] {
+        for row in obj.get(key).and_then(|v| v.as_array()).into_iter().flatten() {
+            if let Some(row) = row.as_object() {
+                rows.add(merge_row(&tx, table, row, &["id"], version)?);
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(if kept { SessionMerge::Kept(rows) } else { SessionMerge::Merged(rows) })
+}
+
 /// Merge foreign sessions into opencode.db: insert missing, update only when
 /// the remote is newer (max timestamp across session+messages+parts; the
-/// session row itself is replaced only if the remote ROW is newer), never
-/// delete. The db is backed up once (`opencode.db.vibesync-bak`) before this
-/// build's first-ever write.
+/// session row itself is updated only if the remote ROW is newer, and each
+/// message/part only by a strictly newer copy of itself), never delete.
+/// Each session merges in one transaction; one that fails is skipped,
+/// counted and retried next sync. The db is backed up once
+/// (`opencode.db.vibesync-bak`, a consistent snapshot) before this build's
+/// first-ever write — if that backup fails, nothing is written.
 pub fn db_apply(
     home: &Path,
     tok: &Tokenizer,
@@ -452,10 +615,15 @@ pub fn db_apply(
             }
         }
         let Some(bytes) = crate::sync::fetch_obj(store, logical, &mut report.failed) else { continue };
-        let Ok(mut obj) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
-        let Some(session) = obj.get_mut("session").and_then(|s| s.as_object_mut()) else {
-            continue;
+        let mut obj = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(v) if v.get("session").is_some_and(|s| s.is_object()) => v,
+            _ => {
+                crate::dlog::warn(|| format!("opencode db: {logical} is not a readable session export — skipping"));
+                report.failed += 1;
+                continue;
+            }
         };
+        let session = obj.get_mut("session").and_then(|s| s.as_object_mut()).unwrap();
         expand_field(session, "directory", tok);
         if session
             .get("directory")
@@ -472,37 +640,32 @@ pub fn db_apply(
             session.get("id").and_then(|v| v.as_str()).map(String::from),
             session.get("time_updated").and_then(|v| v.as_i64()),
         ) else {
+            crate::dlog::warn(|| format!("opencode db: {logical} lacks a session id/time_updated — skipping"));
+            report.failed += 1;
             continue;
         };
         let ses_dir = session.get("directory").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let remote_eff = remote_ses_t
             .max(max_time_of_json(obj.get("messages")))
             .max(max_time_of_json(obj.get("parts")));
-        // Open lazily + back up before the first write of this build's life.
+        // Open lazily; the one-time backup precedes this build's first-ever
+        // write, and when it fails nothing is written this sync.
         if conn.is_none() {
-            let bak = db.with_extension("db.vibesync-bak");
-            if !bak.exists() {
-                let _ = std::fs::copy(&db, &bak);
-            }
-            let c = rusqlite::Connection::open(&db)?;
-            c.busy_timeout(std::time::Duration::from_millis(1500))?;
-            conn = Some(c);
+            conn = Some(crate::dbsync::open_for_merge(&db)?);
         }
-        let c = conn.as_ref().unwrap();
-        let local_ses_t: Option<i64> = c
-            .query_row("SELECT time_updated FROM session WHERE id = ?1", [&id], |r| r.get(0))
-            .ok();
-        if let Some(local_t) = local_ses_t {
-            let local_child: i64 = c
-                .query_row(
-                    "SELECT COALESCE((SELECT MAX(MAX(time_created, time_updated)) FROM message WHERE session_id = ?1), 0),
-                            COALESCE((SELECT MAX(MAX(time_created, time_updated)) FROM part WHERE session_id = ?1), 0)",
-                    [&id],
-                    |r| Ok(std::cmp::max(r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-                )
-                .unwrap_or(0);
-            if local_t.max(local_child) >= remote_eff {
-                crate::dlog::debug(|| format!("opencode db: {id} kept — local copy is same or newer"));
+        let c = conn.as_mut().unwrap();
+        // One session's failure (a lock held too long, a constraint its rows
+        // break) costs that session only: rolled back, counted, untracked
+        // so the next sync retries it.
+        let rows = match merge_session(c, &mut obj, &id, remote_ses_t, remote_eff, &ses_dir, tok) {
+            Ok(SessionMerge::Merged(rows)) => rows,
+            Ok(SessionMerge::Kept(rows)) => {
+                crate::dlog::debug(|| {
+                    format!(
+                        "opencode db: {id} kept — local copy is same or newer ({} remote-only row(s) added, {} filled/updated)",
+                        rows.added, rows.updated
+                    )
+                });
                 report.skipped_newer_local += 1;
                 state.files.insert(
                     logical.clone(),
@@ -510,55 +673,16 @@ pub fn db_apply(
                 );
                 continue;
             }
-        }
-        crate::dlog::debug(|| format!("opencode db: merging session {id} into opencode.db"));
-        // OpenCode's project ids are repo-derived and identical across
-        // machines, but each machine clones the repo wherever it likes
-        // (live-verified 2026-07-12: two Macs, one repo, two paths, same
-        // id). When this project already exists here at a different
-        // worktree, a root-anchored session is relocated to the local clone
-        // so OpenCode lists it there.
-        let mut relocate: Option<String> = None;
-        if let Some(project) = obj.get_mut("project").and_then(|p| p.as_object_mut()) {
-            expand_field(project, "worktree", tok);
-            let pid = project.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let remote_worktree =
-                project.get("worktree").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if pid != "global" && !remote_worktree.is_empty() && ses_dir == remote_worktree {
-                if let Ok(lw) = c.query_row(
-                    "SELECT worktree FROM project WHERE id = ?1",
-                    [&pid],
-                    |r| r.get::<_, String>(0),
-                ) {
-                    if lw != ses_dir && Path::new(&lw).is_dir() {
-                        relocate = Some(lw);
-                    }
-                }
+            Err(e) => {
+                crate::dlog::warn(|| {
+                    format!("opencode db: {id} not merged: {e:#} — rolled back, retried next sync")
+                });
+                report.failed += 1;
+                continue;
             }
-            crate::dbsync::insert_map_pk(c, "project", project, false, &["id"])?; // never clobber a local project row
-        }
-        if let Some(lw) = &relocate {
-            crate::dlog::debug(|| format!("opencode db: {id} relocated to local clone {lw}"));
-            if let Some(sm) = obj.get_mut("session").and_then(|v| v.as_object_mut()) {
-                sm.insert("directory".to_string(), serde_json::Value::String(lw.clone()));
-            }
-        }
-        let session = obj.get("session").and_then(|s| s.as_object()).unwrap();
-        // Replace the session ROW only when the remote row itself is newer —
-        // a remote that wins on child-row activity alone must not revert
-        // local session metadata (title, archive state, ...).
-        if local_ses_t.map(|t| remote_ses_t > t).unwrap_or(true) {
-            crate::dbsync::insert_map_pk(c, "session", session, true, &["id"])?;
-        }
-        for m in obj.get("messages").and_then(|v| v.as_array()).into_iter().flatten() {
-            if let Some(m) = m.as_object() {
-                crate::dbsync::insert_map_pk(c, "message", m, true, &["id"])?;
-            }
-        }
-        for p in obj.get("parts").and_then(|v| v.as_array()).into_iter().flatten() {
-            if let Some(p) = p.as_object() {
-                crate::dbsync::insert_map_pk(c, "part", p, true, &["id"])?;
-            }
+        };
+        if rows.kept > 0 {
+            crate::dlog::debug(|| format!("opencode db: {id} — {} newer local row(s) kept", rows.kept));
         }
         state.files.insert(
             logical.clone(),
@@ -567,7 +691,7 @@ pub fn db_apply(
         // OpenCode scopes global-project sessions to their exact directory:
         // a merged session stays invisible until that folder exists and is
         // opened. Say so, or "synced but not visible" reads as a bug.
-        if let Some(d) = session.get("directory").and_then(|v| v.as_str()) {
+        if let Some(d) = obj.get("session").and_then(|s| s.get("directory")).and_then(|v| v.as_str()) {
             if !Path::new(d).exists() {
                 awaiting_folder += 1;
                 let d = d.to_string();
