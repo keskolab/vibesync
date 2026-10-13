@@ -1,3 +1,4 @@
+mod login_item;
 mod syncer;
 mod updates;
 
@@ -596,12 +597,11 @@ struct SettingsState {
 
 #[tauri::command]
 fn get_settings(app: tauri::AppHandle) -> SettingsState {
-    use tauri_plugin_autostart::ManagerExt;
     let cfg = syncer::paths(&app)
         .ok()
         .and_then(|p| syncer::load_config(&p).ok().flatten());
     SettingsState {
-        autostart: app.autolaunch().is_enabled().unwrap_or(false),
+        autostart: login_item::is_enabled(&app),
         autosync: AUTOSYNC.load(Ordering::Relaxed),
         autosync_interval_mins: cfg
             .as_ref()
@@ -717,9 +717,7 @@ fn remove_project_mapping(app: tauri::AppHandle, name: String) -> Result<Setting
 
 #[tauri::command]
 fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    use tauri_plugin_autostart::ManagerExt;
-    let l = app.autolaunch();
-    if enabled { l.enable() } else { l.disable() }.map_err(|e| e.to_string())
+    login_item::set_enabled(&app, enabled)
 }
 
 #[tauri::command]
@@ -1080,20 +1078,9 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Self-healing login item: the LaunchAgent records an absolute
-            // executable path, which goes stale when the binary is renamed,
-            // moved, or rebuilt elsewhere — launchd then resurrects an
-            // ancient build as a frozen tray icon (live case: a two-day-old
-            // `vibesync-app` started at login long after the rename to
-            // `VibeSync`). Re-enabling rewrites the entry with the CURRENT
-            // executable on every launch.
-            {
-                use tauri_plugin_autostart::ManagerExt;
-                let l = app.autolaunch();
-                if l.is_enabled().unwrap_or(false) {
-                    let _ = l.enable();
-                }
-            }
+            // Self-healing login item: moves a pre-0.3.2 LaunchAgent to the
+            // app registration, or rewrites it with the current executable.
+            login_item::heal_on_launch(app.handle());
 
             let window = app.get_webview_window("main").expect("main window");
             // Belt-and-suspenders against the startup flash: stay hidden until
